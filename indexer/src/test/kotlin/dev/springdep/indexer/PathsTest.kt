@@ -1,5 +1,6 @@
 package dev.springdep.indexer
 
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -13,7 +14,7 @@ class PathsTest {
             osName = "Linux",
             userHome = "/home/user",
         )
-        assertEquals("/custom/springdep", paths.home.toString())
+        assertEquals(expected("/custom/springdep"), paths.home.toString())
     }
 
     @Test
@@ -23,13 +24,13 @@ class PathsTest {
             osName = "Mac OS X",
             userHome = "/Users/test",
         )
-        assertEquals("/environment", paths.home.toString())
+        assertEquals(expected("/environment"), paths.home.toString())
     }
 
     @Test
     fun `platform defaults follow specification`() {
         assertEquals(
-            "/Users/test/Library/Application Support/springdep",
+            expected("/Users/test/Library/Application Support/springdep"),
             SpringDepPaths.resolve(
                 environment = emptyMap(),
                 osName = "Mac OS X",
@@ -37,7 +38,7 @@ class PathsTest {
             ).home.toString(),
         )
         assertEquals(
-            "/xdg/springdep",
+            expected("/xdg/springdep"),
             SpringDepPaths.resolve(
                 environment = mapOf("XDG_DATA_HOME" to "/xdg"),
                 osName = "Linux",
@@ -45,7 +46,7 @@ class PathsTest {
             ).home.toString(),
         )
         assertEquals(
-            "/home/test/.local/share/springdep",
+            expected("/home/test/.local/share/springdep"),
             SpringDepPaths.resolve(
                 environment = emptyMap(),
                 osName = "Linux",
@@ -73,8 +74,11 @@ class PathsTest {
             userHome = "/Users/test",
         )
         assertEquals(
-            "/Users/test/Library/Application Support/springdep",
+            expected("/Users/test/Library/Application Support/springdep"),
             paths.home.toString(),
         )
     }
+
+    private fun expected(value: String): String =
+        Path.of(value).toAbsolutePath().normalize().toString()
 }

@@ -1,6 +1,7 @@
 package dev.springdep.indexer
 
 import java.nio.file.Files
+import java.io.File
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createFile
 import kotlin.test.Test
@@ -21,7 +22,7 @@ class JarSourceTest {
         )
         assertEquals(
             listOf(alpha.toAbsolutePath().normalize()),
-            JarSource.resolve(root.resolve("*.jar").toString()),
+            JarSource.resolve(root.toString() + File.separator + "*.jar"),
         )
         assertEquals(
             listOf(alpha, beta).map { it.toAbsolutePath().normalize() }.sortedBy { it.toString() },

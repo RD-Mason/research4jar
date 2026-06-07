@@ -21,6 +21,9 @@ object JarSource {
     }
 
     private fun resolveOne(value: String): List<Path> {
+        if (containsGlob(value)) {
+            return resolveGlob(value)
+        }
         val path = Paths.get(value)
         if (Files.isDirectory(path)) {
             return Files.walk(path).use { stream ->
@@ -30,19 +33,23 @@ object JarSource {
                     .collect(Collectors.toList())
             }
         }
-        if (!containsGlob(value)) {
-            return listOf(path)
-        }
+        return listOf(path)
+    }
 
-        val absolutePattern = path.toAbsolutePath().normalize().toString()
-        val matcher = FileSystems.getDefault().getPathMatcher("glob:$absolutePattern")
-        val root = globSearchRoot(path)
+    private fun resolveGlob(value: String): List<Path> {
+        val firstGlob = value.indexOfFirst { it == '*' || it == '?' || it == '[' || it == '{' }
+        val separator = value.substring(0, firstGlob)
+            .indexOfLast { it == '/' || it == '\\' }
+        val rootText = if (separator < 0) "." else value.substring(0, separator + 1)
+        val relativePattern = value.substring(separator + 1).replace('\\', '/')
+        val root = Paths.get(rootText).toAbsolutePath().normalize()
         if (!Files.exists(root)) return emptyList()
+        val matcher = FileSystems.getDefault().getPathMatcher("glob:$relativePattern")
 
         return Files.walk(root).use { stream ->
             stream
                 .filter(Files::isRegularFile)
-                .filter { matcher.matches(it.toAbsolutePath().normalize()) }
+                .filter { matcher.matches(root.relativize(it.toAbsolutePath().normalize())) }
                 .filter { it.fileName.toString().endsWith(".jar", ignoreCase = true) }
                 .collect(Collectors.toList())
         }
@@ -50,14 +57,4 @@ object JarSource {
 
     private fun containsGlob(value: String): Boolean =
         value.any { it == '*' || it == '?' || it == '[' || it == '{' }
-
-    private fun globSearchRoot(path: Path): Path {
-        val absolute = path.toAbsolutePath().normalize()
-        var root = absolute.root ?: Paths.get(".").toAbsolutePath().normalize()
-        for (part in absolute) {
-            if (containsGlob(part.toString())) break
-            root = root.resolve(part)
-        }
-        return if (Files.isDirectory(root)) root else root.parent ?: absolute.root
-    }
 }
