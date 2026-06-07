@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  indexer:
+    name: Indexer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Test indexer
+        shell: bash
+        run: ./gradlew :indexer:test
+
+  querier:
+    name: Querier (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: querier/go.mod
+          cache-dependency-path: querier/go.sum
+      - name: Build
+        working-directory: querier
+        run: go build ./...
+      - name: Test
+        working-directory: querier
+        run: go test ./...
+      - name: Vet
+        working-directory: querier
+        run: go vet ./...

@@ -1,0 +1,45 @@
+package dev.springdep.indexer
+
+import java.nio.file.Path
+import java.nio.file.Paths
+
+data class DataPaths(
+    val home: Path,
+    val manifest: Path = home.resolve("manifest.db"),
+    val shards: Path = home.resolve("shards"),
+    val sessions: Path = home.resolve("sessions"),
+)
+
+object SpringDepPaths {
+    fun resolve(
+        explicitHome: String? = null,
+        environment: Map<String, String> = System.getenv(),
+        osName: String = System.getProperty("os.name"),
+        userHome: String = System.getProperty("user.home"),
+    ): DataPaths {
+        val home = when {
+            !explicitHome.isNullOrBlank() -> Paths.get(explicitHome)
+            !environment["SPRINGDEP_HOME"].isNullOrBlank() ->
+                Paths.get(environment.getValue("SPRINGDEP_HOME"))
+
+            osName.lowercase().let { it.contains("mac") || it.contains("darwin") } ->
+                Paths.get(userHome, "Library", "Application Support", "springdep")
+
+            osName.lowercase().startsWith("windows") -> {
+                val localAppData = environment["LOCALAPPDATA"]
+                    ?: error("LOCALAPPDATA is required on Windows when SPRINGDEP_HOME is unset")
+                Paths.get(localAppData, "springdep")
+            }
+
+            else -> {
+                val xdg = environment["XDG_DATA_HOME"]
+                if (xdg.isNullOrBlank()) {
+                    Paths.get(userHome, ".local", "share", "springdep")
+                } else {
+                    Paths.get(xdg, "springdep")
+                }
+            }
+        }
+        return DataPaths(home.toAbsolutePath().normalize())
+    }
+}

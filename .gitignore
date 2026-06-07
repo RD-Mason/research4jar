@@ -1,0 +1,28 @@
+# Gradle and Kotlin
+.gradle/
+.kotlin/
+**/build/
+*.class
+
+# Go
+/querier/bin/
+/querier/springdep
+/build/bin/
+
+# SpringDep runtime data
+.springdep/
+*.db
+*.db-shm
+*.db-wal
+shards/
+sessions/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Operating systems
+.DS_Store
+Thumbs.db
