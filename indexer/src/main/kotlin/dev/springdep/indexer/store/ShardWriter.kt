@@ -1,5 +1,6 @@
 package dev.springdep.indexer.store
 
+import dev.springdep.indexer.SpringDepVersions
 import dev.springdep.indexer.extract.ExtractedJar
 import java.nio.file.Files
 import java.nio.file.Path
@@ -193,12 +194,14 @@ class ShardWriter {
             """
             INSERT INTO shard_meta(
               jar_coordinate, jar_sha256, extractor_version, schema_version, created_at, class_count
-            ) VALUES (?, ?, 2, 2, 0, ?)
+            ) VALUES (?, ?, ?, ?, 0, ?)
             """.trimIndent(),
         ).use { statement ->
             statement.setNullableString(1, extracted.coordinate)
             statement.setString(2, jarSha256)
-            statement.setInt(3, extracted.classes.size)
+            statement.setInt(3, SpringDepVersions.EXTRACTOR)
+            statement.setInt(4, SpringDepVersions.SCHEMA)
+            statement.setInt(5, extracted.classes.size)
             statement.executeUpdate()
         }
     }
@@ -298,7 +301,19 @@ class ShardWriter {
             ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
         ).use { statement ->
-            extracted.configProperties.forEachIndexed { index, property ->
+            extracted.configProperties.sortedWith(
+                // Nullable selectors compare via null-aware compareValues (null sorts
+                // before any non-null), so SQL NULL and "" stay distinct — a stable
+                // total order that does not depend on upstream input order.
+                compareBy(
+                    { it.name },
+                    { it.prefix },
+                    { it.typeFqn },
+                    { it.defaultValue },
+                    { it.sourceFqn },
+                    { it.description },
+                ),
+            ).forEachIndexed { index, property ->
                 statement.setInt(1, index + 1)
                 statement.setNullableString(2, property.prefix)
                 statement.setString(3, property.name)

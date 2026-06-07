@@ -2,8 +2,10 @@ package dev.springdep.indexer.store
 
 import dev.springdep.indexer.Hashing
 import dev.springdep.indexer.extract.ConfigProperty
+import dev.springdep.indexer.extract.ExtractedAnnotation
 import dev.springdep.indexer.extract.ExtractedClass
 import dev.springdep.indexer.extract.ExtractedJar
+import dev.springdep.indexer.extract.ExtractedMethod
 import dev.springdep.indexer.extract.SpiRegistration
 import java.nio.file.Files
 import java.sql.DriverManager
@@ -86,6 +88,87 @@ class StoreTest {
                 assertTrue(rows.next())
                 assertEquals("demo.value", rows.getString("name"))
                 assertEquals("abc123@2", rows.getString("source_shard_id"))
+            }
+        }
+    }
+
+    @Test
+    fun `config property shard order is stable across input order and null vs empty`() {
+        val root = Files.createTempDirectory("springdep-cfg-determinism")
+        val nullPrefix = ConfigProperty(
+            prefix = null,
+            name = "demo.value",
+            typeFqn = null,
+            defaultValue = null,
+            description = null,
+            sourceFqn = null,
+        )
+        val emptyPrefix = nullPrefix.copy(prefix = "")
+        val forward = root.resolve("forward.db")
+        val reversed = root.resolve("reversed.db")
+        ShardWriter().write(
+            forward,
+            "cfg123",
+            ExtractedJar(coordinate = null, configProperties = listOf(nullPrefix, emptyPrefix)),
+        )
+        ShardWriter().write(
+            reversed,
+            "cfg123",
+            ExtractedJar(coordinate = null, configProperties = listOf(emptyPrefix, nullPrefix)),
+        )
+
+        assertEquals(Hashing.sha256(forward), Hashing.sha256(reversed))
+    }
+
+    @Test
+    fun `session keeps only class-target annotations`() {
+        val root = Files.createTempDirectory("springdep-session-ann")
+        val extracted = ExtractedJar(
+            coordinate = null,
+            classes = listOf(
+                ExtractedClass(
+                    fqn = "example.Demo",
+                    kind = "class",
+                    superFqn = null,
+                    modifiers = 1,
+                    isAbstract = false,
+                    sourceFile = null,
+                    interfaces = emptyList(),
+                ),
+            ),
+            methods = listOf(
+                ExtractedMethod("example.Demo", "bean", "()V", null, 1),
+            ),
+            annotations = listOf(
+                ExtractedAnnotation(
+                    targetKind = "class",
+                    classFqn = "example.Demo",
+                    annotationFqn = "example.OnClass",
+                    attributes = "{}",
+                ),
+                ExtractedAnnotation(
+                    targetKind = "method",
+                    classFqn = "example.Demo",
+                    methodName = "bean",
+                    methodDescriptor = "()V",
+                    annotationFqn = "example.OnMethod",
+                    attributes = "{}",
+                ),
+            ),
+        )
+        val shard = root.resolve("shard.db")
+        ShardWriter().write(shard, "sha@2", extracted)
+        val session = root.resolve("session.db")
+        SessionBuilder().build(session, listOf(SessionShard("sha@2", shard)))
+
+        DriverManager.getConnection("jdbc:sqlite:$session").use { connection ->
+            connection.createStatement().executeQuery(
+                "SELECT target_kind, COUNT(*) FROM annotations GROUP BY target_kind",
+            ).use { rows ->
+                val byKind = buildMap<String, Int> {
+                    while (rows.next()) put(rows.getString(1), rows.getInt(2))
+                }
+                assertEquals(mapOf("class" to 1), byKind)
             }
         }
     }

@@ -33,6 +33,9 @@ class BytecodeExtractor(
         val warnings = mutableListOf<String>()
         zip.entries().asSequence()
             .filter { !it.isDirectory && it.name.endsWith(".class") }
+            // Base-only: a multi-release jar's META-INF/versions/<N>/ classes would
+            // otherwise re-extract the same FQN and produce duplicate rows.
+            .filter { !it.name.startsWith("META-INF/versions/") }
             .sortedBy { it.name }
             .forEach { entry ->
                 try {

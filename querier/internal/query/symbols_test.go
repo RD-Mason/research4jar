@@ -44,6 +44,32 @@ func TestFindImplementationsUsesSymbolicInterfaceReference(t *testing.T) {
 	}
 }
 
+func TestFindImplementationsMatchesDirectSuperclass(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(root, "sessions", "fingerprint.db")
+	manifestPath := filepath.Join(root, "manifest.db")
+	createSymbolSession(t, sessionPath)
+	createSymbolManifest(t, manifestPath)
+
+	response, err := FindImplementations(
+		context.Background(),
+		symbolPointer(sessionPath),
+		manifestPath,
+		"example.BaseGateway",
+		1,
+		20,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 || len(response.Results) != 1 {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+	if response.Results[0].FQN != "other.DirectSubclass" {
+		t.Fatalf("subclass = %q, want other.DirectSubclass", response.Results[0].FQN)
+	}
+}
+
 func TestFindByAnnotationReturnsStructuredAttributes(t *testing.T) {
 	root := t.TempDir()
 	sessionPath := filepath.Join(root, "sessions", "fingerprint.db")
@@ -118,6 +144,9 @@ func createSymbolSession(t *testing.T, path string) {
 		  (1, 'example.Contract', 'interface', 'api@2'),
 		  (2, 'other.DirectImplementation', 'class', 'impl@2'),
 		  (3, 'other.Marked', 'class', 'marked@2')`,
+		`INSERT INTO classes (id, fqn, kind, super_fqn, source_shard_id) VALUES
+		  (4, 'example.BaseGateway', 'class', NULL, 'api@2'),
+		  (5, 'other.DirectSubclass', 'class', 'example.BaseGateway', 'impl@2')`,
 		`INSERT INTO class_interfaces VALUES
 		  (2, 'example.Contract', 'impl@2')`,
 		`INSERT INTO annotations

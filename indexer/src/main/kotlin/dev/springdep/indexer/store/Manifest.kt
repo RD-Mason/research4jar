@@ -1,5 +1,6 @@
 package dev.springdep.indexer.store
 
+import dev.springdep.indexer.SpringDepVersions
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
@@ -76,18 +77,19 @@ class Manifest(
                 INSERT OR IGNORE INTO shards(
                   shard_id, jar_coordinate, jar_filename, jar_sha256, extractor_version,
                   shard_path, shard_checksum, size_bytes, created_at, last_access_at, source
-                ) VALUES (?, ?, ?, ?, 2, ?, ?, ?, ?, ?, 'local')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'local')
                 """.trimIndent(),
             ).use { statement ->
                 statement.setString(1, shardId)
                 statement.setString(2, coordinate)
                 statement.setString(3, jarFilename)
                 statement.setString(4, jarSha256)
-                statement.setString(5, shardPath.toAbsolutePath().normalize().toString())
-                statement.setString(6, shardChecksum)
-                statement.setLong(7, sizeBytes)
-                statement.setLong(8, now)
+                statement.setInt(5, SpringDepVersions.EXTRACTOR)
+                statement.setString(6, shardPath.toAbsolutePath().normalize().toString())
+                statement.setString(7, shardChecksum)
+                statement.setLong(8, sizeBytes)
                 statement.setLong(9, now)
+                statement.setLong(10, now)
                 statement.executeUpdate()
             }
         }

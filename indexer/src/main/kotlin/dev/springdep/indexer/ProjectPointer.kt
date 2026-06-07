@@ -15,8 +15,8 @@ data class Coverage(
 )
 
 data class ProjectIndex(
-    val schema_version: Int = 2,
-    val extractor_version: Int = 2,
+    val schema_version: Int = SpringDepVersions.SCHEMA,
+    val extractor_version: Int = SpringDepVersions.EXTRACTOR,
     val classpath_fingerprint: String,
     val session_db_path: String,
     val built_at: Long = Instant.now().epochSecond,

@@ -208,6 +208,26 @@ class ExtractorsTest {
         assertTrue(extracted.warnings.single().contains("future/FutureClass.class"))
     }
 
+    @Test
+    fun `multi-release jar extracts base classes only`() {
+        val jar = Files.createTempFile("springdep-mrjar", ".jar")
+        ZipOutputStream(Files.newOutputStream(jar)).use { zip ->
+            zip.putNextEntry(ZipEntry("example/DemoConfig.class"))
+            zip.write(demoConfigurationClass())
+            zip.closeEntry()
+            // Same FQN under META-INF/versions/ must NOT yield a duplicate class row.
+            zip.putNextEntry(ZipEntry("META-INF/versions/17/example/DemoConfig.class"))
+            zip.write(demoConfigurationClass())
+            zip.closeEntry()
+        }
+
+        val extracted = ZipFile(jar.toFile()).use(JarExtractor(jacksonObjectMapper())::extract)
+        assertEquals(
+            listOf("example.DemoConfig"),
+            extracted.classes.map(ExtractedClass::fqn),
+        )
+    }
+
     private fun demoConfigurationClass(): ByteArray {
         val writer = ClassWriter(0)
         writer.visit(

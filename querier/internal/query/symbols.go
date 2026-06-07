@@ -43,16 +43,17 @@ func FindImplementations(
 		manifestPath,
 		"find-implementations",
 		targetFQN,
+		[]any{targetFQN, targetFQN},
 		page,
 		pageSize,
 		`SELECT COUNT(*)
 		 FROM classes c
-		 JOIN class_interfaces ci ON ci.class_id = c.id
-		 WHERE ci.interface_fqn = ?`,
+		 WHERE c.id IN (SELECT class_id FROM class_interfaces WHERE interface_fqn = ?)
+		    OR c.super_fqn = ?`,
 		`SELECT c.fqn, c.source_shard_id
 		 FROM classes c
-		 JOIN class_interfaces ci ON ci.class_id = c.id
-		 WHERE ci.interface_fqn = ?
+		 WHERE c.id IN (SELECT class_id FROM class_interfaces WHERE interface_fqn = ?)
+		    OR c.super_fqn = ?
 		 ORDER BY c.fqn, c.source_shard_id
 		 LIMIT ? OFFSET ?`,
 		false,
@@ -73,6 +74,7 @@ func FindByAnnotation(
 		manifestPath,
 		"find-by-annotation",
 		annotationFQN,
+		[]any{annotationFQN},
 		page,
 		pageSize,
 		`SELECT COUNT(*)
@@ -95,6 +97,7 @@ func findSymbols(
 	manifestPath string,
 	command string,
 	arg string,
+	bindArgs []any,
 	page int,
 	pageSize int,
 	countSQL string,
@@ -108,16 +111,11 @@ func findSymbols(
 	defer session.Close()
 
 	var total int
-	if err := session.QueryRowContext(ctx, countSQL, arg).Scan(&total); err != nil {
+	if err := session.QueryRowContext(ctx, countSQL, bindArgs...).Scan(&total); err != nil {
 		return SymbolResponse{}, fmt.Errorf("count %s results: %w", command, err)
 	}
-	rows, err := session.QueryContext(
-		ctx,
-		selectSQL,
-		arg,
-		pageSize,
-		(page-1)*pageSize,
-	)
+	selectArgs := append(append([]any{}, bindArgs...), pageSize, (page-1)*pageSize)
+	rows, err := session.QueryContext(ctx, selectSQL, selectArgs...)
 	if err != nil {
 		return SymbolResponse{}, fmt.Errorf("query %s results: %w", command, err)
 	}

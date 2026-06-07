@@ -86,13 +86,13 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - All `spring.factories` keys, auto-configuration imports, and Java service registrations
 - Classes, direct interfaces, methods, direct class/method annotations, `@Bean` methods, Spring conditions, and string constants
 - Deterministic, atomic, content-addressed shards with incremental cache hits
-- Cross-jar direct implementation lookup
+- Cross-jar direct implementation and direct-subclass lookup
 - Direct class annotation lookup with structured annotation attributes
 - Linux, macOS, and Windows-compatible data paths; pure-Go SQLite querying without CGO
 
 ## Known Limitations
 
-- `find-implementations` matches only interfaces directly declared by a class or interface. It does not traverse parent classes or subinterfaces yet.
+- `find-implementations` matches the interfaces a class directly declares plus its direct superclass. It does not traverse parent-class chains or subinterfaces (transitive closure) yet.
 - `find-by-annotation` matches only annotations directly present on a class. Querying `@Component` does not include classes marked only with `@Service`, `@Repository`, or `@Controller`.
 - Meta-annotation traversal, alias resolution, FTS, broader query commands, build-tool classpath discovery, MCP integration, and shard distribution are planned work.
 - `--fat-jar` is not implemented; extract `BOOT-INF/lib/*.jar` first.

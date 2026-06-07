@@ -166,10 +166,9 @@ class SessionBuilder {
                 INSERT INTO annotations(
                   target_kind, target_id, annotation_fqn, attributes, source_shard_id
                 )
-                SELECT target_kind,
-                       CASE WHEN target_kind = 'class' THEN target_id + ? ELSE target_id END,
-                       annotation_fqn, attributes, ?
+                SELECT target_kind, target_id + ?, annotation_fqn, attributes, ?
                 FROM shard.annotations
+                WHERE target_kind = 'class'
                 ORDER BY id
                 """.trimIndent(),
             ).use { statement ->
@@ -193,6 +192,7 @@ class SessionBuilder {
             statement.execute("CREATE INDEX idx_s_cfg_name ON config_properties(name)")
             statement.execute("CREATE INDEX idx_s_spi_mech ON spi_registrations(mechanism)")
             statement.execute("CREATE INDEX idx_s_classes_fqn ON classes(fqn)")
+            statement.execute("CREATE INDEX idx_s_classes_super ON classes(super_fqn)")
             statement.execute("CREATE INDEX idx_s_ci_iface ON class_interfaces(interface_fqn)")
             statement.execute(
                 "CREATE INDEX idx_s_ann_fqn ON annotations(annotation_fqn)",

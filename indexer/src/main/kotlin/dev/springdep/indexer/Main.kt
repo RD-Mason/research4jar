@@ -16,7 +16,7 @@ import java.util.zip.ZipFile
 import kotlin.io.path.name
 import kotlin.system.exitProcess
 
-private const val EXTRACTOR_VERSION = 2
+private const val EXTRACTOR_VERSION = SpringDepVersions.EXTRACTOR
 
 data class IndexStatistics(
     val jars_total: Int,
