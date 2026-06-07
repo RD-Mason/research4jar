@@ -58,8 +58,12 @@ func TestResolveFor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Home != filepath.Clean(test.want) {
-				t.Fatalf("Home = %q, want %q", got.Home, test.want)
+			want, err := filepath.Abs(filepath.FromSlash(test.want))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Home != want {
+				t.Fatalf("Home = %q, want %q", got.Home, want)
 			}
 			if got.Manifest != filepath.Join(got.Home, "manifest.db") {
 				t.Fatalf("Manifest = %q", got.Manifest)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 
 	"dev.springdep/querier/internal/project"
 	_ "modernc.org/sqlite"
@@ -188,7 +189,11 @@ func openReadOnly(path string, immutable bool) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	uri := &url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	slashPath := filepath.ToSlash(absolute)
+	if filepath.VolumeName(absolute) != "" && !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	uri := &url.URL{Scheme: "file", Path: slashPath}
 	values := uri.Query()
 	values.Set("mode", "ro")
 	if immutable {
