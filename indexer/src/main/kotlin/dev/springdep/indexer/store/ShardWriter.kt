@@ -48,8 +48,13 @@ class ShardWriter {
     private fun configure(connection: Connection) {
         connection.createStatement().use { statement ->
             statement.execute("PRAGMA page_size=4096")
-            statement.execute("PRAGMA journal_mode=DELETE")
-            statement.execute("PRAGMA synchronous=FULL")
+            // The temporary file is discarded on any failure and only becomes
+            // visible through AtomicFiles.commit (fsync + atomic rename), so an
+            // on-disk journal and per-statement syncs buy nothing during the
+            // build. MEMORY keeps ROLLBACK working for the error path, and both
+            // pragmas leave the resulting file bytes deterministic.
+            statement.execute("PRAGMA journal_mode=MEMORY")
+            statement.execute("PRAGMA synchronous=OFF")
             statement.execute("PRAGMA foreign_keys=ON")
         }
     }

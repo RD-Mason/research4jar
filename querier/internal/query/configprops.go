@@ -117,9 +117,12 @@ func FindConfigProperties(
 		return ConfigPropertiesResponse{}, fmt.Errorf("iterate config properties: %w", err)
 	}
 
-	sources, err := loadSourceJars(ctx, manifestPath)
-	if err != nil {
-		return ConfigPropertiesResponse{}, err
+	var sources map[string]string
+	if len(pending) > 0 {
+		sources, err = loadSourceJars(ctx, manifestPath)
+		if err != nil {
+			return ConfigPropertiesResponse{}, err
+		}
 	}
 	results := make([]ConfigProperty, 0, len(pending))
 	for _, item := range pending {
@@ -198,6 +201,10 @@ func openReadOnly(path string, immutable bool) (*sql.DB, error) {
 	values.Set("mode", "ro")
 	if immutable {
 		values.Set("immutable", "1")
+	} else {
+		// Mutable databases (the manifest) may be written by a concurrent
+		// indexer run; wait out short write locks instead of failing.
+		values.Add("_pragma", "busy_timeout(5000)")
 	}
 	uri.RawQuery = values.Encode()
 

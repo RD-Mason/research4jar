@@ -11,6 +11,16 @@ data class SessionShard(
 )
 
 class SessionBuilder {
+    /**
+     * Sessions are content-addressed by the classpath fingerprint in the file
+     * name, so an existing structurally-sound session is byte-equivalent to
+     * whatever a rebuild would produce and can be reused as-is.
+     */
+    fun buildIfAbsent(target: Path, shards: List<SessionShard>) {
+        if (isReusable(target)) return
+        build(target, shards)
+    }
+
     fun build(target: Path, shards: List<SessionShard>) {
         val temporary = AtomicFiles.temporaryTarget(target)
         try {
@@ -20,6 +30,7 @@ class SessionBuilder {
                 createTables(connection)
                 shards.sortedBy(SessionShard::shardId).forEach { merge(connection, it) }
                 createIndexes(connection)
+                connection.createStatement().use { it.execute("ANALYZE") }
             }
             AtomicFiles.commit(temporary, target)
         } finally {
@@ -27,10 +38,38 @@ class SessionBuilder {
         }
     }
 
+    private fun isReusable(target: Path): Boolean {
+        if (!Files.isRegularFile(target)) return false
+        return try {
+            DriverManager.getConnection("jdbc:sqlite:${target.toAbsolutePath()}")
+                .use { connection ->
+                    connection.createStatement().use { statement ->
+                        statement.executeQuery(
+                            """
+                            SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (
+                              'config_properties', 'spi_registrations', 'classes',
+                              'class_interfaces', 'annotations'
+                            )
+                            """.trimIndent(),
+                        ).use { rows ->
+                            rows.next()
+                            rows.getInt(1) == 5
+                        }
+                    }
+                }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun configure(connection: Connection) {
         connection.createStatement().use { statement ->
-            statement.execute("PRAGMA journal_mode=DELETE")
-            statement.execute("PRAGMA synchronous=FULL")
+            // The temporary file is discarded on any failure and only becomes
+            // visible through AtomicFiles.commit (fsync + atomic rename), so an
+            // on-disk journal and per-statement syncs buy nothing during the
+            // build. MEMORY keeps ROLLBACK working for the merge error path.
+            statement.execute("PRAGMA journal_mode=MEMORY")
+            statement.execute("PRAGMA synchronous=OFF")
         }
     }
 

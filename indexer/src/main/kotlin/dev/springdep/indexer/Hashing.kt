@@ -7,6 +7,9 @@ import java.nio.file.Path
 import java.security.MessageDigest
 
 object Hashing {
+    private const val STREAM_BUFFER_SIZE = 64 * 1024
+    private val HEX_DIGITS = "0123456789abcdef".toCharArray()
+
     fun sha256(path: Path): String =
         Files.newInputStream(path).use(::sha256)
 
@@ -15,7 +18,7 @@ object Hashing {
 
     fun sha256(input: InputStream): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        val buffer = ByteArray(STREAM_BUFFER_SIZE)
         while (true) {
             val read = input.read(buffer)
             if (read < 0) break
@@ -27,5 +30,13 @@ object Hashing {
     private fun digest(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
 
-    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+    private fun ByteArray.toHex(): String {
+        val chars = CharArray(size * 2)
+        forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            chars[index * 2] = HEX_DIGITS[value ushr 4]
+            chars[index * 2 + 1] = HEX_DIGITS[value and 0x0f]
+        }
+        return String(chars)
+    }
 }

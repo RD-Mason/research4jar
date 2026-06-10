@@ -72,48 +72,66 @@ private fun runIndex(options: Options) {
 
     val inputPaths = JarSource.resolve(options.jars)
     val missing = mutableListOf<String>()
-    val uniqueByHash = linkedMapOf<String, HashedJar>()
-    for (path in inputPaths) {
-        try {
-            val hash = Hashing.sha256(path)
-            uniqueByHash.putIfAbsent(hash, HashedJar(path, hash))
-        } catch (exception: Exception) {
-            warn("${path}: cannot read jar: ${exception.message}")
-            missing += path.fileName?.toString() ?: path.toString()
-        }
-    }
-
     val manifest = Manifest(dataPaths.manifest)
     val selectedShards = mutableListOf<SessionShard>()
     var skipped = 0
     var newlyIndexed = 0
     val pending = mutableListOf<HashedJar>()
 
-    for ((_, jar) in uniqueByHash) {
-        val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
-        val existing = manifest.find(shardId)
-        if (existing != null && validShard(existing.shardPath, existing.shardChecksum)) {
-            selectedShards += SessionShard(shardId, existing.shardPath)
-            skipped++
-            continue
-        }
-        if (existing != null) {
-            warn("${jar.path}: cached shard failed checksum validation; rebuilding")
-            manifest.remove(shardId)
-        }
-        pending += jar
-    }
-
-    val threadCount = pending.size.coerceAtMost(Runtime.getRuntime().availableProcessors()).coerceAtLeast(1)
+    val threadCount = inputPaths.size
+        .coerceAtMost(Runtime.getRuntime().availableProcessors())
+        .coerceAtLeast(1)
     val executor = Executors.newFixedThreadPool(threadCount)
     try {
+        // Hashing dominates the warm path (every jar plus every cached shard is
+        // re-hashed on each run), so both validation phases fan out to workers.
+        val uniqueByHash = linkedMapOf<String, HashedJar>()
+        inputPaths
+            .map { path -> path to executor.submit(Callable { Hashing.sha256(path) }) }
+            .forEach { (path, future) ->
+                try {
+                    val hash = future.get()
+                    uniqueByHash.putIfAbsent(hash, HashedJar(path, hash))
+                } catch (exception: Exception) {
+                    warn("${path}: cannot read jar: ${exception.cause?.message ?: exception.message}")
+                    missing += path.fileName?.toString() ?: path.toString()
+                }
+            }
+
+        uniqueByHash.values
+            .map { jar ->
+                val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
+                val existing = manifest.find(shardId)
+                val valid = if (existing == null) {
+                    null
+                } else {
+                    executor.submit(Callable { validShard(existing.shardPath, existing.shardChecksum) })
+                }
+                Triple(jar, existing, valid)
+            }
+            .forEach { (jar, existing, valid) ->
+                if (existing != null && valid?.get() == true) {
+                    selectedShards += SessionShard("${jar.sha256}@$EXTRACTOR_VERSION", existing.shardPath)
+                    skipped++
+                    return@forEach
+                }
+                if (existing != null) {
+                    warn("${jar.path}: cached shard failed checksum validation; rebuilding")
+                    manifest.remove(existing.shardId)
+                }
+                pending += jar
+            }
+
+        // ObjectMapper is thread-safe for the read/write calls used here;
+        // BytecodeExtractor copies it before changing serialization features.
+        val sharedMapper = jacksonObjectMapper()
         val futures = pending.map { jar ->
             executor.submit(Callable {
                 val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
                 val expectedPath = dataPaths.shards.resolve("$shardId.db").toAbsolutePath().normalize()
                 try {
                     val extracted = ZipFile(jar.path.toFile()).use {
-                        JarExtractor(jacksonObjectMapper()).extract(it)
+                        JarExtractor(sharedMapper).extract(it)
                     }
                     ShardWriter().write(expectedPath, jar.sha256, extracted)
                     val checksum = Hashing.sha256(expectedPath)
@@ -157,7 +175,7 @@ private fun runIndex(options: Options) {
     val sortedShardIds = selectedShards.map(SessionShard::shardId).sorted()
     val fingerprint = Hashing.sha256(sortedShardIds.joinToString("\n")).take(16)
     val sessionPath = dataPaths.sessions.resolve("$fingerprint.db").toAbsolutePath().normalize()
-    SessionBuilder().build(sessionPath, selectedShards)
+    SessionBuilder().buildIfAbsent(sessionPath, selectedShards)
 
     val jarsIndexed = selectedShards.size
     val jarsTotal = jarsIndexed + missing.size
