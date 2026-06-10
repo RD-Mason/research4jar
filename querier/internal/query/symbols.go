@@ -46,14 +46,20 @@ func FindImplementations(
 		[]any{targetFQN, targetFQN},
 		page,
 		pageSize,
-		`SELECT COUNT(*)
-		 FROM classes c
-		 WHERE c.id IN (SELECT class_id FROM class_interfaces WHERE interface_fqn = ?)
-		    OR c.super_fqn = ?`,
+		// UNION of two independently indexed lookups (idx_s_ci_iface and
+		// idx_s_classes_super); the OR form degrades to a full classes scan.
+		`SELECT COUNT(*) FROM (
+		   SELECT class_id FROM class_interfaces WHERE interface_fqn = ?
+		   UNION
+		   SELECT id FROM classes WHERE super_fqn = ?
+		 )`,
 		`SELECT c.fqn, c.source_shard_id
 		 FROM classes c
-		 WHERE c.id IN (SELECT class_id FROM class_interfaces WHERE interface_fqn = ?)
-		    OR c.super_fqn = ?
+		 WHERE c.id IN (
+		   SELECT class_id FROM class_interfaces WHERE interface_fqn = ?
+		   UNION
+		   SELECT id FROM classes WHERE super_fqn = ?
+		 )
 		 ORDER BY c.fqn, c.source_shard_id
 		 LIMIT ? OFFSET ?`,
 		false,
@@ -146,9 +152,12 @@ func findSymbols(
 		return SymbolResponse{}, fmt.Errorf("iterate %s results: %w", command, err)
 	}
 
-	sources, err := loadSourceJars(ctx, manifestPath)
-	if err != nil {
-		return SymbolResponse{}, err
+	var sources map[string]string
+	if len(pending) > 0 {
+		sources, err = loadSourceJars(ctx, manifestPath)
+		if err != nil {
+			return SymbolResponse{}, err
+		}
 	}
 	results := make([]SymbolResult, 0, len(pending))
 	for _, item := range pending {

@@ -19,6 +19,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Session databases now merge classes, direct interfaces, and annotations.
 - M0 shards automatically age out of selection through the `@2` shard identity.
 
+### Performance
+
+- Jar hashing and cached-shard checksum validation now run in parallel across all cores instead of sequentially, cutting the warm-path cost of large classpaths.
+- Unchanged classpaths reuse the existing fingerprint-addressed session database instead of rebuilding it on every run.
+- Shard and session builds write through an in-memory journal with syncs deferred to the atomic commit, removing redundant journal and fsync I/O while keeping byte-deterministic output.
+- Session databases ship `ANALYZE` statistics so the querier's planner picks indexed plans.
+- `find-implementations` uses an index-backed `UNION` instead of an `OR` predicate, keeping plans robust on large sessions.
+- Queries with no results skip opening the manifest database; manifest reads tolerate concurrent indexer writes via a busy timeout.
+- SHA-256 hex encoding uses a lookup table instead of per-byte string formatting.
+
 ## [0.1.0] - 2026-06-07
 
 ### Added
