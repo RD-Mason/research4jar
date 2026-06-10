@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added (M2 + distribution)
+
+- Transitive `find-implementations`: query-time recursive traversal over superclass chains and subinterface graphs across all indexed jars (`--direct` restores declared-only matching).
+- Meta-annotation expansion in `find-by-annotation`: querying `@Component` now returns `@Service`/`@Repository`/`@Controller` classes; results carry `matched_annotation` provenance (`--direct` opts out; `@AliasFor` merging is out of scope).
+- New commands: `get-class`, `get-bean-definitions`, `explain-conditional`, `find-string`, `list-extension-points`.
+- Session databases now merge `methods`, `bean_definitions`, `conditions`, `string_constants`, and method-target annotations, with a `session_meta` version stamp; pre-M2 sessions rebuild automatically on the next index run.
+- `springdep index`: drives the JVM indexer directly and auto-resolves the runtime classpath via `mvnw`/`mvn` or `gradlew`/`gradle` when `--jars` is omitted.
+- `springdep mcp`: stdio MCP server exposing indexing and all queries as tools for Cursor, Claude Code, and other MCP hosts.
+- `make install` / `install.sh`: installs `springdep` and the indexer under a prefix (default `~/.local`) for use from any project.
+
 ### Added
 
 - ASM-based extraction of classes, interfaces, methods, direct annotations, `@Bean` methods, Spring conditions, and string constants.

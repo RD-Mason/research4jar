@@ -26,42 +26,59 @@ SQLite files are the only contract between the Kotlin indexer and Go querier.
 - Go 1.23 or newer
 - Bash for the end-to-end test script
 
-## Build
+## Install
 
 ```bash
-make build
+./install.sh                  # builds and installs to ~/.local (override with PREFIX=...)
 ```
 
-Artifacts:
-
-- `indexer/build/install/springdep-index/bin/springdep-index`
-- `build/bin/springdep`
+Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Requirements: JDK 17+ and Go 1.23+ to build; only a JRE 17+ at runtime. Make sure `$PREFIX/bin` is on your PATH.
 
 ## Quick Start
 
-Index a directory, glob, or comma-separated list of dependency jars:
+Inside any Maven or Gradle Spring Boot project:
 
 ```bash
-indexer/build/install/springdep-index/bin/springdep-index \
-  --jars /path/to/dependency-jars \
-  --project-dir /path/to/project
+springdep index                # resolves the runtime classpath via mvnw/gradlew, indexes every jar
+springdep find-config-properties spring.datasource
+springdep find-implementations jakarta.servlet.Filter
+springdep find-by-annotation org.springframework.stereotype.Component
+springdep get-class org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+springdep get-bean-definitions javax.sql.DataSource
+springdep explain-conditional org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+springdep find-string X-Forwarded-For
+springdep list-extension-points
 ```
 
-Run queries from the indexed project or pass `--project-dir` explicitly:
+`springdep index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache and unchanged classpaths reuse the session database.
+
+`find-implementations` is transitive by default (subinterface and superclass chains across jars); `find-by-annotation` expands meta-annotations by default (querying `@Component` finds `@Service` classes). Pass `--direct` for declared-only matching.
+
+All query commands support `--format json|text`, `--page`, `--page-size`, and `--project-dir`. Use `--home` or `SPRINGDEP_HOME` to override the global data directory.
+
+## Use from Cursor, Claude Code, or any MCP host
+
+`springdep mcp` runs a stdio MCP server exposing indexing and every query as tools, so coding agents call SpringDep directly.
+
+**Cursor** — add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "springdep": { "command": "springdep", "args": ["mcp"] }
+  }
+}
+```
+
+**Claude Code**:
 
 ```bash
-build/bin/springdep find-config-properties spring.datasource \
-  --project-dir /path/to/project
-
-build/bin/springdep find-implementations jakarta.servlet.Filter \
-  --project-dir /path/to/project
-
-build/bin/springdep find-by-annotation \
-  org.springframework.boot.context.properties.ConfigurationProperties \
-  --project-dir /path/to/project
+claude mcp add springdep -- springdep mcp
 ```
 
-All commands support `--format json|text`, `--page`, and `--page-size`. Use `--home` or `SPRINGDEP_HOME` to override the global data directory.
+Tools exposed: `index_project` (auto-resolves the classpath via Maven/Gradle), `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory.
+
+For CLI-driven agents without MCP, `springdep index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
 
 ## Coverage
 
@@ -84,17 +101,19 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 
 - Spring configuration metadata and Maven coordinates
 - All `spring.factories` keys, auto-configuration imports, and Java service registrations
-- Classes, direct interfaces, methods, direct class/method annotations, `@Bean` methods, Spring conditions, and string constants
-- Deterministic, atomic, content-addressed shards with incremental cache hits
-- Cross-jar direct implementation and direct-subclass lookup
-- Direct class annotation lookup with structured annotation attributes
+- Classes, interfaces, methods, class/method annotations, `@Bean` methods, Spring conditions, and string constants
+- Deterministic, atomic, content-addressed shards with incremental cache hits and session reuse
+- Transitive cross-jar implementation lookup (query-time recursive traversal over symbolic references)
+- Meta-annotation expansion at query time (`@Component` finds `@Service`/`@Repository`/`@Controller` classes)
+- Class detail, bean-definition, conditional-explanation, string-constant, and extension-point queries
+- Maven/Gradle classpath auto-discovery (`springdep index`) and an MCP stdio server (`springdep mcp`)
 - Linux, macOS, and Windows-compatible data paths; pure-Go SQLite querying without CGO
 
 ## Known Limitations
 
-- `find-implementations` matches the interfaces a class directly declares plus its direct superclass. It does not traverse parent-class chains or subinterfaces (transitive closure) yet.
-- `find-by-annotation` matches only annotations directly present on a class. Querying `@Component` does not include classes marked only with `@Service`, `@Repository`, or `@Controller`.
-- Meta-annotation traversal, alias resolution, FTS, broader query commands, build-tool classpath discovery, MCP integration, and shard distribution are planned work.
+- `find-by-annotation` expands meta-annotations but does not merge `@AliasFor` attribute aliases; attributes are reported as written on the matched annotation.
+- `find-string` is substring matching over extracted constants, not full-text search with ranking.
+- Shard signing/distribution and cache garbage collection are planned work.
 - `--fat-jar` is not implemented; extract `BOOT-INF/lib/*.jar` first.
 
 ## Verification
@@ -108,11 +127,11 @@ The suite includes generated cross-jar fixtures, fixed-version Spring golden jar
 
 ## Roadmap
 
-- [M0](docs/M0.md): walking skeleton, metadata extraction, shards, session database, first query
-- [M1](docs/M1.md): ASM extraction engine, cross-jar relationship queries, golden validation
-- M2: query-time graph traversal, meta-annotations, FTS, and the broader command set
-- M3: build-tool/classpath discovery and distribution foundations
-- M4: host integrations and MCP
+- [M0](docs/M0.md): walking skeleton, metadata extraction, shards, session database, first query ✅
+- [M1](docs/M1.md): ASM extraction engine, cross-jar relationship queries, golden validation ✅
+- M2: query-time graph traversal, meta-annotations, string search, and the broader command set ✅
+- M3: build-tool/classpath discovery ✅ (pulled forward) and distribution foundations
+- M4: host integrations and MCP ✅ (pulled forward)
 - M5: shard lifecycle, signing, download, LRU, and garbage collection
 
 Release automation and cross-platform packaged binaries are planned after the core query surface stabilizes.

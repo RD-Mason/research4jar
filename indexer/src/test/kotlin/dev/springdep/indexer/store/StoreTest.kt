@@ -121,13 +121,13 @@ class StoreTest {
     }
 
     @Test
-    fun `session keeps only class-target annotations`() {
+    fun `session merges class and method annotations with offset-stable ids`() {
         val root = Files.createTempDirectory("springdep-session-ann")
-        val extracted = ExtractedJar(
+        fun jar(classFqn: String, annotationFqn: String) = ExtractedJar(
             coordinate = null,
             classes = listOf(
                 ExtractedClass(
-                    fqn = "example.Demo",
+                    fqn = classFqn,
                     kind = "class",
                     superFqn = null,
                     modifiers = 1,
@@ -137,29 +137,34 @@ class StoreTest {
                 ),
             ),
             methods = listOf(
-                ExtractedMethod("example.Demo", "bean", "()V", null, 1),
+                ExtractedMethod(classFqn, "bean", "()V", null, 1),
             ),
             annotations = listOf(
                 ExtractedAnnotation(
                     targetKind = "class",
-                    classFqn = "example.Demo",
-                    annotationFqn = "example.OnClass",
+                    classFqn = classFqn,
+                    annotationFqn = annotationFqn,
                     attributes = "{}",
                 ),
                 ExtractedAnnotation(
                     targetKind = "method",
-                    classFqn = "example.Demo",
+                    classFqn = classFqn,
                     methodName = "bean",
                     methodDescriptor = "()V",
-                    annotationFqn = "example.OnMethod",
+                    annotationFqn = "$annotationFqn.OnMethod",
                     attributes = "{}",
                 ),
             ),
         )
-        val shard = root.resolve("shard.db")
-        ShardWriter().write(shard, "sha@2", extracted)
+        val firstShard = root.resolve("first.db")
+        val secondShard = root.resolve("second.db")
+        ShardWriter().write(firstShard, "sha-a", jar("example.Alpha", "example.MarkA"))
+        ShardWriter().write(secondShard, "sha-b", jar("example.Beta", "example.MarkB"))
         val session = root.resolve("session.db")
-        SessionBuilder().build(session, listOf(SessionShard("sha@2", shard)))
+        SessionBuilder().build(
+            session,
+            listOf(SessionShard("sha-a@2", firstShard), SessionShard("sha-b@2", secondShard)),
+        )
 
         DriverManager.getConnection("jdbc:sqlite:$session").use { connection ->
             connection.createStatement().executeQuery(
@@ -168,7 +173,30 @@ class StoreTest {
                 val byKind = buildMap<String, Int> {
                     while (rows.next()) put(rows.getString(1), rows.getInt(2))
                 }
-                assertEquals(mapOf("class" to 1), byKind)
+                assertEquals(mapOf("class" to 2, "method" to 2), byKind)
+            }
+            // Method annotations from the second shard must point at the
+            // offset-adjusted method row, not the raw per-shard id.
+            connection.createStatement().executeQuery(
+                """
+                SELECT c.fqn
+                FROM annotations a
+                JOIN methods m ON m.id = a.target_id
+                JOIN classes c ON c.id = m.class_id
+                WHERE a.target_kind = 'method' AND a.annotation_fqn = 'example.MarkB.OnMethod'
+                """.trimIndent(),
+            ).use { rows ->
+                assertTrue(rows.next())
+                assertEquals("example.Beta", rows.getString(1))
+            }
+            connection.createStatement().executeQuery(
+                "SELECT session_schema_version FROM session_meta",
+            ).use { rows ->
+                assertTrue(rows.next())
+                assertEquals(
+                    dev.springdep.indexer.SpringDepVersions.SESSION,
+                    rows.getInt(1),
+                )
             }
         }
     }

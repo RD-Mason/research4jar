@@ -28,6 +28,16 @@ cat > "$api_src/example/Contract.java" <<'EOF'
 package example;
 public interface Contract {}
 EOF
+cat > "$api_src/example/MetaMarker.java" <<'EOF'
+package example;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+@Retention(RetentionPolicy.CLASS)
+@Target(ElementType.ANNOTATION_TYPE)
+public @interface MetaMarker {}
+EOF
 cat > "$api_src/example/Marker.java" <<'EOF'
 package example;
 import java.lang.annotation.ElementType;
@@ -36,11 +46,13 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 @Retention(RetentionPolicy.CLASS)
 @Target(ElementType.TYPE)
+@MetaMarker
 public @interface Marker {
   String value();
 }
 EOF
-javac -d "$api_classes" "$api_src/example/Contract.java" "$api_src/example/Marker.java"
+javac -d "$api_classes" "$api_src/example/Contract.java" \
+  "$api_src/example/Marker.java" "$api_src/example/MetaMarker.java"
 cat > "$api_classes/META-INF/maven/com.example/api/pom.properties" <<'EOF'
 groupId=com.example
 artifactId=api
@@ -56,7 +68,7 @@ package other;
 import example.Contract;
 import example.Marker;
 @Marker("direct")
-public final class DirectImplementation implements Contract {
+public class DirectImplementation implements Contract {
   public static final String HEADER = "X-SpringDep-Test";
   public String value() {
     return "springdep.fixture.enabled";
@@ -71,6 +83,71 @@ artifactId=implementation
 version=1.0
 EOF
 make_jar "$impl_classes" "$jars/implementation.jar"
+
+# A third jar whose class only reaches example.Contract through the
+# superclass chain — exercises the M2 transitive closure across jars.
+deep_src="$work/deep-src"
+deep_classes="$work/deep-classes"
+mkdir -p "$deep_src/deep" "$deep_classes"
+cat > "$deep_src/deep/Indirect.java" <<'EOF'
+package deep;
+import other.DirectImplementation;
+public final class Indirect extends DirectImplementation {}
+EOF
+javac -cp "$jars/api.jar:$jars/implementation.jar" -d "$deep_classes" \
+  "$deep_src/deep/Indirect.java"
+make_jar "$deep_classes" "$jars/deep.jar"
+
+# Fake Spring annotations compiled under the real FQNs let the e2e cover
+# @Bean and @ConditionalOn* extraction without shipping Spring jars.
+cfg_src="$work/cfg-src"
+cfg_classes="$work/cfg-classes"
+mkdir -p \
+  "$cfg_src/org/springframework/context/annotation" \
+  "$cfg_src/org/springframework/boot/autoconfigure/condition" \
+  "$cfg_src/cfg"
+cat > "$cfg_src/org/springframework/context/annotation/Bean.java" <<'EOF'
+package org.springframework.context.annotation;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+@Retention(RetentionPolicy.CLASS)
+@Target(ElementType.METHOD)
+public @interface Bean {
+  String[] name() default {};
+}
+EOF
+cat > "$cfg_src/org/springframework/boot/autoconfigure/condition/ConditionalOnClass.java" <<'EOF'
+package org.springframework.boot.autoconfigure.condition;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+@Retention(RetentionPolicy.CLASS)
+@Target({ElementType.TYPE, ElementType.METHOD})
+public @interface ConditionalOnClass {
+  String[] value() default {};
+}
+EOF
+cat > "$cfg_src/cfg/DemoConfiguration.java" <<'EOF'
+package cfg;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.context.annotation.Bean;
+@ConditionalOnClass({"javax.sql.DataSource"})
+public class DemoConfiguration {
+  @ConditionalOnClass({"java.util.List"})
+  @Bean(name = {"demoBean"})
+  public String demo() {
+    return "demo";
+  }
+}
+EOF
+javac -d "$cfg_classes" \
+  "$cfg_src/org/springframework/context/annotation/Bean.java" \
+  "$cfg_src/org/springframework/boot/autoconfigure/condition/ConditionalOnClass.java" \
+  "$cfg_src/cfg/DemoConfiguration.java"
+make_jar "$cfg_classes" "$jars/demo-config.jar"
 
 legacy_home="$work/legacy-home"
 legacy_project="$work/legacy-project"
@@ -214,14 +291,14 @@ import sys
 
 stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
 pointer = json.loads(pathlib.Path(sys.argv[2]).read_text())
-assert stats["jars_total"] == 7, stats
-assert stats["jars_indexed"] == 6, stats
-assert stats["jars_newly_indexed"] == 6, stats
+assert stats["jars_total"] == 9, stats
+assert stats["jars_indexed"] == 8, stats
+assert stats["jars_newly_indexed"] == 8, stats
 assert stats["jars_skipped"] == 0, stats
 assert stats["jars_missing"] == ["broken.jar"], stats
 assert pointer["coverage"] == {
-    "jars_total": 7,
-    "jars_indexed": 6,
+    "jars_total": 9,
+    "jars_indexed": 8,
     "jars_missing": ["broken.jar"],
 }, pointer
 assert len(pointer["classpath_fingerprint"]) == 16, pointer
@@ -230,7 +307,7 @@ PY
 
 grep -q 'failed to parse META-INF/spring-configuration-metadata.json' "$first_warnings"
 grep -q 'broken.jar: invalid or unreadable jar' "$first_warnings"
-test "$(find "$home1/shards" -name '*.db' | wc -l | tr -d ' ')" = "6"
+test "$(find "$home1/shards" -name '*.db' | wc -l | tr -d ' ')" = "8"
 test -f "$home1/manifest.db"
 test -f "$project/.springdep/project.json"
 grep -q '^# Existing project instructions' "$project/CLAUDE.md"
@@ -254,8 +331,8 @@ assert response["results"][0]["default"] == "10", response
 assert response["results"][0]["source_jar"] == \
     "org.springframework.boot:spring-boot-autoconfigure:3.2.0", response
 assert response["coverage"] == {
-    "jars_total": 7,
-    "jars_indexed": 6,
+    "jars_total": 9,
+    "jars_indexed": 8,
     "jars_missing": ["broken.jar"],
     "extractor_version": 2,
 }, response
@@ -301,12 +378,29 @@ assert response["query"] == {
     "command": "find-implementations",
     "arg": "example.Contract",
 }, response
+# Transitive by default: deep.Indirect reaches Contract only through
+# other.DirectImplementation, which lives in a different jar.
+assert response["total"] == 2, response
+assert [item["fqn"] for item in response["results"]] == [
+    "deep.Indirect",
+    "other.DirectImplementation",
+], response
+assert response["results"][0]["source_jar"] == "deep.jar", response
+assert response["results"][1]["source_jar"] == "com.example:implementation:1.0", response
+PY
+
+direct_impl_json="$work/direct-implementations-query.json"
+"$SPRINGDEP_QUERY" find-implementations example.Contract --direct \
+  --project-dir "$project" > "$direct_impl_json"
+python3 - "$direct_impl_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["query"]["direct"] is True, response
 assert response["total"] == 1, response
-assert response["results"] == [{
-    "fqn": "other.DirectImplementation",
-    "source_jar": "com.example:implementation:1.0",
-    "attributes": None,
-}], response
+assert response["results"][0]["fqn"] == "other.DirectImplementation", response
 PY
 
 annotation_json="$work/annotation-query.json"
@@ -323,7 +417,120 @@ assert response["results"][0] == {
     "fqn": "other.DirectImplementation",
     "source_jar": "com.example:implementation:1.0",
     "attributes": {"value": "direct"},
+    "matched_annotation": "example.Marker",
 }, response
+PY
+
+meta_annotation_json="$work/meta-annotation-query.json"
+"$SPRINGDEP_QUERY" find-by-annotation example.MetaMarker \
+  --project-dir "$project" > "$meta_annotation_json"
+python3 - "$meta_annotation_json" <<'PY'
+import json
+import pathlib
+import sys
+
+# @Marker is itself annotated @MetaMarker, so querying @MetaMarker finds the
+# annotation type directly plus every @Marker class via meta-expansion.
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 2, response
+assert [
+    (item["fqn"], item["matched_annotation"]) for item in response["results"]
+] == [
+    ("example.Marker", "example.MetaMarker"),
+    ("other.DirectImplementation", "example.Marker"),
+], response
+PY
+
+class_json="$work/get-class.json"
+"$SPRINGDEP_QUERY" get-class other.DirectImplementation \
+  --project-dir "$project" > "$class_json"
+python3 - "$class_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+detail = response["results"][0]
+assert detail["kind"] == "class", detail
+assert detail["interfaces"] == ["example.Contract"], detail
+assert any(a["fqn"] == "example.Marker" for a in detail["annotations"]), detail
+assert any(m["name"] == "value" for m in detail["methods"]), detail
+PY
+
+beans_json="$work/bean-definitions.json"
+"$SPRINGDEP_QUERY" get-bean-definitions java.lang.String \
+  --project-dir "$project" > "$beans_json"
+python3 - "$beans_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+bean = response["results"][0]
+assert bean["bean_name"] == "demoBean", bean
+assert bean["config_class"] == "cfg.DemoConfiguration", bean
+assert bean["conditions"] == [{
+    "target": "bean_method",
+    "type": "OnClass",
+    "ref_value": {"value": ["java.util.List"]},
+}], bean
+PY
+
+conditional_json="$work/explain-conditional.json"
+"$SPRINGDEP_QUERY" explain-conditional cfg.DemoConfiguration \
+  --project-dir "$project" > "$conditional_json"
+python3 - "$conditional_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+target = response["results"][0]
+assert target["class_conditions"] == [{
+    "target": "class",
+    "type": "OnClass",
+    "ref_value": {"value": ["javax.sql.DataSource"]},
+}], target
+assert len(target["bean_methods"]) == 1, target
+assert target["bean_methods"][0]["bean_name"] == "demoBean", target
+PY
+
+string_json="$work/find-string.json"
+"$SPRINGDEP_QUERY" find-string springdep.fixture \
+  --project-dir "$project" > "$string_json"
+python3 - "$string_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+constant = response["results"][0]
+assert constant["value"] == "springdep.fixture.enabled", constant
+assert constant["class_fqn"] == "other.DirectImplementation", constant
+PY
+
+extensions_json="$work/extension-points.json"
+"$SPRINGDEP_QUERY" list-extension-points \
+  --project-dir "$project" > "$extensions_json"
+python3 - "$extensions_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+points = {
+    (item["mechanism"], item["key"]): item["implementations"]
+    for item in response["extension_points"]
+}
+assert points[("autoconfig.imports", None)] == 2, points
+assert points[(
+    "spring.factories",
+    "org.springframework.boot.autoconfigure.EnableAutoConfiguration",
+)] == 2, points
 PY
 
 second_stats="$work/second-stats.json"
@@ -338,10 +545,10 @@ import pathlib
 import sys
 
 stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert stats["jars_total"] == 7, stats
-assert stats["jars_indexed"] == 6, stats
+assert stats["jars_total"] == 9, stats
+assert stats["jars_indexed"] == 8, stats
 assert stats["jars_newly_indexed"] == 0, stats
-assert stats["jars_skipped"] == 6, stats
+assert stats["jars_skipped"] == 8, stats
 assert stats["jars_missing"] == ["broken.jar"], stats
 PY
 test "$(grep -c '^## SpringDep（jar 配置项查询）$' "$project/CLAUDE.md")" = "1"
@@ -361,7 +568,7 @@ import sys
 
 stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert stats["jars_newly_indexed"] == 1, stats
-assert stats["jars_skipped"] == 5, stats
+assert stats["jars_skipped"] == 7, stats
 PY
 
 "$SPRINGDEP_INDEX" \
@@ -387,6 +594,53 @@ for database in "$concurrent_home"/shards/*.db "$concurrent_home"/sessions/*.db;
   test "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = "ok"
 done
 
+# The Go CLI drives the JVM indexer end to end (springdep index).
+cli_index_project="$work/cli-index-project"
+cli_index_home="$work/cli-index-home"
+mkdir -p "$cli_index_project"
+"$SPRINGDEP_QUERY" index --jars "$jars/api.jar" \
+  --project-dir "$cli_index_project" --home "$cli_index_home" \
+  --indexer "$SPRINGDEP_INDEX" > "$work/cli-index-stats.json" 2> /dev/null
+python3 - "$work/cli-index-stats.json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["jars_indexed"] == 1, stats
+PY
+test -f "$cli_index_project/.springdep/project.json"
+
+# MCP stdio handshake: initialize, list tools, call a query tool.
+mcp_output="$work/mcp-output.jsonl"
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"find_implementations\",\"arguments\":{\"fqn\":\"example.Contract\",\"project_dir\":\"$project\"}}}"
+} | "$SPRINGDEP_QUERY" mcp > "$mcp_output"
+python3 - "$mcp_output" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = [
+    json.loads(line)
+    for line in pathlib.Path(sys.argv[1]).read_text().splitlines()
+    if line.strip()
+]
+assert len(lines) == 3, lines
+by_id = {item["id"]: item for item in lines}
+assert by_id[1]["result"]["serverInfo"]["name"] == "springdep", lines
+tool_names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
+assert {"index_project", "find_implementations", "get_class"} <= tool_names, tool_names
+call = by_id[3]["result"]
+assert not call.get("isError"), call
+payload = json.loads(call["content"][0]["text"])
+assert payload["total"] == 2, payload
+assert payload["results"][0]["fqn"] == "deep.Indirect", payload
+PY
+
 error_json="$work/error.json"
 if (cd "$work" && "$SPRINGDEP_QUERY" find-config-properties spring.datasource > "$error_json"); then
   echo "query unexpectedly succeeded without a project index" >&2
@@ -401,4 +655,4 @@ response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["error"] == "no_project_index", response
 PY
 
-echo "SpringDep M1 end-to-end checks passed."
+echo "SpringDep M2 end-to-end checks passed."

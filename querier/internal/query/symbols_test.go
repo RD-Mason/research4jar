@@ -10,7 +10,7 @@ import (
 	"dev.springdep/querier/internal/project"
 )
 
-func TestFindImplementationsUsesSymbolicInterfaceReference(t *testing.T) {
+func TestFindImplementationsTransitiveClosure(t *testing.T) {
 	root := t.TempDir()
 	sessionPath := filepath.Join(root, "sessions", "fingerprint.db")
 	manifestPath := filepath.Join(root, "manifest.db")
@@ -23,24 +23,60 @@ func TestFindImplementationsUsesSymbolicInterfaceReference(t *testing.T) {
 		pointer,
 		manifestPath,
 		"example.Contract",
+		false,
 		1,
 		20,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Total != 1 || len(response.Results) != 1 {
+	if response.Total != 4 || len(response.Results) != 4 {
 		t.Fatalf("unexpected response: %#v", response)
 	}
-	result := response.Results[0]
-	if result.FQN != "other.DirectImplementation" {
-		t.Fatalf("implementation = %q", result.FQN)
+	expected := []string{
+		"example.SubContract",       // subinterface joins the closure
+		"other.DirectImplementation",
+		"other.GrandChild",          // extends DirectImplementation
+		"other.IndirectImpl",        // implements the subinterface
 	}
-	if result.SourceJar != "com.example:implementation:1.0" {
-		t.Fatalf("source jar = %q", result.SourceJar)
+	for index, fqn := range expected {
+		if response.Results[index].FQN != fqn {
+			t.Fatalf("result[%d] = %q, want %q", index, response.Results[index].FQN, fqn)
+		}
 	}
-	if result.Attributes != nil {
-		t.Fatalf("implementation attributes = %s, want null", result.Attributes)
+	if response.Results[1].SourceJar != "com.example:implementation:1.0" {
+		t.Fatalf("source jar = %q", response.Results[1].SourceJar)
+	}
+}
+
+func TestFindImplementationsDirectOnly(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(root, "sessions", "fingerprint.db")
+	manifestPath := filepath.Join(root, "manifest.db")
+	createSymbolSession(t, sessionPath)
+	createSymbolManifest(t, manifestPath)
+
+	response, err := FindImplementations(
+		context.Background(),
+		symbolPointer(sessionPath),
+		manifestPath,
+		"example.Contract",
+		true,
+		1,
+		20,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 2 {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+	if response.Results[0].FQN != "example.SubContract" ||
+		response.Results[1].FQN != "other.DirectImplementation" {
+		t.Fatalf("unexpected direct results: %#v", response.Results)
+	}
+	if !response.Query.Direct {
+		t.Fatalf("query echo should mark direct: %#v", response.Query)
 	}
 }
 
@@ -56,6 +92,7 @@ func TestFindImplementationsMatchesDirectSuperclass(t *testing.T) {
 		symbolPointer(sessionPath),
 		manifestPath,
 		"example.BaseGateway",
+		true,
 		1,
 		20,
 	)
@@ -82,6 +119,7 @@ func TestFindByAnnotationReturnsStructuredAttributes(t *testing.T) {
 		symbolPointer(sessionPath),
 		manifestPath,
 		"example.Marker",
+		false,
 		1,
 		20,
 	)
@@ -98,9 +136,62 @@ func TestFindByAnnotationReturnsStructuredAttributes(t *testing.T) {
 	if attributes["value"] != "direct" {
 		t.Fatalf("attributes = %#v", attributes)
 	}
+	if response.Results[0].MatchedAnnotation != "example.Marker" {
+		t.Fatalf("matched annotation = %q", response.Results[0].MatchedAnnotation)
+	}
 	if response.Query.Command != "find-by-annotation" ||
 		response.Coverage.ExtractorVersion != 2 {
 		t.Fatalf("unexpected contract: %#v", response)
+	}
+}
+
+func TestFindByAnnotationExpandsMetaAnnotations(t *testing.T) {
+	root := t.TempDir()
+	sessionPath := filepath.Join(root, "sessions", "fingerprint.db")
+	manifestPath := filepath.Join(root, "manifest.db")
+	createSymbolSession(t, sessionPath)
+	createSymbolManifest(t, manifestPath)
+
+	response, err := FindByAnnotation(
+		context.Background(),
+		symbolPointer(sessionPath),
+		manifestPath,
+		"example.MetaMarker",
+		false,
+		1,
+		20,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// example.Marker is annotated by @MetaMarker directly; other.Marked is
+	// annotated by @Marker, which the meta-closure folds into the match set.
+	if response.Total != 2 || len(response.Results) != 2 {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+	if response.Results[0].FQN != "example.Marker" ||
+		response.Results[0].MatchedAnnotation != "example.MetaMarker" {
+		t.Fatalf("unexpected first result: %#v", response.Results[0])
+	}
+	if response.Results[1].FQN != "other.Marked" ||
+		response.Results[1].MatchedAnnotation != "example.Marker" {
+		t.Fatalf("unexpected second result: %#v", response.Results[1])
+	}
+
+	direct, err := FindByAnnotation(
+		context.Background(),
+		symbolPointer(sessionPath),
+		manifestPath,
+		"example.MetaMarker",
+		true,
+		1,
+		20,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct.Total != 1 || direct.Results[0].FQN != "example.Marker" {
+		t.Fatalf("unexpected direct response: %#v", direct)
 	}
 }
 
@@ -143,15 +234,24 @@ func createSymbolSession(t *testing.T, path string) {
 		`INSERT INTO classes (id, fqn, kind, source_shard_id) VALUES
 		  (1, 'example.Contract', 'interface', 'api@2'),
 		  (2, 'other.DirectImplementation', 'class', 'impl@2'),
-		  (3, 'other.Marked', 'class', 'marked@2')`,
+		  (3, 'other.Marked', 'class', 'marked@2'),
+		  (6, 'example.SubContract', 'interface', 'api@2'),
+		  (7, 'other.IndirectImpl', 'class', 'impl@2'),
+		  (9, 'example.Marker', 'annotation', 'api@2'),
+		  (10, 'example.MetaMarker', 'annotation', 'api@2')`,
 		`INSERT INTO classes (id, fqn, kind, super_fqn, source_shard_id) VALUES
 		  (4, 'example.BaseGateway', 'class', NULL, 'api@2'),
-		  (5, 'other.DirectSubclass', 'class', 'example.BaseGateway', 'impl@2')`,
+		  (5, 'other.DirectSubclass', 'class', 'example.BaseGateway', 'impl@2'),
+		  (8, 'other.GrandChild', 'class', 'other.DirectImplementation', 'impl@2')`,
 		`INSERT INTO class_interfaces VALUES
-		  (2, 'example.Contract', 'impl@2')`,
+		  (2, 'example.Contract', 'impl@2'),
+		  (6, 'example.Contract', 'api@2'),
+		  (7, 'example.SubContract', 'impl@2')`,
 		`INSERT INTO annotations
 		  (target_kind, target_id, annotation_fqn, attributes, source_shard_id)
-		  VALUES ('class', 3, 'example.Marker', '{"value":"direct"}', 'marked@2')`,
+		  VALUES
+		  ('class', 3, 'example.Marker', '{"value":"direct"}', 'marked@2'),
+		  ('class', 9, 'example.MetaMarker', '{"value":"meta"}', 'api@2')`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
