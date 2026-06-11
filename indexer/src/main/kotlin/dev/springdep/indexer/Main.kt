@@ -77,6 +77,7 @@ private fun runIndex(options: Options) {
     var skipped = 0
     var newlyIndexed = 0
     val pending = mutableListOf<HashedJar>()
+    val cacheHits = mutableListOf<String>()
 
     val threadCount = inputPaths.size
         .coerceAtMost(Runtime.getRuntime().availableProcessors())
@@ -113,6 +114,7 @@ private fun runIndex(options: Options) {
                 if (existing != null && valid?.get() == true) {
                     selectedShards += SessionShard("${jar.sha256}@$EXTRACTOR_VERSION", existing.shardPath)
                     skipped++
+                    cacheHits += existing.shardId
                     return@forEach
                 }
                 if (existing != null) {
@@ -171,6 +173,7 @@ private fun runIndex(options: Options) {
     } finally {
         executor.shutdown()
     }
+    manifest.touch(cacheHits)
 
     val sortedShardIds = selectedShards.map(SessionShard::shardId).sorted()
     val fingerprint = Hashing.sha256(sortedShardIds.joinToString("\n")).take(16)

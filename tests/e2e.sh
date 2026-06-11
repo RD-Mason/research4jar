@@ -5,7 +5,8 @@ set -euo pipefail
 : "${SPRINGDEP_QUERY:?SPRINGDEP_QUERY must point to springdep}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/springdep-e2e.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+registry_server=""
+trap '[ -n "$registry_server" ] && kill "$registry_server" 2>/dev/null; rm -rf "$work"' EXIT
 
 jars="$work/jars"
 project="$work/project"
@@ -655,4 +656,118 @@ response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["error"] == "no_project_index", response
 PY
 
-echo "SpringDep M2 end-to-end checks passed."
+# --- M5: signed registry export, prefetch-only index, cache stats and GC ---
+registry_dir="$work/registry"
+keygen_json="$work/keygen.json"
+"$SPRINGDEP_QUERY" registry keygen "$work/keys/signing.key" > "$keygen_json"
+pubkey="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public_key"])' "$keygen_json")"
+
+export_json="$work/export.json"
+"$SPRINGDEP_QUERY" registry export "$registry_dir" \
+  --sign-key "$work/keys/signing.key" --home "$home1" > "$export_json"
+python3 - "$export_json" <<'PY'
+import json
+import pathlib
+import sys
+
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert result["exported"] >= 3, result
+assert result["signed"] is True, result
+PY
+
+port_file="$work/registry-port"
+python3 - "$registry_dir" "$port_file" <<'PY' &
+import functools
+import http.server
+import pathlib
+import socketserver
+import sys
+
+handler = functools.partial(
+    http.server.SimpleHTTPRequestHandler, directory=sys.argv[1]
+)
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("127.0.0.1", 0), handler) as httpd:
+    pathlib.Path(sys.argv[2]).write_text(str(httpd.server_address[1]))
+    httpd.serve_forever()
+PY
+registry_server=$!
+for _ in $(seq 1 50); do
+  [ -s "$port_file" ] && break
+  sleep 0.1
+done
+[ -s "$port_file" ] || { echo "registry server did not start" >&2; exit 1; }
+registry_port="$(cat "$port_file")"
+
+home3="$work/home3"
+project3="$work/project3"
+mkdir -p "$project3"
+index3_json="$work/index3.json"
+index3_err="$work/index3.err"
+if ! "$SPRINGDEP_QUERY" index --jars "$jars" --project-dir "$project3" --home "$home3" \
+  --registry "http://127.0.0.1:$registry_port" --registry-pubkey "$pubkey" \
+  > "$index3_json" 2> "$index3_err"; then
+  echo "registry-backed index failed:" >&2
+  cat "$index3_json" "$index3_err" >&2
+  exit 1
+fi
+kill "$registry_server" 2>/dev/null || true
+registry_server=""
+grep -q "downloaded" "$index3_err" || {
+  echo "expected prefetch summary on stderr:" >&2
+  cat "$index3_err" >&2
+  exit 1
+}
+python3 - "$index3_json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["jars_newly_indexed"] == 0, stats
+assert stats["jars_skipped"] == stats["jars_indexed"], stats
+assert stats["jars_indexed"] >= 3, stats
+PY
+
+registry_query_json="$work/registry-query.json"
+"$SPRINGDEP_QUERY" find-implementations example.Contract \
+  --project-dir "$project3" > "$registry_query_json"
+python3 - "$registry_query_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 2, response
+PY
+
+stats_json="$work/cache-stats.json"
+"$SPRINGDEP_QUERY" cache stats --home "$home3" > "$stats_json"
+python3 - "$stats_json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["shard_count"] >= 3, stats
+assert stats["shards_remote"] == stats["shard_count"], stats
+PY
+
+touch "$home3/shards/deadbeef@2.db"
+gc_json="$work/cache-gc.json"
+"$SPRINGDEP_QUERY" cache gc --home "$home3" > "$gc_json"
+python3 - "$gc_json" <<'PY'
+import json
+import pathlib
+import sys
+
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert result["removed_orphans"] == 1, result
+assert result["remaining_shards"] >= 3, result
+PY
+if [ -e "$home3/shards/deadbeef@2.db" ]; then
+  echo "cache gc left the orphan shard file behind" >&2
+  exit 1
+fi
+
+echo "SpringDep M2 + M5 end-to-end checks passed."

@@ -80,6 +80,47 @@ Tools exposed: `index_project` (auto-resolves the classpath via Maven/Gradle), `
 
 For CLI-driven agents without MCP, `springdep index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
 
+## Shard registry: index without extracting
+
+Shards are content-addressed (`<jar_sha256>@<extractor_version>`) and byte-deterministic, so they can be built once and distributed. A registry is just a static file tree — any object storage, GitHub Pages site, or internal HTTP server can host one:
+
+```
+registry.json                      extractor version, shard count, signed flag
+v2/<jar_sha256>.db                 the shard
+v2/<jar_sha256>.db.sha256          checksum sidecar (required)
+v2/<jar_sha256>.db.sig             ed25519 signature (required for verifying clients)
+```
+
+Point `springdep index` at a registry and missing shards download instead of extracting locally — on a large classpath the first index drops from minutes of JVM extraction to seconds of downloads:
+
+```bash
+springdep index --registry https://shards.example.com            # or SPRINGDEP_REGISTRY
+springdep index --registry ... --registry-pubkey <hex>           # require valid signatures
+```
+
+Downloads are verified against the checksum sidecar, the shard's embedded identity (`shard_meta.jar_sha256`), and — when a public key is configured — an ed25519 signature. Verification failures and registry misses both fall back to local extraction; the registry is an accelerator, never a correctness dependency.
+
+Publish a registry from any machine's local cache:
+
+```bash
+springdep registry keygen ~/.springdep-signing.key               # prints the public key
+springdep registry export ./registry --sign-key ~/.springdep-signing.key
+# upload ./registry to any static host
+```
+
+## Cache lifecycle
+
+The global cache (`springdep cache stats`) grows one shard per unique jar. Collect garbage with:
+
+```bash
+springdep cache gc                         # stale extractor versions + orphan files
+springdep cache gc --max-size 5G           # also evict least-recently-used shards over 5 GiB
+springdep cache gc --max-age 30d           # also drop session databases idle for 30 days
+springdep cache gc --dry-run               # report without deleting
+```
+
+Sessions are always rebuilt from shards by the next `springdep index`, so session GC is safe; evicted shards re-download or re-extract on demand.
+
 ## Coverage
 
 Every JSON response includes:
@@ -107,13 +148,15 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Meta-annotation expansion at query time (`@Component` finds `@Service`/`@Repository`/`@Controller` classes)
 - Class detail, bean-definition, conditional-explanation, string-constant, and extension-point queries
 - Maven/Gradle classpath auto-discovery (`springdep index`) and an MCP stdio server (`springdep mcp`)
+- Shard registry: static-hostable export (`springdep registry export`), verified download-instead-of-extract (`springdep index --registry`), and ed25519 signing
+- Cache lifecycle: usage stats, stale-version and orphan cleanup, LRU eviction, and session expiry (`springdep cache stats|gc`)
 - Linux, macOS, and Windows-compatible data paths; pure-Go SQLite querying without CGO
 
 ## Known Limitations
 
 - `find-by-annotation` expands meta-annotations but does not merge `@AliasFor` attribute aliases; attributes are reported as written on the matched annotation.
 - `find-string` is substring matching over extracted constants, not full-text search with ranking.
-- Shard signing/distribution and cache garbage collection are planned work.
+- A registry accelerates indexing but still requires a JRE: the session database is merged by the JVM indexer even when every shard comes from the registry.
 - `--fat-jar` is not implemented; extract `BOOT-INF/lib/*.jar` first.
 
 ## Verification
@@ -130,11 +173,11 @@ The suite includes generated cross-jar fixtures, fixed-version Spring golden jar
 - [M0](docs/M0.md): walking skeleton, metadata extraction, shards, session database, first query ✅
 - [M1](docs/M1.md): ASM extraction engine, cross-jar relationship queries, golden validation ✅
 - M2: query-time graph traversal, meta-annotations, string search, and the broader command set ✅
-- M3: build-tool/classpath discovery ✅ (pulled forward) and distribution foundations
+- M3: build-tool/classpath discovery ✅ (pulled forward) and distribution foundations ✅
 - M4: host integrations and MCP ✅ (pulled forward)
-- M5: shard lifecycle, signing, download, LRU, and garbage collection
+- M5: shard lifecycle — registry export/download with signing, LRU, and garbage collection ✅
 
-Release automation and cross-platform packaged binaries are planned after the core query surface stabilizes.
+Next up: a hosted public registry of pre-indexed shards for popular Spring artifacts, and cross-platform packaged binaries via the release pipeline.
 
 ## Contributing
 

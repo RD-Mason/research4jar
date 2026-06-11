@@ -52,6 +52,27 @@ class Manifest(
         }
     }
 
+    /**
+     * Refreshes last_access_at for shards reused from the cache so LRU
+     * garbage collection evicts genuinely unused shards first.
+     */
+    fun touch(shardIds: Collection<String>) {
+        if (shardIds.isEmpty()) return
+        val now = Instant.now().epochSecond
+        connect().use { connection ->
+            connection.prepareStatement(
+                "UPDATE shards SET last_access_at = ? WHERE shard_id = ?",
+            ).use { statement ->
+                shardIds.forEach { shardId ->
+                    statement.setLong(1, now)
+                    statement.setString(2, shardId)
+                    statement.addBatch()
+                }
+                statement.executeBatch()
+            }
+        }
+    }
+
     fun remove(shardId: String) {
         connect().use { connection ->
             connection.prepareStatement("DELETE FROM shards WHERE shard_id = ?").use { statement ->

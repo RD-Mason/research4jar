@@ -1,0 +1,181 @@
+package registry
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+
+	"dev.springdep/querier/internal/manifest"
+)
+
+// PrefetchStats reports what a registry prefetch accomplished.
+type PrefetchStats struct {
+	JarsTotal  int
+	CacheHits  int
+	Downloaded int
+	Misses     int
+	Failures   int
+}
+
+// Prefetch installs registry shards for every jar that has no valid local
+// shard, so the JVM indexer that runs next hits the cache instead of
+// extracting. Failures degrade to local extraction: they are warned about on
+// the warnings writer and never abort the run.
+func Prefetch(
+	ctx context.Context,
+	client *Client,
+	manifestDB *manifest.DB,
+	shardsDir string,
+	extractorVersion int,
+	jarPaths []string,
+	warnings io.Writer,
+) PrefetchStats {
+	stats := PrefetchStats{JarsTotal: len(jarPaths)}
+	if len(jarPaths) == 0 {
+		return stats
+	}
+
+	type hashedJar struct {
+		path   string
+		sha256 string
+	}
+	hashed := make([]hashedJar, len(jarPaths))
+	hashWorkers := min(runtime.NumCPU(), len(jarPaths))
+	var wg sync.WaitGroup
+	jobs := make(chan int)
+	wg.Add(hashWorkers)
+	for worker := 0; worker < hashWorkers; worker++ {
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				digest, err := hashFile(jarPaths[index])
+				if err != nil {
+					// The indexer reports unreadable jars itself.
+					continue
+				}
+				hashed[index] = hashedJar{path: jarPaths[index], sha256: digest}
+			}
+		}()
+	}
+	for index := range jarPaths {
+		jobs <- index
+	}
+	close(jobs)
+	wg.Wait()
+
+	// Manifest decisions and registration stay on this goroutine; only the
+	// network downloads fan out.
+	type pending struct {
+		jar hashedJar
+	}
+	var toFetch []pending
+	seen := map[string]bool{}
+	for _, jar := range hashed {
+		if jar.sha256 == "" || seen[jar.sha256] {
+			continue
+		}
+		seen[jar.sha256] = true
+		shardID := fmt.Sprintf("%s@%d", jar.sha256, extractorVersion)
+		row, err := manifestDB.Find(shardID)
+		if err != nil {
+			fmt.Fprintf(warnings, "warning: registry prefetch: %v\n", err)
+			stats.Failures++
+			continue
+		}
+		if row != nil {
+			if fileExists(row.ShardPath) {
+				stats.CacheHits++
+				continue
+			}
+			// Row without its file: drop it so the download re-registers.
+			if err := manifestDB.Remove(shardID); err != nil {
+				fmt.Fprintf(warnings, "warning: registry prefetch: %v\n", err)
+				stats.Failures++
+				continue
+			}
+		}
+		toFetch = append(toFetch, pending{jar: jar})
+	}
+
+	type outcome struct {
+		jar    hashedJar
+		result FetchResult
+		err    error
+	}
+	outcomes := make([]outcome, len(toFetch))
+	downloadWorkers := min(6, len(toFetch))
+	if downloadWorkers > 0 {
+		fetchJobs := make(chan int)
+		wg.Add(downloadWorkers)
+		for worker := 0; worker < downloadWorkers; worker++ {
+			go func() {
+				defer wg.Done()
+				for index := range fetchJobs {
+					jar := toFetch[index].jar
+					result, err := client.Fetch(ctx, jar.sha256, extractorVersion, shardsDir)
+					outcomes[index] = outcome{jar: jar, result: result, err: err}
+				}
+			}()
+		}
+		for index := range toFetch {
+			fetchJobs <- index
+		}
+		close(fetchJobs)
+		wg.Wait()
+	}
+
+	for _, entry := range outcomes {
+		switch {
+		case errors.Is(entry.err, ErrShardNotFound):
+			stats.Misses++
+		case entry.err != nil:
+			fmt.Fprintf(warnings, "warning: registry prefetch: %v\n", entry.err)
+			stats.Failures++
+		default:
+			checksum := entry.result.Checksum
+			err := manifestDB.Register(manifest.Shard{
+				ShardID:          entry.result.ShardID,
+				JarCoordinate:    entry.result.JarCoordinate,
+				JarFilename:      filepath.Base(entry.jar.path),
+				JarSHA256:        entry.jar.sha256,
+				ExtractorVersion: extractorVersion,
+				ShardPath:        entry.result.ShardPath,
+				ShardChecksum:    &checksum,
+				SizeBytes:        entry.result.SizeBytes,
+				Source:           "remote",
+			})
+			if err != nil {
+				fmt.Fprintf(warnings, "warning: registry prefetch: %v\n", err)
+				stats.Failures++
+				continue
+			}
+			stats.Downloaded++
+		}
+	}
+	return stats
+}
+
+func hashFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
