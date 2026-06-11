@@ -12,12 +12,14 @@ import (
 type SymbolRequest struct {
 	Command string `json:"command"`
 	Arg     string `json:"arg"`
+	Direct  bool   `json:"direct,omitempty"`
 }
 
 type SymbolResult struct {
-	FQN        string          `json:"fqn"`
-	SourceJar  string          `json:"source_jar"`
-	Attributes json.RawMessage `json:"attributes"`
+	FQN               string          `json:"fqn"`
+	SourceJar         string          `json:"source_jar"`
+	Attributes        json.RawMessage `json:"attributes"`
+	MatchedAnnotation string          `json:"matched_annotation,omitempty"`
 }
 
 type SymbolResponse struct {
@@ -29,40 +31,84 @@ type SymbolResponse struct {
 	Coverage Coverage       `json:"coverage"`
 }
 
+// Transitive closure over declared supertypes: the seed FQN expands through
+// super_fqn edges and class_interfaces edges, both stored as symbolic
+// references, so the walk crosses jar boundaries inside the merged session.
+const transitiveImplCTE = `
+WITH RECURSIVE impl(fqn) AS (
+  VALUES(?)
+  UNION
+  SELECT c.fqn FROM classes c JOIN impl ON c.super_fqn = impl.fqn
+  UNION
+  SELECT c.fqn FROM classes c
+    JOIN class_interfaces ci ON ci.class_id = c.id
+    JOIN impl ON ci.interface_fqn = impl.fqn
+)`
+
+// Meta-annotation closure: an annotation type (kind='annotation') annotated by
+// a member of the set joins the set. Plain UNION deduplicates, which also
+// terminates self-referential annotations such as @Documented.
+const metaAnnotationCTE = `
+WITH RECURSIVE meta(fqn) AS (
+  VALUES(?)
+  UNION
+  SELECT c.fqn
+  FROM classes c
+  JOIN annotations a ON a.target_kind = 'class' AND a.target_id = c.id
+  JOIN meta ON a.annotation_fqn = meta.fqn
+  WHERE c.kind = 'annotation'
+)`
+
 func FindImplementations(
 	ctx context.Context,
 	pointer project.Pointer,
 	manifestPath string,
 	targetFQN string,
+	direct bool,
 	page int,
 	pageSize int,
 ) (SymbolResponse, error) {
+	countSQL := transitiveImplCTE + `
+		SELECT COUNT(*) FROM classes c
+		WHERE c.fqn IN (SELECT fqn FROM impl) AND c.fqn <> ?`
+	selectSQL := transitiveImplCTE + `
+		SELECT c.fqn, c.source_shard_id
+		FROM classes c
+		WHERE c.fqn IN (SELECT fqn FROM impl) AND c.fqn <> ?
+		ORDER BY c.fqn, c.source_shard_id
+		LIMIT ? OFFSET ?`
+	if direct {
+		countSQL = `SELECT COUNT(*) FROM (
+			SELECT class_id FROM class_interfaces WHERE interface_fqn = ?
+			UNION
+			SELECT id FROM classes WHERE super_fqn = ?
+		)`
+		selectSQL = `SELECT c.fqn, c.source_shard_id
+			FROM classes c
+			WHERE c.id IN (
+			  SELECT class_id FROM class_interfaces WHERE interface_fqn = ?
+			  UNION
+			  SELECT id FROM classes WHERE super_fqn = ?
+			)
+			ORDER BY c.fqn, c.source_shard_id
+			LIMIT ? OFFSET ?`
+	}
 	return findSymbols(
 		ctx,
 		pointer,
 		manifestPath,
-		"find-implementations",
-		targetFQN,
+		SymbolRequest{Command: "find-implementations", Arg: targetFQN, Direct: direct},
 		[]any{targetFQN, targetFQN},
 		page,
 		pageSize,
-		// UNION of two independently indexed lookups (idx_s_ci_iface and
-		// idx_s_classes_super); the OR form degrades to a full classes scan.
-		`SELECT COUNT(*) FROM (
-		   SELECT class_id FROM class_interfaces WHERE interface_fqn = ?
-		   UNION
-		   SELECT id FROM classes WHERE super_fqn = ?
-		 )`,
-		`SELECT c.fqn, c.source_shard_id
-		 FROM classes c
-		 WHERE c.id IN (
-		   SELECT class_id FROM class_interfaces WHERE interface_fqn = ?
-		   UNION
-		   SELECT id FROM classes WHERE super_fqn = ?
-		 )
-		 ORDER BY c.fqn, c.source_shard_id
-		 LIMIT ? OFFSET ?`,
-		false,
+		countSQL,
+		selectSQL,
+		func(rows *sql.Rows) (SymbolResult, string, error) {
+			var result SymbolResult
+			var shardID string
+			err := rows.Scan(&result.FQN, &shardID)
+			return result, shardID, err
+		},
 	)
 }
 
@@ -71,29 +117,58 @@ func FindByAnnotation(
 	pointer project.Pointer,
 	manifestPath string,
 	annotationFQN string,
+	direct bool,
 	page int,
 	pageSize int,
 ) (SymbolResponse, error) {
+	countSQL := metaAnnotationCTE + `
+		SELECT COUNT(*)
+		FROM annotations a
+		JOIN classes c ON c.id = a.target_id
+		WHERE a.target_kind = 'class' AND a.annotation_fqn IN (SELECT fqn FROM meta)`
+	selectSQL := metaAnnotationCTE + `
+		SELECT c.fqn, c.source_shard_id, a.attributes, a.annotation_fqn
+		FROM annotations a
+		JOIN classes c ON c.id = a.target_id
+		WHERE a.target_kind = 'class' AND a.annotation_fqn IN (SELECT fqn FROM meta)
+		ORDER BY c.fqn, c.source_shard_id, a.annotation_fqn, COALESCE(a.attributes, '')
+		LIMIT ? OFFSET ?`
+	if direct {
+		countSQL = `SELECT COUNT(*)
+			FROM annotations a
+			JOIN classes c ON c.id = a.target_id
+			WHERE a.target_kind = 'class' AND a.annotation_fqn = ?`
+		selectSQL = `SELECT c.fqn, c.source_shard_id, a.attributes, a.annotation_fqn
+			FROM annotations a
+			JOIN classes c ON c.id = a.target_id
+			WHERE a.target_kind = 'class' AND a.annotation_fqn = ?
+			ORDER BY c.fqn, c.source_shard_id
+			LIMIT ? OFFSET ?`
+	}
 	return findSymbols(
 		ctx,
 		pointer,
 		manifestPath,
-		"find-by-annotation",
-		annotationFQN,
+		SymbolRequest{Command: "find-by-annotation", Arg: annotationFQN, Direct: direct},
 		[]any{annotationFQN},
 		page,
 		pageSize,
-		`SELECT COUNT(*)
-		 FROM annotations a
-		 JOIN classes c ON c.id = a.target_id
-		 WHERE a.target_kind = 'class' AND a.annotation_fqn = ?`,
-		`SELECT c.fqn, c.source_shard_id, a.attributes
-		 FROM annotations a
-		 JOIN classes c ON c.id = a.target_id
-		 WHERE a.target_kind = 'class' AND a.annotation_fqn = ?
-		 ORDER BY c.fqn, c.source_shard_id
-		 LIMIT ? OFFSET ?`,
-		true,
+		countSQL,
+		selectSQL,
+		func(rows *sql.Rows) (SymbolResult, string, error) {
+			var result SymbolResult
+			var shardID string
+			var attributes sql.NullString
+			if err := rows.Scan(
+				&result.FQN, &shardID, &attributes, &result.MatchedAnnotation,
+			); err != nil {
+				return result, shardID, err
+			}
+			if attributes.Valid && json.Valid([]byte(attributes.String)) {
+				result.Attributes = json.RawMessage(attributes.String)
+			}
+			return result, shardID, nil
+		},
 	)
 }
 
@@ -101,14 +176,13 @@ func findSymbols(
 	ctx context.Context,
 	pointer project.Pointer,
 	manifestPath string,
-	command string,
-	arg string,
+	request SymbolRequest,
 	bindArgs []any,
 	page int,
 	pageSize int,
 	countSQL string,
 	selectSQL string,
-	withAttributes bool,
+	scan func(rows *sql.Rows) (SymbolResult, string, error),
 ) (SymbolResponse, error) {
 	session, err := openReadOnly(pointer.SessionDBPath, true)
 	if err != nil {
@@ -118,12 +192,12 @@ func findSymbols(
 
 	var total int
 	if err := session.QueryRowContext(ctx, countSQL, bindArgs...).Scan(&total); err != nil {
-		return SymbolResponse{}, fmt.Errorf("count %s results: %w", command, err)
+		return SymbolResponse{}, fmt.Errorf("count %s results: %w", request.Command, err)
 	}
 	selectArgs := append(append([]any{}, bindArgs...), pageSize, (page-1)*pageSize)
 	rows, err := session.QueryContext(ctx, selectSQL, selectArgs...)
 	if err != nil {
-		return SymbolResponse{}, fmt.Errorf("query %s results: %w", command, err)
+		return SymbolResponse{}, fmt.Errorf("query %s results: %w", request.Command, err)
 	}
 	defer rows.Close()
 
@@ -133,23 +207,14 @@ func findSymbols(
 	}
 	pending := make([]pendingResult, 0)
 	for rows.Next() {
-		var result SymbolResult
-		var shardID string
-		if withAttributes {
-			var attributes sql.NullString
-			if err := rows.Scan(&result.FQN, &shardID, &attributes); err != nil {
-				return SymbolResponse{}, fmt.Errorf("scan %s result: %w", command, err)
-			}
-			if attributes.Valid && json.Valid([]byte(attributes.String)) {
-				result.Attributes = json.RawMessage(attributes.String)
-			}
-		} else if err := rows.Scan(&result.FQN, &shardID); err != nil {
-			return SymbolResponse{}, fmt.Errorf("scan %s result: %w", command, err)
+		result, shardID, err := scan(rows)
+		if err != nil {
+			return SymbolResponse{}, fmt.Errorf("scan %s result: %w", request.Command, err)
 		}
 		pending = append(pending, pendingResult{result: result, shardID: shardID})
 	}
 	if err := rows.Err(); err != nil {
-		return SymbolResponse{}, fmt.Errorf("iterate %s results: %w", command, err)
+		return SymbolResponse{}, fmt.Errorf("iterate %s results: %w", request.Command, err)
 	}
 
 	var sources map[string]string
@@ -169,7 +234,7 @@ func findSymbols(
 	}
 
 	return SymbolResponse{
-		Query:    SymbolRequest{Command: command, Arg: arg},
+		Query:    request,
 		Results:  results,
 		Total:    total,
 		Page:     page,
