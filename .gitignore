@@ -26,3 +26,6 @@ sessions/
 # Operating systems
 .DS_Store
 Thumbs.db
+
+# GoReleaser output
+/dist/

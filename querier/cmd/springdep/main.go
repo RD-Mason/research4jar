@@ -33,6 +33,9 @@ type errorResponse struct {
 	Message string `json:"message"`
 }
 
+// version is overridden at release time via -ldflags "-X main.version=...".
+var version = "dev"
+
 var queryCommands = map[string]bool{
 	"find-config-properties": true,
 	"find-implementations":   true,
@@ -51,6 +54,9 @@ func main() {
 	}
 	command := os.Args[1]
 	switch {
+	case command == "version" || command == "--version":
+		fmt.Println("springdep " + version)
+		return
 	case command == "mcp":
 		if err := mcp.Serve(os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "springdep mcp:", err)
@@ -422,6 +428,7 @@ Options:
   --home <DIR>          Override SpringDep home (manifest lookup; index target).
   --direct              Disable transitive/meta-annotation expansion.
   --indexer <PATH>      (index) Path to springdep-index; auto-located otherwise.
+  --version             Print the springdep version.
   -h, --help            Show this help.
 
 Notes:
