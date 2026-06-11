@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added (M5 shard lifecycle)
 
+- Pure-Go index path: when the registry (plus local cache) covers every jar, `springdep index` merges the session database, writes the project pointer, and appends the CLAUDE.md guidance itself — the JVM indexer never starts and a JRE is no longer required on fully covered machines. Partial coverage falls back to the JVM indexer as before. The session layout version is stamped and drift-guarded, and the e2e suite proves the path by indexing with `--indexer /nonexistent` and asserting byte-identical CLAUDE.md output across both writers.
+
 - Shard registry: `springdep registry export` publishes the local cache as a static file tree (`v<extractor>/<jar_sha256>.db` + `.sha256` sidecar + optional `.sig`) any HTTP host can serve; `springdep registry keygen` generates an ed25519 signing keypair.
 - Registry-backed indexing: `springdep index --registry <url>` (or `SPRINGDEP_REGISTRY`) downloads missing shards instead of extracting them locally, verifying the checksum sidecar, the shard's embedded `shard_meta` identity, and — with `--registry-pubkey`/`SPRINGDEP_REGISTRY_PUBKEY` — an ed25519 signature. Misses and verification failures degrade to local extraction.
 - Cache lifecycle: `springdep cache stats` reports shard/session usage; `springdep cache gc` removes stale-extractor-version shards and orphan files, evicts least-recently-used shards over `--max-size`, drops sessions idle past `--max-age`, and supports `--dry-run`. Cache hits now refresh `last_access_at` so LRU order reflects real use.

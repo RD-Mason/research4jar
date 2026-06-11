@@ -15,13 +15,25 @@ import (
 	"dev.springdep/querier/internal/manifest"
 )
 
-// PrefetchStats reports what a registry prefetch accomplished.
+// ShardRef names one valid local shard after a prefetch.
+type ShardRef struct {
+	ShardID string
+	Path    string
+}
+
+// PrefetchStats reports what a registry prefetch accomplished. When Complete
+// is true every unique readable jar has a valid local shard (listed in
+// Shards) and indexing needs no local extraction at all.
 type PrefetchStats struct {
-	JarsTotal  int
-	CacheHits  int
-	Downloaded int
-	Misses     int
-	Failures   int
+	JarsTotal    int
+	JarsUnique   int
+	CacheHits    int
+	Downloaded   int
+	Misses       int
+	Failures     int
+	HashFailures int
+	Shards       []ShardRef
+	Complete     bool
 }
 
 // Prefetch installs registry shards for every jar that has no valid local
@@ -76,12 +88,18 @@ func Prefetch(
 		jar hashedJar
 	}
 	var toFetch []pending
+	var hitShardIDs []string
 	seen := map[string]bool{}
 	for _, jar := range hashed {
-		if jar.sha256 == "" || seen[jar.sha256] {
+		if jar.sha256 == "" {
+			stats.HashFailures++
+			continue
+		}
+		if seen[jar.sha256] {
 			continue
 		}
 		seen[jar.sha256] = true
+		stats.JarsUnique++
 		shardID := fmt.Sprintf("%s@%d", jar.sha256, extractorVersion)
 		row, err := manifestDB.Find(shardID)
 		if err != nil {
@@ -92,6 +110,8 @@ func Prefetch(
 		if row != nil {
 			if fileExists(row.ShardPath) {
 				stats.CacheHits++
+				hitShardIDs = append(hitShardIDs, shardID)
+				stats.Shards = append(stats.Shards, ShardRef{ShardID: shardID, Path: row.ShardPath})
 				continue
 			}
 			// Row without its file: drop it so the download re-registers.
@@ -157,8 +177,24 @@ func Prefetch(
 				continue
 			}
 			stats.Downloaded++
+			stats.Shards = append(stats.Shards, ShardRef{
+				ShardID: entry.result.ShardID,
+				Path:    entry.result.ShardPath,
+			})
 		}
 	}
+
+	// The JVM indexer refreshes last_access_at itself; on a fully covered
+	// classpath it never runs, so keep LRU order accurate here.
+	if err := manifestDB.Touch(hitShardIDs); err != nil {
+		fmt.Fprintf(warnings, "warning: registry prefetch: %v\n", err)
+	}
+
+	stats.Complete = stats.HashFailures == 0 &&
+		stats.Misses == 0 &&
+		stats.Failures == 0 &&
+		len(stats.Shards) == stats.JarsUnique &&
+		stats.JarsUnique > 0
 	return stats
 }
 

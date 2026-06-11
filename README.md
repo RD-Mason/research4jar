@@ -91,7 +91,7 @@ v2/<jar_sha256>.db.sha256          checksum sidecar (required)
 v2/<jar_sha256>.db.sig             ed25519 signature (required for verifying clients)
 ```
 
-Point `springdep index` at a registry and missing shards download instead of extracting locally — on a large classpath the first index drops from minutes of JVM extraction to seconds of downloads:
+Point `springdep index` at a registry and missing shards download instead of extracting locally — on a large classpath the first index drops from minutes of JVM extraction to seconds of downloads. When the registry covers every jar, the session merge also runs in pure Go and **no JVM is needed at all**:
 
 ```bash
 springdep index --registry https://shards.example.com            # or SPRINGDEP_REGISTRY
@@ -149,6 +149,7 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Class detail, bean-definition, conditional-explanation, string-constant, and extension-point queries
 - Maven/Gradle classpath auto-discovery (`springdep index`) and an MCP stdio server (`springdep mcp`)
 - Shard registry: static-hostable export (`springdep registry export`), verified download-instead-of-extract (`springdep index --registry`), and ed25519 signing
+- Pure-Go indexing for registry-covered classpaths: session merge, project pointer, and CLAUDE.md guidance without a JVM
 - Cache lifecycle: usage stats, stale-version and orphan cleanup, LRU eviction, and session expiry (`springdep cache stats|gc`)
 - Linux, macOS, and Windows-compatible data paths; pure-Go SQLite querying without CGO
 
@@ -156,7 +157,7 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 
 - `find-by-annotation` expands meta-annotations but does not merge `@AliasFor` attribute aliases; attributes are reported as written on the matched annotation.
 - `find-string` is substring matching over extracted constants, not full-text search with ranking.
-- A registry accelerates indexing but still requires a JRE: the session database is merged by the JVM indexer even when every shard comes from the registry.
+- A JRE is only needed when at least one jar misses the registry (or no registry is configured); fully covered classpaths index in pure Go.
 - `--fat-jar` is not implemented; extract `BOOT-INF/lib/*.jar` first.
 
 ## Verification

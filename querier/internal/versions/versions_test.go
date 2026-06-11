@@ -21,19 +21,26 @@ func TestExtractorMatchesKotlin(t *testing.T) {
 	if err != nil {
 		t.Skipf("Kotlin sources not available: %v", err)
 	}
-	pattern := regexp.MustCompile(`const val EXTRACTOR = (\d+)`)
-	match := pattern.FindSubmatch(content)
-	if match == nil {
-		t.Fatal("EXTRACTOR constant not found in SpringDepVersions.kt")
+	constants := map[string]int{
+		"EXTRACTOR": Extractor,
+		"SCHEMA":    Schema,
+		"SESSION":   Session,
 	}
-	kotlinValue, err := strconv.Atoi(string(match[1]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if kotlinValue != Extractor {
-		t.Fatalf(
-			"extractor version drift: Go versions.Extractor=%d, Kotlin SpringDepVersions.EXTRACTOR=%d",
-			Extractor, kotlinValue,
-		)
+	for name, goValue := range constants {
+		pattern := regexp.MustCompile(`const val ` + name + ` = (\d+)`)
+		match := pattern.FindSubmatch(content)
+		if match == nil {
+			t.Fatalf("%s constant not found in SpringDepVersions.kt", name)
+		}
+		kotlinValue, err := strconv.Atoi(string(match[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kotlinValue != goValue {
+			t.Fatalf(
+				"version drift: Go versions.%s=%d, Kotlin SpringDepVersions.%s=%d",
+				name, goValue, name, kotlinValue,
+			)
+		}
 	}
 }

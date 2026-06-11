@@ -7,3 +7,10 @@ package versions
 // Extractor must equal SpringDepVersions.EXTRACTOR in
 // indexer/src/main/kotlin/dev/springdep/indexer/SpringDepVersions.kt.
 const Extractor = 2
+
+// Schema must equal SpringDepVersions.SCHEMA (stamped into project.json).
+const Schema = 2
+
+// Session must equal SpringDepVersions.SESSION (the merged session database
+// layout version; sessions with a different stamp are rebuilt, not reused).
+const Session = 2

@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"dev.springdep/querier/internal/cache"
 	"dev.springdep/querier/internal/classpath"
@@ -18,9 +20,11 @@ import (
 	"dev.springdep/querier/internal/manifest"
 	"dev.springdep/querier/internal/mcp"
 	"dev.springdep/querier/internal/paths"
+	"dev.springdep/querier/internal/pointer"
 	"dev.springdep/querier/internal/project"
 	"dev.springdep/querier/internal/query"
 	"dev.springdep/querier/internal/registry"
+	"dev.springdep/querier/internal/session"
 	"dev.springdep/querier/internal/versions"
 )
 
@@ -184,24 +188,83 @@ func runIndexCommand(args []string) {
 			fail("invalid_arguments", "unknown option: "+argument, 2)
 		}
 	}
+	startedAt := time.Now()
+	jars := opts.jars
+	if registryURL != "" {
+		var stats registry.PrefetchStats
+		var dataPaths paths.DataPaths
+		jars, stats, dataPaths = prefetchFromRegistry(registryURL, registryPubkey, opts)
+		if stats.Complete {
+			finishIndexFromRegistry(stats, dataPaths, opts.projectDir, startedAt)
+			return
+		}
+	}
 	indexerBin, err := indexer.Locate(opts.indexer)
 	if err != nil {
 		fail("indexer_not_found", err.Error(), 1)
-	}
-	jars := opts.jars
-	if registryURL != "" {
-		jars = prefetchFromRegistry(registryURL, registryPubkey, opts)
 	}
 	if err := indexer.Run(indexerBin, jars, opts.projectDir, opts.home); err != nil {
 		fail("index_error", err.Error(), 1)
 	}
 }
 
+// finishIndexFromRegistry completes an index run whose every shard came from
+// the cache or the registry: the session merge, project pointer, and
+// CLAUDE.md guidance are produced in pure Go and the JVM never starts.
+func finishIndexFromRegistry(
+	stats registry.PrefetchStats, dataPaths paths.DataPaths, projectDir string, startedAt time.Time,
+) {
+	shards := make([]session.Shard, len(stats.Shards))
+	shardIDs := make([]string, len(stats.Shards))
+	for index, shard := range stats.Shards {
+		shards[index] = session.Shard{ShardID: shard.ShardID, Path: shard.Path}
+		shardIDs[index] = shard.ShardID
+	}
+	fingerprint := session.Fingerprint(shardIDs)
+	sessionPath := filepath.Join(dataPaths.Sessions, fingerprint+".db")
+	if err := session.BuildIfAbsent(sessionPath, shards); err != nil {
+		fail("index_error", "build session: "+err.Error(), 1)
+	}
+	coverage := project.Coverage{
+		JarsTotal:   len(shards),
+		JarsIndexed: len(shards),
+		JarsMissing: []string{},
+	}
+	if err := pointer.Write(projectDir, fingerprint, sessionPath, coverage); err != nil {
+		fail("index_error", "write project pointer: "+err.Error(), 1)
+	}
+	if err := pointer.EnsureClaudeInstructions(projectDir); err != nil {
+		fail("index_error", "write CLAUDE.md guidance: "+err.Error(), 1)
+	}
+	fmt.Fprintln(
+		os.Stderr,
+		"springdep: session built from cached/registry shards; no local extraction needed",
+	)
+	printJSON(struct {
+		JarsTotal        int      `json:"jars_total"`
+		JarsIndexed      int      `json:"jars_indexed"`
+		JarsNewlyIndexed int      `json:"jars_newly_indexed"`
+		JarsSkipped      int      `json:"jars_skipped"`
+		JarsMissing      []string `json:"jars_missing"`
+		DurationMS       int64    `json:"duration_ms"`
+	}{
+		JarsTotal:        len(shards),
+		JarsIndexed:      len(shards),
+		JarsNewlyIndexed: 0,
+		JarsSkipped:      len(shards),
+		JarsMissing:      []string{},
+		DurationMS:       time.Since(startedAt).Milliseconds(),
+	})
+}
+
 // prefetchFromRegistry downloads missing shards before the JVM indexer runs
 // so it hits the local cache instead of extracting. Returns the (possibly
-// discovered) jar specification the indexer should use. Prefetch problems
-// degrade to local extraction and never abort the index run.
-func prefetchFromRegistry(registryURL, registryPubkey string, opts options) string {
+// discovered) jar specification, the prefetch outcome, and the resolved data
+// paths. Prefetch problems degrade to local extraction and never abort the
+// index run.
+func prefetchFromRegistry(
+	registryURL, registryPubkey string, opts options,
+) (string, registry.PrefetchStats, paths.DataPaths) {
 	client, err := registry.NewClient(registryURL, registryPubkey)
 	if err != nil {
 		fail("invalid_arguments", err.Error(), 2)
@@ -247,7 +310,7 @@ func prefetchFromRegistry(registryURL, registryPubkey string, opts options) stri
 		"springdep: registry prefetch: %d already cached, %d downloaded, %d not in registry, %d failed\n",
 		stats.CacheHits, stats.Downloaded, stats.Misses, stats.Failures,
 	)
-	return jars
+	return jars, stats, dataPaths
 }
 
 func runCacheCommand(args []string) {

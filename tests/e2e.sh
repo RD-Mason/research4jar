@@ -704,17 +704,45 @@ project3="$work/project3"
 mkdir -p "$project3"
 index3_json="$work/index3.json"
 index3_err="$work/index3.err"
-if ! "$SPRINGDEP_QUERY" index --jars "$jars" --project-dir "$project3" --home "$home3" \
+# --indexer points at nothing: a registry-covered classpath must finish in
+# pure Go without ever launching the JVM indexer. broken.jar (not a zip) can
+# never have a shard, so the covered set lists every jar except it.
+covered_jars="$(ls "$jars"/*.jar | grep -v broken.jar | paste -sd, -)"
+if ! "$SPRINGDEP_QUERY" index --jars "$covered_jars" --project-dir "$project3" --home "$home3" \
   --registry "http://127.0.0.1:$registry_port" --registry-pubkey "$pubkey" \
+  --indexer /nonexistent/springdep-index \
   > "$index3_json" 2> "$index3_err"; then
   echo "registry-backed index failed:" >&2
   cat "$index3_json" "$index3_err" >&2
   exit 1
 fi
+# Partial coverage (broken.jar can have no shard) must fall back to the JVM
+# indexer, which then skips every cached shard and reports the broken jar.
+project4="$work/project4"
+mkdir -p "$project4"
+index4_json="$work/index4.json"
+"$SPRINGDEP_QUERY" index --jars "$jars" --project-dir "$project4" --home "$home3" \
+  --registry "http://127.0.0.1:$registry_port" --registry-pubkey "$pubkey" \
+  > "$index4_json" 2> "$work/index4.err"
+python3 - "$index4_json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["jars_newly_indexed"] == 0, stats
+assert stats["jars_missing"] == ["broken.jar"], stats
+PY
+
 kill "$registry_server" 2>/dev/null || true
 registry_server=""
 grep -q "downloaded" "$index3_err" || {
   echo "expected prefetch summary on stderr:" >&2
+  cat "$index3_err" >&2
+  exit 1
+}
+grep -q "no local extraction" "$index3_err" || {
+  echo "expected the pure-Go session build path:" >&2
   cat "$index3_err" >&2
   exit 1
 }
@@ -739,6 +767,35 @@ import sys
 
 response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["total"] == 2, response
+PY
+
+registry_string_json="$work/registry-string.json"
+"$SPRINGDEP_QUERY" find-string X-SpringDep-Test \
+  --project-dir "$project3" > "$registry_string_json"
+python3 - "$registry_string_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] >= 1, response
+PY
+
+# The Go-written CLAUDE.md snippet must stay byte-identical to the Kotlin one
+# (both writers dedupe by heading, so drift would double-append).
+python3 - "$project/CLAUDE.md" "$project3/CLAUDE.md" <<'PY'
+import pathlib
+import sys
+
+heading = "## SpringDep（jar 配置项查询）"
+kotlin_written = pathlib.Path(sys.argv[1]).read_text()
+go_written = pathlib.Path(sys.argv[2]).read_text()
+kotlin_snippet = kotlin_written[kotlin_written.index(heading):]
+go_snippet = go_written[go_written.index(heading):]
+assert kotlin_snippet == go_snippet, (
+    "CLAUDE.md snippet drift between Kotlin and Go writers:\n"
+    f"kotlin: {kotlin_snippet!r}\ngo: {go_snippet!r}"
+)
 PY
 
 stats_json="$work/cache-stats.json"
