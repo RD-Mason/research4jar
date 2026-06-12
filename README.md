@@ -28,11 +28,15 @@ SQLite files are the only contract between the Kotlin indexer and Go querier.
 
 ## Install
 
+**Prebuilt archives** (Linux/macOS/Windows, amd64/arm64) are published on the [Releases page](https://github.com/RD-Mason/research4jar/releases): unpack, put `bin/` on your PATH. The JVM indexer is bundled under `libexec/` and found automatically; a JRE 17+ is only needed for jars the shard registry does not cover.
+
+**From source:**
+
 ```bash
 ./install.sh                  # builds and installs to ~/.local (override with PREFIX=...)
 ```
 
-Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Requirements: JDK 17+ and Go 1.23+ to build; only a JRE 17+ at runtime. Make sure `$PREFIX/bin` is on your PATH.
+Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Requirements: JDK 17+ and Go 1.23+ to build. Make sure `$PREFIX/bin` is on your PATH.
 
 ## Quick Start
 
@@ -107,6 +111,14 @@ springdep registry keygen ~/.springdep-signing.key               # prints the pu
 springdep registry export ./registry --sign-key ~/.springdep-signing.key
 # upload ./registry to any static host
 ```
+
+Or seed one directly from Maven coordinates — download, index, and export in one step (this is how the official registry is produced; see `registry/spring-coordinates.txt` and the `registry-publish` workflow, which deploys to GitHub Pages):
+
+```bash
+springdep registry seed ./registry --coordinates coords.txt --sign-key ~/.springdep-signing.key
+```
+
+Enterprises can run the same command against an internal Maven repository (`--repo https://nexus.internal/repository/maven-public`) to pre-index private artifacts.
 
 ## Cache lifecycle
 

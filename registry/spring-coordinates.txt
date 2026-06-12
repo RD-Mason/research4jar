@@ -1,0 +1,53 @@
+# Artifacts seeded into the official SpringDep shard registry.
+# One group:artifact:version per line; # comments and blank lines are skipped.
+#
+# Selection: the jars whose hidden behavior SpringDep queries answer most —
+# auto-configuration, conditions, config properties, SPI registrations.
+# Versions track recent stable Spring Boot release trains; a download miss is
+# warned and skipped, so adding a not-yet-released version is harmless.
+# Clients fall back to local extraction for anything not listed here.
+
+# --- Spring Boot 3.5 train ---
+org.springframework.boot:spring-boot:3.5.0
+org.springframework.boot:spring-boot-autoconfigure:3.5.0
+org.springframework.boot:spring-boot-actuator:3.5.0
+org.springframework.boot:spring-boot-actuator-autoconfigure:3.5.0
+org.springframework.boot:spring-boot-starter-web:3.5.0
+org.springframework:spring-core:6.2.7
+org.springframework:spring-beans:6.2.7
+org.springframework:spring-context:6.2.7
+org.springframework:spring-aop:6.2.7
+org.springframework:spring-tx:6.2.7
+org.springframework:spring-jdbc:6.2.7
+org.springframework:spring-web:6.2.7
+org.springframework:spring-webmvc:6.2.7
+org.springframework:spring-webflux:6.2.7
+org.springframework.data:spring-data-commons:3.5.0
+org.springframework.data:spring-data-jpa:3.5.0
+org.springframework.data:spring-data-redis:3.5.0
+org.springframework.security:spring-security-core:6.5.0
+org.springframework.security:spring-security-config:6.5.0
+org.springframework.security:spring-security-web:6.5.0
+
+# --- Spring Boot 3.4 train ---
+org.springframework.boot:spring-boot:3.4.5
+org.springframework.boot:spring-boot-autoconfigure:3.4.5
+org.springframework.boot:spring-boot-actuator:3.4.5
+org.springframework.boot:spring-boot-actuator-autoconfigure:3.4.5
+org.springframework:spring-core:6.2.6
+org.springframework:spring-beans:6.2.6
+org.springframework:spring-context:6.2.6
+org.springframework:spring-web:6.2.6
+org.springframework:spring-webmvc:6.2.6
+org.springframework.data:spring-data-commons:3.4.5
+org.springframework.data:spring-data-jpa:3.4.5
+org.springframework.security:spring-security-core:6.4.5
+org.springframework.security:spring-security-config:6.4.5
+org.springframework.security:spring-security-web:6.4.5
+
+# --- Common companions ---
+com.zaxxer:HikariCP:6.3.0
+org.hibernate.orm:hibernate-core:6.6.13.Final
+jakarta.persistence:jakarta.persistence-api:3.1.0
+jakarta.servlet:jakarta.servlet-api:6.1.0
+io.micrometer:micrometer-core:1.15.0

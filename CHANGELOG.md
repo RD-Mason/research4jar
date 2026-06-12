@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added (M5 shard lifecycle)
 
+- `springdep registry seed <dir> --coordinates <file>`: downloads Maven artifacts (Maven Central by default, `--repo` for internal repositories), indexes them, and exports the signed registry tree in one step. Download failures warn and skip so a partial seed still publishes.
+- Official registry pipeline: `registry/spring-coordinates.txt` curates the seeded artifacts (Spring Boot 3.4/3.5 trains, framework, data, security, common companions — all coordinates verified against Maven Central) and the `registry-publish` workflow seeds and deploys the tree to GitHub Pages, signing with the `SPRINGDEP_SIGNING_KEY` secret when configured.
 - Pure-Go index path: when the registry (plus local cache) covers every jar, `springdep index` merges the session database, writes the project pointer, and appends the CLAUDE.md guidance itself — the JVM indexer never starts and a JRE is no longer required on fully covered machines. Partial coverage falls back to the JVM indexer as before. The session layout version is stamped and drift-guarded, and the e2e suite proves the path by indexing with `--indexer /nonexistent` and asserting byte-identical CLAUDE.md output across both writers.
 
 - Shard registry: `springdep registry export` publishes the local cache as a static file tree (`v<extractor>/<jar_sha256>.db` + `.sha256` sidecar + optional `.sig`) any HTTP host can serve; `springdep registry keygen` generates an ed25519 signing keypair.

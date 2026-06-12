@@ -1,0 +1,73 @@
+name: Publish shard registry
+
+# Seeds the official SpringDep shard registry from registry/spring-coordinates.txt
+# and publishes it to GitHub Pages. The registry URL is then:
+#   https://<owner>.github.io/<repo>/
+# Configure clients with:
+#   SPRINGDEP_REGISTRY=https://<owner>.github.io/<repo>
+#   SPRINGDEP_REGISTRY_PUBKEY=<public key printed when the signing key was generated>
+#
+# Signing: set the repository secret SPRINGDEP_SIGNING_KEY to the hex private
+# key produced by `springdep registry keygen`. Without the secret the registry
+# publishes unsigned (clients without a configured pubkey still verify the
+# checksum sidecar and the shard's embedded identity).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - registry/spring-coordinates.txt
+      - .github/workflows/registry-publish.yml
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    name: Seed and publish
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: querier/go.mod
+          cache-dependency-path: querier/go.sum
+      - name: Build
+        run: make build
+      - name: Seed registry
+        env:
+          SPRINGDEP_SIGNING_KEY: ${{ secrets.SPRINGDEP_SIGNING_KEY }}
+        run: |
+          sign_args=()
+          if [ -n "$SPRINGDEP_SIGNING_KEY" ]; then
+            printf '%s\n' "$SPRINGDEP_SIGNING_KEY" > /tmp/signing.key
+            chmod 600 /tmp/signing.key
+            sign_args=(--sign-key /tmp/signing.key)
+          fi
+          ./build/bin/springdep registry seed ./_site \
+            --coordinates registry/spring-coordinates.txt \
+            --indexer indexer/build/install/springdep-index/bin/springdep-index \
+            --home /tmp/springdep-seed-home \
+            "${sign_args[@]}"
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

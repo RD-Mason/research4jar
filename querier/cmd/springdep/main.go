@@ -364,28 +364,37 @@ func runCacheCommand(args []string) {
 }
 
 func runRegistryCommand(args []string) {
-	if len(args) == 0 || (args[0] != "export" && args[0] != "keygen") {
+	if len(args) == 0 || (args[0] != "export" && args[0] != "keygen" && args[0] != "seed") {
 		fail(
 			"invalid_arguments",
 			"usage: springdep registry export <DIR> [--sign-key PATH] [--home DIR] | "+
+				"springdep registry seed <DIR> --coordinates <FILE> [--repo URL] "+
+				"[--sign-key PATH] [--home DIR] [--indexer PATH] | "+
 				"springdep registry keygen <PATH>",
 			2,
 		)
 	}
 	subcommand := args[0]
-	var target, signKey, home string
+	var target, signKey, home, coordinatesPath, repo, indexerPath string
 	for index := 1; index < len(args); index++ {
 		argument := args[index]
 		switch argument {
-		case "--sign-key", "--home":
+		case "--sign-key", "--home", "--coordinates", "--repo", "--indexer":
 			value, next, err := optionValue(args, index, argument)
 			if err != nil {
 				fail("invalid_arguments", err.Error(), 2)
 			}
-			if argument == "--sign-key" {
+			switch argument {
+			case "--sign-key":
 				signKey = value
-			} else {
+			case "--home":
 				home = value
+			case "--coordinates":
+				coordinatesPath = value
+			case "--repo":
+				repo = value
+			case "--indexer":
+				indexerPath = value
 			}
 			index = next
 		default:
@@ -411,6 +420,14 @@ func runRegistryCommand(args []string) {
 			"private_key_path": target,
 			"public_key":       publicKey,
 		})
+		return
+	}
+
+	if subcommand == "seed" {
+		if coordinatesPath == "" {
+			fail("invalid_arguments", "seed requires --coordinates <FILE>", 2)
+		}
+		seedRegistry(target, coordinatesPath, repo, signKey, home, indexerPath)
 		return
 	}
 
@@ -441,6 +458,94 @@ func runRegistryCommand(args []string) {
 		fail("registry_error", err.Error(), 1)
 	}
 	printJSON(result)
+}
+
+// seedRegistry downloads jars for a coordinates list, indexes them into the
+// (usually fresh) home, and exports the resulting shards as a registry tree.
+// This is how the official public registry — and any enterprise's private
+// one — is produced in CI.
+func seedRegistry(outputDir, coordinatesPath, repo, signKey, home, indexerPath string) {
+	if repo == "" {
+		repo = registry.DefaultMavenRepo
+	}
+	coordinatesFile, err := os.Open(coordinatesPath)
+	if err != nil {
+		fail("registry_error", err.Error(), 1)
+	}
+	coordinates, err := registry.ParseCoordinates(coordinatesFile)
+	coordinatesFile.Close()
+	if err != nil {
+		fail("invalid_arguments", "parse coordinates: "+err.Error(), 2)
+	}
+	if len(coordinates) == 0 {
+		fail("invalid_arguments", "coordinates file lists no artifacts", 2)
+	}
+
+	jarDir, err := os.MkdirTemp("", "springdep-seed-jars-")
+	if err != nil {
+		fail("registry_error", err.Error(), 1)
+	}
+	defer os.RemoveAll(jarDir)
+	fmt.Fprintf(
+		os.Stderr, "springdep: downloading %d artifacts from %s\n", len(coordinates), repo,
+	)
+	jars, downloadFailures := registry.DownloadJars(
+		context.Background(), repo, coordinates, jarDir, os.Stderr,
+	)
+	if len(jars) == 0 {
+		fail("registry_error", "no artifacts could be downloaded", 1)
+	}
+
+	indexerBin, err := indexer.Locate(indexerPath)
+	if err != nil {
+		fail("indexer_not_found", err.Error(), 1)
+	}
+	scratchProject, err := os.MkdirTemp("", "springdep-seed-project-")
+	if err != nil {
+		fail("registry_error", err.Error(), 1)
+	}
+	defer os.RemoveAll(scratchProject)
+	if err := indexer.Run(indexerBin, strings.Join(jars, ","), scratchProject, home); err != nil {
+		fail("index_error", err.Error(), 1)
+	}
+
+	dataPaths, err := paths.Resolve(home)
+	if err != nil {
+		fail("registry_error", err.Error(), 1)
+	}
+	manifestDB, err := manifest.Open(dataPaths.Manifest)
+	if err != nil {
+		fail("registry_error", err.Error(), 1)
+	}
+	shards, err := manifestDB.List()
+	manifestDB.Close()
+	if err != nil {
+		fail("registry_error", err.Error(), 1)
+	}
+	var signingKey ed25519.PrivateKey
+	if signKey != "" {
+		signingKey, err = registry.LoadSigningKey(signKey)
+		if err != nil {
+			fail("registry_error", err.Error(), 1)
+		}
+	}
+	result, err := registry.Export(
+		shards, versions.Extractor, outputDir, signingKey, "springdep "+version, os.Stderr,
+	)
+	if err != nil {
+		fail("registry_error", err.Error(), 1)
+	}
+	printJSON(struct {
+		registry.ExportResult
+		Coordinates    int `json:"coordinates"`
+		DownloadFailed int `json:"download_failed"`
+		JarsDownloaded int `json:"jars_downloaded"`
+	}{
+		ExportResult:   result,
+		Coordinates:    len(coordinates),
+		DownloadFailed: downloadFailures,
+		JarsDownloaded: len(jars),
+	})
 }
 
 func printJSON(response any) {
@@ -694,6 +799,8 @@ func printHelp() {
                                                        size budget; sessions past the age limit.
   springdep registry export <DIR> [--sign-key <PATH>]  Export local shards as a static registry
                                                        tree (any HTTP host can serve it).
+  springdep registry seed <DIR> --coordinates <FILE>   Download Maven artifacts, index them, and
+                     [--repo <URL>] [--sign-key <PATH>] export the registry tree in one step.
   springdep registry keygen <PATH>                     Generate an ed25519 signing keypair.
 
   springdep find-config-properties <PREFIX>            Config properties under a prefix.
