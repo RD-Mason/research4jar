@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added (general Java agent retrieval)
+
+- General Java queries: `find-class`, `find-method`, `list-packages`, `search-symbol`, and `open-symbol` let agents search and expand ordinary Java dependency facts, not just Spring-specific facts.
+- Maven dependency provenance: `springdep index` now captures Maven `dependency:tree` output into `.springdep/dependencies.json` when run in a Maven project, and `why-dependency <coordinate|jar|class>` explains direct/transitive dependency paths.
+- MCP retrieval workflow: new `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, and `list_packages` tools guide agents through search → expand → explain instead of reading jars blindly.
+- The generated `CLAUDE.md` guidance now describes Java/Maven dependency fact retrieval while keeping the existing Spring-specific commands.
+
 ### Added (M5 shard lifecycle)
 
 - `springdep registry seed <dir> --coordinates <file>`: downloads Maven artifacts (Maven Central by default, `--repo` for internal repositories), indexes them, and exports the signed registry tree in one step. Download failures warn and skip so a partial seed still publishes.

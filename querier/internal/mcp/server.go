@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 
+	"dev.springdep/querier/internal/depgraph"
 	"dev.springdep/querier/internal/indexer"
 	"dev.springdep/querier/internal/project"
 	"dev.springdep/querier/internal/query"
@@ -226,6 +227,49 @@ func dispatchTool(name string, arguments toolArguments) (any, error) {
 		return query.ListExtensionPoints(
 			ctx, pointer, manifestPath, arguments.Arg, arguments.Page, arguments.PageSize,
 		)
+	case "find_class":
+		if arguments.Text == "" && arguments.FQN == "" && arguments.Arg == "" {
+			return nil, errors.New("text, fqn, or arg is required")
+		}
+		return query.FindClass(
+			ctx, pointer, manifestPath, firstNonEmpty(arguments.Text, arguments.FQN, arguments.Arg),
+			arguments.Page, arguments.PageSize,
+		)
+	case "find_method":
+		if arguments.Text == "" && arguments.Arg == "" {
+			return nil, errors.New("text or arg is required")
+		}
+		return query.FindMethod(
+			ctx, pointer, manifestPath, firstNonEmpty(arguments.Text, arguments.Arg),
+			arguments.Page, arguments.PageSize,
+		)
+	case "list_packages":
+		return query.ListPackages(
+			ctx, pointer, manifestPath, arguments.Arg, arguments.Page, arguments.PageSize,
+		)
+	case "search_symbols":
+		if arguments.Text == "" {
+			return nil, errors.New("text is required")
+		}
+		return query.SearchSymbol(
+			ctx, pointer, manifestPath, arguments.Text, arguments.Page, arguments.PageSize,
+		)
+	case "open_symbol":
+		if arguments.FQN == "" && arguments.Arg == "" {
+			return nil, errors.New("fqn or arg is required")
+		}
+		return query.OpenSymbol(ctx, pointer, manifestPath, firstNonEmpty(arguments.FQN, arguments.Arg))
+	case "why_dependency":
+		if arguments.FQN == "" && arguments.Arg == "" {
+			return nil, errors.New("fqn or arg is required")
+		}
+		projectRoot, err := project.Root(arguments.ProjectDir)
+		if err != nil {
+			return nil, err
+		}
+		return query.WhyDependency(
+			ctx, pointer, manifestPath, projectRoot, firstNonEmpty(arguments.FQN, arguments.Arg),
+		)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
@@ -245,10 +289,23 @@ func runIndex(arguments toolArguments) (any, error) {
 	if err := indexer.Run(indexerBin, arguments.Jars, projectDir, arguments.Home); err != nil {
 		return nil, fmt.Errorf("indexing failed: %w", err)
 	}
+	provenance := "not captured"
+	if graph, err := depgraph.Capture(projectDir); err == nil {
+		if err := depgraph.Write(projectDir, graph); err != nil {
+			provenance = "capture succeeded but write failed: " + err.Error()
+		} else {
+			provenance = "captured"
+		}
+	} else if errors.Is(err, depgraph.ErrUnsupported) {
+		provenance = "unsupported build tool"
+	} else {
+		provenance = "capture failed: " + err.Error()
+	}
 	return map[string]any{
-		"status":      "indexed",
-		"project_dir": projectDir,
-		"note":        "Project pointer written to .springdep/project.json; query tools are ready.",
+		"status":                "indexed",
+		"project_dir":           projectDir,
+		"dependency_provenance": provenance,
+		"note":                  "Project pointer written to .springdep/project.json; query tools are ready.",
 	}, nil
 }
 
@@ -257,6 +314,15 @@ func toolError(message string) map[string]any {
 		"content": []map[string]any{{"type": "text", "text": message}},
 		"isError": true,
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func toolCatalog() []toolDefinition {
@@ -367,6 +433,53 @@ func toolCatalog() []toolDefinition {
 			InputSchema: schema(withPaging(map[string]any{
 				"arg": map[string]any{"type": "string", "description": "Optional SPI key or mechanism (autoconfig.imports | spring.factories | services)."},
 			})),
+		},
+		{
+			Name: "find_class",
+			Description: "Find Java classes by simple name, fully-qualified name, package prefix, " +
+				"or substring across indexed dependency jars.",
+			InputSchema: schema(withPaging(map[string]any{
+				"text": map[string]any{"type": "string", "description": "Class simple name, FQN, package prefix, or substring."},
+			}), "text"),
+		},
+		{
+			Name:        "find_method",
+			Description: "Find Java methods by method name, substring, or Class#method shape.",
+			InputSchema: schema(withPaging(map[string]any{
+				"text": map[string]any{"type": "string", "description": "Method name, substring, or Class#method."},
+			}), "text"),
+		},
+		{
+			Name:        "list_packages",
+			Description: "List Java packages grouped by source jar. Pass arg to restrict to a package prefix.",
+			InputSchema: schema(withPaging(map[string]any{
+				"arg": map[string]any{"type": "string", "description": "Optional package prefix."},
+			})),
+		},
+		{
+			Name: "search_symbols",
+			Description: "Broad retrieval entrypoint for agents: search classes, methods, annotations, " +
+				"SPI registrations, Spring config properties, and string constants before opening a result.",
+			InputSchema: schema(withPaging(map[string]any{
+				"text": map[string]any{"type": "string", "description": "Text to search for."},
+			}), "text"),
+		},
+		{
+			Name:        "open_symbol",
+			Description: "Open a symbol returned by search_symbols. Use a class FQN or Class#method.",
+			InputSchema: schema(map[string]any{
+				"fqn":         map[string]any{"type": "string", "description": "Class FQN or Class#method symbol."},
+				"project_dir": projectDir,
+			}, "fqn"),
+		},
+		{
+			Name: "why_dependency",
+			Description: "Explain why a Maven dependency jar is present. Accepts group:artifact, " +
+				"group:artifact:version, jar filename, or a class FQN.",
+			InputSchema: schema(map[string]any{
+				"fqn":         map[string]any{"type": "string", "description": "Coordinate, jar filename, or class FQN."},
+				"project_dir": projectDir,
+			}, "fqn"),
 		},
 	}
 }

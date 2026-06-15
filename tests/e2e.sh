@@ -312,7 +312,7 @@ test "$(find "$home1/shards" -name '*.db' | wc -l | tr -d ' ')" = "8"
 test -f "$home1/manifest.db"
 test -f "$project/.springdep/project.json"
 grep -q '^# Existing project instructions' "$project/CLAUDE.md"
-test "$(grep -c '^## SpringDep（jar 配置项查询）$' "$project/CLAUDE.md")" = "1"
+test "$(grep -c '^## SpringDep（Java 依赖事实查询）$' "$project/CLAUDE.md")" = "1"
 
 query_json="$work/query.json"
 (cd "$project/nested/work" && \
@@ -459,6 +459,144 @@ assert any(a["fqn"] == "example.Marker" for a in detail["annotations"]), detail
 assert any(m["name"] == "value" for m in detail["methods"]), detail
 PY
 
+find_class_json="$work/find-class.json"
+"$SPRINGDEP_QUERY" find-class DirectImplementation \
+  --project-dir "$project" > "$find_class_json"
+python3 - "$find_class_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+result = response["results"][0]
+assert result["fqn"] == "other.DirectImplementation", result
+assert result["match_reason"] == "simple_name", result
+assert result["source_jar"] == "com.example:implementation:1.0", result
+PY
+
+find_method_json="$work/find-method.json"
+"$SPRINGDEP_QUERY" find-method other.DirectImplementation#value \
+  --project-dir "$project" > "$find_method_json"
+python3 - "$find_method_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+method = response["results"][0]
+assert method["class_fqn"] == "other.DirectImplementation", method
+assert method["name"] == "value", method
+assert method["return"] == "java.lang.String", method
+PY
+
+packages_json="$work/list-packages.json"
+"$SPRINGDEP_QUERY" list-packages other \
+  --project-dir "$project" > "$packages_json"
+python3 - "$packages_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+assert response["results"][0]["package"] == "other", response
+assert response["results"][0]["classes"] == 1, response
+PY
+
+search_symbol_json="$work/search-symbol.json"
+"$SPRINGDEP_QUERY" search-symbol springdep.fixture \
+  --project-dir "$project" > "$search_symbol_json"
+python3 - "$search_symbol_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+result = response["results"][0]
+assert result["kind"] == "string", result
+assert result["owner"] == "other.DirectImplementation", result
+PY
+
+open_symbol_json="$work/open-symbol.json"
+"$SPRINGDEP_QUERY" open-symbol other.DirectImplementation#value \
+  --project-dir "$project" > "$open_symbol_json"
+python3 - "$open_symbol_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+method = response["results"][0]["method"]
+assert method["class_fqn"] == "other.DirectImplementation", method
+assert method["name"] == "value", method
+PY
+
+cat > "$project/.springdep/dependencies.json" <<'JSON'
+{
+  "schema_version": 1,
+  "build_tool": "maven",
+  "generated_at": 0,
+  "artifacts": [
+    {
+      "coordinate": "com.example:app:1.0",
+      "artifact": "com.example:app",
+      "group": "com.example",
+      "name": "app",
+      "version": "1.0",
+      "direct": false,
+      "depth": 0,
+      "path": []
+    },
+    {
+      "coordinate": "com.example:api:1.0",
+      "artifact": "com.example:api",
+      "group": "com.example",
+      "name": "api",
+      "version": "1.0",
+      "scope": "compile",
+      "parent": "com.example:app:1.0",
+      "direct": true,
+      "depth": 1,
+      "path": ["com.example:api:1.0"]
+    },
+    {
+      "coordinate": "com.example:implementation:1.0",
+      "artifact": "com.example:implementation",
+      "group": "com.example",
+      "name": "implementation",
+      "version": "1.0",
+      "scope": "runtime",
+      "parent": "com.example:api:1.0",
+      "direct": false,
+      "depth": 2,
+      "path": ["com.example:api:1.0", "com.example:implementation:1.0"]
+    }
+  ]
+}
+JSON
+why_dependency_json="$work/why-dependency.json"
+"$SPRINGDEP_QUERY" why-dependency other.DirectImplementation \
+  --project-dir "$project" > "$why_dependency_json"
+python3 - "$why_dependency_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+result = response["results"][0]
+assert result["coordinate"] == "com.example:implementation:1.0", result
+assert result["matched_by"] == "class", result
+assert result["path"] == [
+    "com.example:api:1.0",
+    "com.example:implementation:1.0",
+], result
+PY
+
 beans_json="$work/bean-definitions.json"
 "$SPRINGDEP_QUERY" get-bean-definitions java.lang.String \
   --project-dir "$project" > "$beans_json"
@@ -552,7 +690,7 @@ assert stats["jars_newly_indexed"] == 0, stats
 assert stats["jars_skipped"] == 8, stats
 assert stats["jars_missing"] == ["broken.jar"], stats
 PY
-test "$(grep -c '^## SpringDep（jar 配置项查询）$' "$project/CLAUDE.md")" = "1"
+test "$(grep -c '^## SpringDep（Java 依赖事实查询）$' "$project/CLAUDE.md")" = "1"
 
 corrupt_shard="$(find "$home1/shards" -name '*.db' | sort | head -1)"
 printf 'corruption' >> "$corrupt_shard"
@@ -787,7 +925,7 @@ python3 - "$project/CLAUDE.md" "$project3/CLAUDE.md" <<'PY'
 import pathlib
 import sys
 
-heading = "## SpringDep（jar 配置项查询）"
+heading = "## SpringDep（Java 依赖事实查询）"
 kotlin_written = pathlib.Path(sys.argv[1]).read_text()
 go_written = pathlib.Path(sys.argv[2]).read_text()
 kotlin_snippet = kotlin_written[kotlin_written.index(heading):]

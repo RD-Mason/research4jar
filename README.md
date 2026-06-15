@@ -5,7 +5,7 @@
 
 > Early-stage software under active development. Data contracts and commands may still evolve before the first stable release.
 
-SpringDep turns Spring dependency jars into a local, queryable fact database so coding agents can inspect framework behavior instead of guessing from model memory.
+SpringDep turns Maven/Java dependency jars into a local, queryable fact database so coding agents can inspect library behavior instead of guessing from model memory. It has deep Spring Boot facts, but the core class, method, package, SPI, string, and dependency provenance queries work for ordinary Java Maven projects too.
 
 Large Spring Boot applications hide important behavior inside dependency jars: auto-configuration, conditional activation, bean factories, configuration properties, annotations, class hierarchies, and extension registrations. Those facts are easy for an AI tool to miss and expensive to recover by repeatedly reading bytecode or source. SpringDep extracts them once into deterministic SQLite shards and exposes small, source-aware queries.
 
@@ -52,6 +52,12 @@ springdep get-bean-definitions javax.sql.DataSource
 springdep explain-conditional org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
 springdep find-string X-Forwarded-For
 springdep list-extension-points
+springdep search-symbol DataSourceAutoConfiguration
+springdep open-symbol org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+springdep why-dependency org.springframework.boot:spring-boot-autoconfigure
+springdep find-class FilterRegistrationBean
+springdep find-method org.example.Foo#bar
+springdep list-packages org.springframework.boot.autoconfigure
 ```
 
 `springdep index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache and unchanged classpaths reuse the session database.
@@ -80,7 +86,7 @@ All query commands support `--format json|text`, `--page`, `--page-size`, and `-
 claude mcp add springdep -- springdep mcp
 ```
 
-Tools exposed: `index_project` (auto-resolves the classpath via Maven/Gradle), `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory.
+Tools exposed: `index_project` (auto-resolves the classpath via Maven/Gradle), `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, the intended retrieval flow is broad search first (`search_symbols`), then expand one result (`open_symbol`) or explain why its jar is present (`why_dependency`).
 
 For CLI-driven agents without MCP, `springdep index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
 
@@ -159,6 +165,8 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Transitive cross-jar implementation lookup (query-time recursive traversal over symbolic references)
 - Meta-annotation expansion at query time (`@Component` finds `@Service`/`@Repository`/`@Controller` classes)
 - Class detail, bean-definition, conditional-explanation, string-constant, and extension-point queries
+- General Java retrieval: class search, method search, package summaries, broad `search-symbol`, and `open-symbol`
+- Maven dependency provenance: `springdep index` captures `.springdep/dependencies.json` for Maven projects and `why-dependency` explains direct/transitive dependency paths by coordinate, jar filename, or class FQN
 - Maven/Gradle classpath auto-discovery (`springdep index`) and an MCP stdio server (`springdep mcp`)
 - Shard registry: static-hostable export (`springdep registry export`), verified download-instead-of-extract (`springdep index --registry`), and ed25519 signing
 - Pure-Go indexing for registry-covered classpaths: session merge, project pointer, and CLAUDE.md guidance without a JVM
@@ -169,6 +177,7 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 
 - `find-by-annotation` expands meta-annotations but does not merge `@AliasFor` attribute aliases; attributes are reported as written on the matched annotation.
 - `find-string` is substring matching over extracted constants, not full-text search with ranking.
+- `why-dependency` currently requires a Maven project indexed through `springdep index`; Gradle dependency provenance is not captured yet.
 - A JRE is only needed when at least one jar misses the registry (or no registry is configured); fully covered classpaths index in pure Go.
 - `--fat-jar` is not implemented; extract `BOOT-INF/lib/*.jar` first.
 

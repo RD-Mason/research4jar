@@ -26,6 +26,6 @@ class ProjectPointerTest {
         assertEquals("0123456789abcdef", json["classpath_fingerprint"].asText())
         val claude = Files.readString(project.resolve("CLAUDE.md"))
         assertTrue(claude.startsWith(original))
-        assertEquals(1, "## SpringDep（jar 配置项查询）".toRegex().findAll(claude).count())
+        assertEquals(1, "## SpringDep（Java 依赖事实查询）".toRegex().findAll(claude).count())
     }
 }

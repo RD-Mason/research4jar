@@ -55,6 +55,8 @@ func TestInitializeAndToolsList(t *testing.T) {
 		"index_project", "find_config_properties", "find_implementations",
 		"find_by_annotation", "get_class", "get_bean_definitions",
 		"explain_conditional", "find_string", "list_extension_points",
+		"find_class", "find_method", "list_packages", "search_symbols",
+		"open_symbol", "why_dependency",
 	} {
 		if !names[required] {
 			t.Fatalf("missing tool %q in %v", required, names)

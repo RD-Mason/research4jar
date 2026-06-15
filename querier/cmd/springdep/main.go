@@ -15,6 +15,7 @@ import (
 
 	"dev.springdep/querier/internal/cache"
 	"dev.springdep/querier/internal/classpath"
+	"dev.springdep/querier/internal/depgraph"
 	"dev.springdep/querier/internal/indexer"
 	"dev.springdep/querier/internal/jarsource"
 	"dev.springdep/querier/internal/manifest"
@@ -57,6 +58,12 @@ var queryCommands = map[string]bool{
 	"explain-conditional":    true,
 	"find-string":            true,
 	"list-extension-points":  true,
+	"find-class":             true,
+	"find-method":            true,
+	"list-packages":          true,
+	"search-symbol":          true,
+	"open-symbol":            true,
+	"why-dependency":         true,
 }
 
 func main() {
@@ -88,7 +95,7 @@ func main() {
 		fail("invalid_command", "未知命令："+command, 2)
 	}
 
-	opts, err := parseOptions(os.Args[2:], command == "list-extension-points")
+	opts, err := parseOptions(os.Args[2:], command == "list-extension-points" || command == "list-packages")
 	if err != nil {
 		fail("invalid_arguments", err.Error(), 2)
 	}
@@ -135,6 +142,30 @@ func main() {
 		response, err = query.ListExtensionPoints(
 			ctx, pointer, manifestPath, opts.arg, opts.page, opts.pageSize,
 		)
+	case "find-class":
+		response, err = query.FindClass(
+			ctx, pointer, manifestPath, opts.arg, opts.page, opts.pageSize,
+		)
+	case "find-method":
+		response, err = query.FindMethod(
+			ctx, pointer, manifestPath, opts.arg, opts.page, opts.pageSize,
+		)
+	case "list-packages":
+		response, err = query.ListPackages(
+			ctx, pointer, manifestPath, opts.arg, opts.page, opts.pageSize,
+		)
+	case "search-symbol":
+		response, err = query.SearchSymbol(
+			ctx, pointer, manifestPath, opts.arg, opts.page, opts.pageSize,
+		)
+	case "open-symbol":
+		response, err = query.OpenSymbol(ctx, pointer, manifestPath, opts.arg)
+	case "why-dependency":
+		var projectRoot string
+		projectRoot, err = project.Root(opts.projectDir)
+		if err == nil {
+			response, err = query.WhyDependency(ctx, pointer, manifestPath, projectRoot, opts.arg)
+		}
 	}
 	if err != nil {
 		message := err.Error()
@@ -206,6 +237,7 @@ func runIndexCommand(args []string) {
 	if err := indexer.Run(indexerBin, jars, opts.projectDir, opts.home); err != nil {
 		fail("index_error", err.Error(), 1)
 	}
+	captureDependencyProvenance(opts.projectDir)
 }
 
 // finishIndexFromRegistry completes an index run whose every shard came from
@@ -236,6 +268,7 @@ func finishIndexFromRegistry(
 	if err := pointer.EnsureClaudeInstructions(projectDir); err != nil {
 		fail("index_error", "write CLAUDE.md guidance: "+err.Error(), 1)
 	}
+	captureDependencyProvenance(projectDir)
 	fmt.Fprintln(
 		os.Stderr,
 		"springdep: session built from cached/registry shards; no local extraction needed",
@@ -311,6 +344,20 @@ func prefetchFromRegistry(
 		stats.CacheHits, stats.Downloaded, stats.Misses, stats.Failures,
 	)
 	return jars, stats, dataPaths
+}
+
+func captureDependencyProvenance(projectDir string) {
+	graph, err := depgraph.Capture(projectDir)
+	if errors.Is(err, depgraph.ErrUnsupported) {
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: dependency provenance unavailable: %v\n", err)
+		return
+	}
+	if err := depgraph.Write(projectDir, graph); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: write dependency provenance: %v\n", err)
+	}
 }
 
 func runCacheCommand(args []string) {
@@ -651,6 +698,16 @@ func printText(response any) {
 		printStringsText(typed)
 	case query.ExtensionPointsResponse:
 		printExtensionsText(typed)
+	case query.ClassSearchResponse:
+		printClassSearchText(typed)
+	case query.MethodSearchResponse:
+		printMethodSearchText(typed)
+	case query.PackageListResponse:
+		printPackagesText(typed)
+	case query.SearchSymbolResponse:
+		printSearchSymbolsText(typed)
+	case query.DependencyWhyResponse:
+		printWhyDependencyText(typed)
 	default:
 		// Nested detail responses (get-class, explain-conditional) read best
 		// as structured JSON even in text mode.
@@ -658,6 +715,76 @@ func printText(response any) {
 		encoder.SetIndent("", "  ")
 		_ = encoder.Encode(response)
 	}
+}
+
+func printClassSearchText(response query.ClassSearchResponse) {
+	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "FQN\tKIND\tSCORE\tREASON\tSOURCE JAR")
+	for _, result := range response.Results {
+		fmt.Fprintf(
+			writer, "%s\t%s\t%d\t%s\t%s\n",
+			result.FQN, valueOrDash(result.Kind), result.Score, result.MatchReason, result.SourceJar,
+		)
+	}
+	writer.Flush()
+	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+}
+
+func printMethodSearchText(response query.MethodSearchResponse) {
+	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "METHOD\tRETURN\tSCORE\tREASON\tSOURCE JAR")
+	for _, result := range response.Results {
+		fmt.Fprintf(
+			writer, "%s#%s%s\t%s\t%d\t%s\t%s\n",
+			result.ClassFQN, result.Name, result.Descriptor,
+			valueOrDash(result.ReturnFQN), result.Score, result.MatchReason, result.SourceJar,
+		)
+	}
+	writer.Flush()
+	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+}
+
+func printPackagesText(response query.PackageListResponse) {
+	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "PACKAGE\tCLASSES\tSOURCE JAR")
+	for _, result := range response.Results {
+		fmt.Fprintf(writer, "%s\t%d\t%s\n", result.Package, result.Classes, result.SourceJar)
+	}
+	writer.Flush()
+	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+}
+
+func printSearchSymbolsText(response query.SearchSymbolResponse) {
+	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "KIND\tNAME\tOWNER\tSCORE\tREASON\tSOURCE JAR")
+	for _, result := range response.Results {
+		fmt.Fprintf(
+			writer, "%s\t%s\t%s\t%d\t%s\t%s\n",
+			result.Kind, result.Name, valueOrDash(result.Owner),
+			result.Score, result.MatchReason, result.SourceJar,
+		)
+	}
+	writer.Flush()
+	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+}
+
+func printWhyDependencyText(response query.DependencyWhyResponse) {
+	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "COORDINATE\tDIRECT\tDEPTH\tPATH")
+	for _, result := range response.Results {
+		fmt.Fprintf(
+			writer, "%s\t%t\t%d\t%s\n",
+			result.Coordinate, result.Direct, result.Depth, strings.Join(result.Path, " -> "),
+		)
+	}
+	writer.Flush()
+	fmt.Printf(
+		"\ntotal %d; coverage %d/%d jars, %d missing\n",
+		response.Total,
+		response.Coverage.JarsIndexed,
+		response.Coverage.JarsTotal,
+		len(response.Coverage.JarsMissing),
+	)
 }
 
 func printConfigPropertiesText(response query.ConfigPropertiesResponse) {
@@ -813,6 +940,14 @@ func printHelp() {
   springdep explain-conditional <FQN>                  Class- and method-level conditions.
   springdep find-string <TEXT>                         Substring search over string constants.
   springdep list-extension-points [KEY|MECHANISM]      SPI registrations summary or detail.
+  springdep find-class <NAME|PATTERN>                  Find classes by simple name, FQN, prefix,
+                                                       or substring.
+  springdep find-method <NAME|PATTERN>                 Find methods by name or Class#method.
+  springdep list-packages [PREFIX]                     List packages grouped by source jar.
+  springdep search-symbol <TEXT>                       Search classes, methods, annotations,
+                                                       SPI, config properties, and strings.
+  springdep open-symbol <FQN|CLASS#METHOD>             Expand a class or method search result.
+  springdep why-dependency <COORD|JAR|CLASS>           Explain why a Maven dependency is present.
 
 Options:
   --project-dir <PATH>  Project root. Defaults to searching upward from cwd.

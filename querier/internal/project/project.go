@@ -55,6 +55,15 @@ func Locate(projectDir string) (string, error) {
 	}
 }
 
+// Root returns the project root that owns .springdep/project.json.
+func Root(projectDir string) (string, error) {
+	projectPath, err := Locate(projectDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(filepath.Dir(projectPath)), nil
+}
+
 func Load(path string) (Pointer, error) {
 	file, err := os.Open(path)
 	if err != nil {
