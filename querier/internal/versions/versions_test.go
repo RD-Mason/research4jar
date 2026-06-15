@@ -8,14 +8,14 @@ import (
 	"testing"
 )
 
-// TestExtractorMatchesKotlin parses SpringDepVersions.kt so the Go and Kotlin
+// TestExtractorMatchesKotlin parses Research4JarVersions.kt so the Go and Kotlin
 // halves cannot drift apart silently. Skips when the Kotlin tree is absent
 // (e.g. the querier module is vendored elsewhere).
 func TestExtractorMatchesKotlin(t *testing.T) {
 	kotlinPath := filepath.Join(
 		"..", "..", "..",
-		"indexer", "src", "main", "kotlin", "dev", "springdep", "indexer",
-		"SpringDepVersions.kt",
+		"indexer", "src", "main", "kotlin", "dev", "research4jar", "indexer",
+		"Research4JarVersions.kt",
 	)
 	content, err := os.ReadFile(kotlinPath)
 	if err != nil {
@@ -30,7 +30,7 @@ func TestExtractorMatchesKotlin(t *testing.T) {
 		pattern := regexp.MustCompile(`const val ` + name + ` = (\d+)`)
 		match := pattern.FindSubmatch(content)
 		if match == nil {
-			t.Fatalf("%s constant not found in SpringDepVersions.kt", name)
+			t.Fatalf("%s constant not found in Research4JarVersions.kt", name)
 		}
 		kotlinValue, err := strconv.Atoi(string(match[1]))
 		if err != nil {
@@ -38,7 +38,7 @@ func TestExtractorMatchesKotlin(t *testing.T) {
 		}
 		if kotlinValue != goValue {
 			t.Fatalf(
-				"version drift: Go versions.%s=%d, Kotlin SpringDepVersions.%s=%d",
+				"version drift: Go versions.%s=%d, Kotlin Research4JarVersions.%s=%d",
 				name, goValue, name, kotlinValue,
 			)
 		}

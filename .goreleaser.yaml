@@ -1,6 +1,6 @@
 version: 2
 
-project_name: springdep
+project_name: research4jar
 
 # The JVM indexer distribution is platform-independent; build it once and
 # bundle it into every archive so releases are self-contained (JDK 17+ is
@@ -10,12 +10,12 @@ before:
     - ./gradlew :indexer:installDist
 
 builds:
-  - id: springdep
+  - id: research4jar
     dir: querier
-    main: ./cmd/springdep
+    main: ./cmd/research4jar
     # Path inside the archive mirrors the `make install` layout so the
     # querier's indexer auto-location (bin/../libexec) works untouched.
-    binary: bin/springdep
+    binary: bin/research4jar
     env:
       - CGO_ENABLED=0
     goos:
@@ -29,7 +29,7 @@ builds:
       - -s -w -X main.version={{ .Version }}
 
 archives:
-  - id: springdep
+  - id: research4jar
     formats: [tar.gz]
     format_overrides:
       - goos: windows
@@ -39,10 +39,10 @@ archives:
     files:
       - LICENSE
       - README.md
-      - src: indexer/build/install/springdep-index/lib/**
-        dst: libexec/springdep-index/lib
-      - src: indexer/build/install/springdep-index/bin/**
-        dst: libexec/springdep-index/bin
+      - src: indexer/build/install/research4jar-index/lib/**
+        dst: libexec/research4jar-index/lib
+      - src: indexer/build/install/research4jar-index/bin/**
+        dst: libexec/research4jar-index/bin
         info:
           mode: 0755
 
@@ -67,4 +67,4 @@ release:
 
     Download the archive for your platform, unpack it, and put `bin/` on your PATH.
     The JVM indexer is bundled under `libexec/` and found automatically; running
-    `springdep index` requires a JDK 17+ on the machine.
+    `research4jar index` requires a JDK 17+ on the machine.

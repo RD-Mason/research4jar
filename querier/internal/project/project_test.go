@@ -9,13 +9,13 @@ import (
 func TestLocateSearchesParentsAndLoadValidatesPointer(t *testing.T) {
 	root := t.TempDir()
 	nested := filepath.Join(root, "a", "b")
-	if err := os.MkdirAll(filepath.Join(root, ".springdep"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, ".research4jar"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pointerPath := filepath.Join(root, ".springdep", "project.json")
+	pointerPath := filepath.Join(root, ".research4jar", "project.json")
 	body := `{
 	  "schema_version": 1,
 	  "extractor_version": 1,

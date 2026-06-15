@@ -12,5 +12,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "springdep"
+rootProject.name = "research4jar"
 include("indexer")

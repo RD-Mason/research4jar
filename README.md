@@ -1,17 +1,17 @@
-# SpringDep
+# Research4Jar
 
 [![CI](https://github.com/RD-Mason/research4jar/actions/workflows/ci.yml/badge.svg)](https://github.com/RD-Mason/research4jar/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 > Early-stage software under active development. Data contracts and commands may still evolve before the first stable release.
 
-SpringDep turns Maven/Java dependency jars into a local, queryable fact database so coding agents can inspect library behavior instead of guessing from model memory. It has deep Spring Boot facts, but the core class, method, package, SPI, string, and dependency provenance queries work for ordinary Java Maven projects too.
+Research4Jar turns Maven/Java dependency jars into a local, queryable fact database so coding agents can inspect library behavior instead of guessing from model memory. It has deep Spring Boot facts, but the core class, method, package, SPI, string, and dependency provenance queries work for ordinary Java Maven projects too.
 
-Large Spring Boot applications hide important behavior inside dependency jars: auto-configuration, conditional activation, bean factories, configuration properties, annotations, class hierarchies, and extension registrations. Those facts are easy for an AI tool to miss and expensive to recover by repeatedly reading bytecode or source. SpringDep extracts them once into deterministic SQLite shards and exposes small, source-aware queries.
+Large Spring Boot applications hide important behavior inside dependency jars: auto-configuration, conditional activation, bean factories, configuration properties, annotations, class hierarchies, and extension registrations. Those facts are easy for an AI tool to miss and expensive to recover by repeatedly reading bytecode or source. Research4Jar extracts them once into deterministic SQLite shards and exposes small, source-aware queries.
 
 ## Architecture
 
-SpringDep follows a four-layer onion:
+Research4Jar follows a four-layer onion:
 
 1. **Jar facts**: a Kotlin/JVM indexer reads metadata and bytecode with ASM without loading classes or executing jar code.
 2. **Immutable shards**: each jar becomes one content-addressed SQLite shard identified by `<jar_sha256>@<extractor_version>`.
@@ -43,39 +43,39 @@ Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Requireme
 Inside any Maven or Gradle Spring Boot project:
 
 ```bash
-springdep index                # resolves the runtime classpath via mvnw/gradlew, indexes every jar
-springdep find-config-properties spring.datasource
-springdep find-implementations jakarta.servlet.Filter
-springdep find-by-annotation org.springframework.stereotype.Component
-springdep get-class org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-springdep get-bean-definitions javax.sql.DataSource
-springdep explain-conditional org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-springdep find-string X-Forwarded-For
-springdep list-extension-points
-springdep search-symbol DataSourceAutoConfiguration
-springdep open-symbol org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-springdep why-dependency org.springframework.boot:spring-boot-autoconfigure
-springdep find-class FilterRegistrationBean
-springdep find-method org.example.Foo#bar
-springdep list-packages org.springframework.boot.autoconfigure
+research4jar index                # resolves the runtime classpath via mvnw/gradlew, indexes every jar
+research4jar find-config-properties spring.datasource
+research4jar find-implementations jakarta.servlet.Filter
+research4jar find-by-annotation org.springframework.stereotype.Component
+research4jar get-class org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+research4jar get-bean-definitions javax.sql.DataSource
+research4jar explain-conditional org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+research4jar find-string X-Forwarded-For
+research4jar list-extension-points
+research4jar search-symbol DataSourceAutoConfiguration
+research4jar open-symbol org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+research4jar why-dependency org.springframework.boot:spring-boot-autoconfigure
+research4jar find-class FilterRegistrationBean
+research4jar find-method org.example.Foo#bar
+research4jar list-packages org.springframework.boot.autoconfigure
 ```
 
-`springdep index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache and unchanged classpaths reuse the session database.
+`research4jar index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache and unchanged classpaths reuse the session database.
 
 `find-implementations` is transitive by default (subinterface and superclass chains across jars); `find-by-annotation` expands meta-annotations by default (querying `@Component` finds `@Service` classes). Pass `--direct` for declared-only matching.
 
-All query commands support `--format json|text`, `--page`, `--page-size`, and `--project-dir`. Use `--home` or `SPRINGDEP_HOME` to override the global data directory.
+All query commands support `--format json|text`, `--page`, `--page-size`, and `--project-dir`. Use `--home` or `RESEARCH4JAR_HOME` to override the global data directory.
 
 ## Use from Cursor, Claude Code, or any MCP host
 
-`springdep mcp` runs a stdio MCP server exposing indexing and every query as tools, so coding agents call SpringDep directly.
+`research4jar mcp` runs a stdio MCP server exposing indexing and every query as tools, so coding agents call Research4Jar directly.
 
 **Cursor** — add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
 
 ```json
 {
   "mcpServers": {
-    "springdep": { "command": "springdep", "args": ["mcp"] }
+    "research4jar": { "command": "research4jar", "args": ["mcp"] }
   }
 }
 ```
@@ -83,12 +83,12 @@ All query commands support `--format json|text`, `--page`, `--page-size`, and `-
 **Claude Code**:
 
 ```bash
-claude mcp add springdep -- springdep mcp
+claude mcp add research4jar -- research4jar mcp
 ```
 
 Tools exposed: `index_project` (auto-resolves the classpath via Maven/Gradle), `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, the intended retrieval flow is broad search first (`search_symbols`), then expand one result (`open_symbol`) or explain why its jar is present (`why_dependency`).
 
-For CLI-driven agents without MCP, `springdep index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
+For CLI-driven agents without MCP, `research4jar index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
 
 ## Shard registry: index without extracting
 
@@ -101,11 +101,11 @@ v2/<jar_sha256>.db.sha256          checksum sidecar (required)
 v2/<jar_sha256>.db.sig             ed25519 signature (required for verifying clients)
 ```
 
-Point `springdep index` at a registry and missing shards download instead of extracting locally — on a large classpath the first index drops from minutes of JVM extraction to seconds of downloads. When the registry covers every jar, the session merge also runs in pure Go and **no JVM is needed at all**:
+Point `research4jar index` at a registry and missing shards download instead of extracting locally — on a large classpath the first index drops from minutes of JVM extraction to seconds of downloads. When the registry covers every jar, the session merge also runs in pure Go and **no JVM is needed at all**:
 
 ```bash
-springdep index --registry https://shards.example.com            # or SPRINGDEP_REGISTRY
-springdep index --registry ... --registry-pubkey <hex>           # require valid signatures
+research4jar index --registry https://shards.example.com            # or RESEARCH4JAR_REGISTRY
+research4jar index --registry ... --registry-pubkey <hex>           # require valid signatures
 ```
 
 Downloads are verified against the checksum sidecar, the shard's embedded identity (`shard_meta.jar_sha256`), and — when a public key is configured — an ed25519 signature. Verification failures and registry misses both fall back to local extraction; the registry is an accelerator, never a correctness dependency.
@@ -113,31 +113,31 @@ Downloads are verified against the checksum sidecar, the shard's embedded identi
 Publish a registry from any machine's local cache:
 
 ```bash
-springdep registry keygen ~/.springdep-signing.key               # prints the public key
-springdep registry export ./registry --sign-key ~/.springdep-signing.key
+research4jar registry keygen ~/.research4jar-signing.key               # prints the public key
+research4jar registry export ./registry --sign-key ~/.research4jar-signing.key
 # upload ./registry to any static host
 ```
 
 Or seed one directly from Maven coordinates — download, index, and export in one step (this is how the official registry is produced; see `registry/spring-coordinates.txt` and the `registry-publish` workflow, which deploys to GitHub Pages):
 
 ```bash
-springdep registry seed ./registry --coordinates coords.txt --sign-key ~/.springdep-signing.key
+research4jar registry seed ./registry --coordinates coords.txt --sign-key ~/.research4jar-signing.key
 ```
 
 Enterprises can run the same command against an internal Maven repository (`--repo https://nexus.internal/repository/maven-public`) to pre-index private artifacts.
 
 ## Cache lifecycle
 
-The global cache (`springdep cache stats`) grows one shard per unique jar. Collect garbage with:
+The global cache (`research4jar cache stats`) grows one shard per unique jar. Collect garbage with:
 
 ```bash
-springdep cache gc                         # stale extractor versions + orphan files
-springdep cache gc --max-size 5G           # also evict least-recently-used shards over 5 GiB
-springdep cache gc --max-age 30d           # also drop session databases idle for 30 days
-springdep cache gc --dry-run               # report without deleting
+research4jar cache gc                         # stale extractor versions + orphan files
+research4jar cache gc --max-size 5G           # also evict least-recently-used shards over 5 GiB
+research4jar cache gc --max-age 30d           # also drop session databases idle for 30 days
+research4jar cache gc --dry-run               # report without deleting
 ```
 
-Sessions are always rebuilt from shards by the next `springdep index`, so session GC is safe; evicted shards re-download or re-extract on demand.
+Sessions are always rebuilt from shards by the next `research4jar index`, so session GC is safe; evicted shards re-download or re-extract on demand.
 
 ## Coverage
 
@@ -166,18 +166,18 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Meta-annotation expansion at query time (`@Component` finds `@Service`/`@Repository`/`@Controller` classes)
 - Class detail, bean-definition, conditional-explanation, string-constant, and extension-point queries
 - General Java retrieval: class search, method search, package summaries, broad `search-symbol`, and `open-symbol`
-- Maven dependency provenance: `springdep index` captures `.springdep/dependencies.json` for Maven projects and `why-dependency` explains direct/transitive dependency paths by coordinate, jar filename, or class FQN
-- Maven/Gradle classpath auto-discovery (`springdep index`) and an MCP stdio server (`springdep mcp`)
-- Shard registry: static-hostable export (`springdep registry export`), verified download-instead-of-extract (`springdep index --registry`), and ed25519 signing
+- Maven dependency provenance: `research4jar index` captures `.research4jar/dependencies.json` for Maven projects and `why-dependency` explains direct/transitive dependency paths by coordinate, jar filename, or class FQN
+- Maven/Gradle classpath auto-discovery (`research4jar index`) and an MCP stdio server (`research4jar mcp`)
+- Shard registry: static-hostable export (`research4jar registry export`), verified download-instead-of-extract (`research4jar index --registry`), and ed25519 signing
 - Pure-Go indexing for registry-covered classpaths: session merge, project pointer, and CLAUDE.md guidance without a JVM
-- Cache lifecycle: usage stats, stale-version and orphan cleanup, LRU eviction, and session expiry (`springdep cache stats|gc`)
+- Cache lifecycle: usage stats, stale-version and orphan cleanup, LRU eviction, and session expiry (`research4jar cache stats|gc`)
 - Linux, macOS, and Windows-compatible data paths; pure-Go SQLite querying without CGO
 
 ## Known Limitations
 
 - `find-by-annotation` expands meta-annotations but does not merge `@AliasFor` attribute aliases; attributes are reported as written on the matched annotation.
 - `find-string` is substring matching over extracted constants, not full-text search with ranking.
-- `why-dependency` currently requires a Maven project indexed through `springdep index`; Gradle dependency provenance is not captured yet.
+- `why-dependency` currently requires a Maven project indexed through `research4jar index`; Gradle dependency provenance is not captured yet.
 - A JRE is only needed when at least one jar misses the registry (or no registry is configured); fully covered classpaths index in pure Go.
 - `--fat-jar` is not implemented; extract `BOOT-INF/lib/*.jar` first.
 

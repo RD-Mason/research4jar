@@ -43,7 +43,7 @@ func TestInitializeAndToolsList(t *testing.T) {
 		t.Fatalf("protocol version not negotiated: %#v", initResult)
 	}
 	serverInfo := initResult["serverInfo"].(map[string]any)
-	if serverInfo["name"] != "springdep" {
+	if serverInfo["name"] != "research4jar" {
 		t.Fatalf("unexpected server info: %#v", serverInfo)
 	}
 	tools := responses[1]["result"].(map[string]any)["tools"].([]any)

@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"dev.springdep/querier/internal/versions"
+	"dev.research4jar/querier/internal/versions"
 	_ "modernc.org/sqlite"
 )
 

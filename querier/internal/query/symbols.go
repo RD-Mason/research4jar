@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"dev.springdep/querier/internal/project"
+	"dev.research4jar/querier/internal/project"
 )
 
 type SymbolRequest struct {

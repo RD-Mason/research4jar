@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"dev.springdep/querier/internal/manifest"
-	"dev.springdep/querier/internal/paths"
+	"dev.research4jar/querier/internal/manifest"
+	"dev.research4jar/querier/internal/paths"
 )
 
 const currentVersion = 2

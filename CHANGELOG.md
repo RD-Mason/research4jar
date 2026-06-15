@@ -9,20 +9,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added (general Java agent retrieval)
 
 - General Java queries: `find-class`, `find-method`, `list-packages`, `search-symbol`, and `open-symbol` let agents search and expand ordinary Java dependency facts, not just Spring-specific facts.
-- Maven dependency provenance: `springdep index` now captures Maven `dependency:tree` output into `.springdep/dependencies.json` when run in a Maven project, and `why-dependency <coordinate|jar|class>` explains direct/transitive dependency paths.
+- Maven dependency provenance: `research4jar index` now captures Maven `dependency:tree` output into `.research4jar/dependencies.json` when run in a Maven project, and `why-dependency <coordinate|jar|class>` explains direct/transitive dependency paths.
 - MCP retrieval workflow: new `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, and `list_packages` tools guide agents through search → expand → explain instead of reading jars blindly.
 - The generated `CLAUDE.md` guidance now describes Java/Maven dependency fact retrieval while keeping the existing Spring-specific commands.
 
 ### Added (M5 shard lifecycle)
 
-- `springdep registry seed <dir> --coordinates <file>`: downloads Maven artifacts (Maven Central by default, `--repo` for internal repositories), indexes them, and exports the signed registry tree in one step. Download failures warn and skip so a partial seed still publishes.
-- Official registry pipeline: `registry/spring-coordinates.txt` curates the seeded artifacts (Spring Boot 3.4/3.5 trains, framework, data, security, common companions — all coordinates verified against Maven Central) and the `registry-publish` workflow seeds and deploys the tree to GitHub Pages, signing with the `SPRINGDEP_SIGNING_KEY` secret when configured.
-- Pure-Go index path: when the registry (plus local cache) covers every jar, `springdep index` merges the session database, writes the project pointer, and appends the CLAUDE.md guidance itself — the JVM indexer never starts and a JRE is no longer required on fully covered machines. Partial coverage falls back to the JVM indexer as before. The session layout version is stamped and drift-guarded, and the e2e suite proves the path by indexing with `--indexer /nonexistent` and asserting byte-identical CLAUDE.md output across both writers.
+- `research4jar registry seed <dir> --coordinates <file>`: downloads Maven artifacts (Maven Central by default, `--repo` for internal repositories), indexes them, and exports the signed registry tree in one step. Download failures warn and skip so a partial seed still publishes.
+- Official registry pipeline: `registry/spring-coordinates.txt` curates the seeded artifacts (Spring Boot 3.4/3.5 trains, framework, data, security, common companions — all coordinates verified against Maven Central) and the `registry-publish` workflow seeds and deploys the tree to GitHub Pages, signing with the `RESEARCH4JAR_SIGNING_KEY` secret when configured.
+- Pure-Go index path: when the registry (plus local cache) covers every jar, `research4jar index` merges the session database, writes the project pointer, and appends the CLAUDE.md guidance itself — the JVM indexer never starts and a JRE is no longer required on fully covered machines. Partial coverage falls back to the JVM indexer as before. The session layout version is stamped and drift-guarded, and the e2e suite proves the path by indexing with `--indexer /nonexistent` and asserting byte-identical CLAUDE.md output across both writers.
 
-- Shard registry: `springdep registry export` publishes the local cache as a static file tree (`v<extractor>/<jar_sha256>.db` + `.sha256` sidecar + optional `.sig`) any HTTP host can serve; `springdep registry keygen` generates an ed25519 signing keypair.
-- Registry-backed indexing: `springdep index --registry <url>` (or `SPRINGDEP_REGISTRY`) downloads missing shards instead of extracting them locally, verifying the checksum sidecar, the shard's embedded `shard_meta` identity, and — with `--registry-pubkey`/`SPRINGDEP_REGISTRY_PUBKEY` — an ed25519 signature. Misses and verification failures degrade to local extraction.
-- Cache lifecycle: `springdep cache stats` reports shard/session usage; `springdep cache gc` removes stale-extractor-version shards and orphan files, evicts least-recently-used shards over `--max-size`, drops sessions idle past `--max-age`, and supports `--dry-run`. Cache hits now refresh `last_access_at` so LRU order reflects real use.
-- Downloaded shards register in the manifest with `source='remote'` and their embedded Maven coordinate; a Go-side extractor-version constant is guarded against drift from `SpringDepVersions.kt` by test.
+- Shard registry: `research4jar registry export` publishes the local cache as a static file tree (`v<extractor>/<jar_sha256>.db` + `.sha256` sidecar + optional `.sig`) any HTTP host can serve; `research4jar registry keygen` generates an ed25519 signing keypair.
+- Registry-backed indexing: `research4jar index --registry <url>` (or `RESEARCH4JAR_REGISTRY`) downloads missing shards instead of extracting them locally, verifying the checksum sidecar, the shard's embedded `shard_meta` identity, and — with `--registry-pubkey`/`RESEARCH4JAR_REGISTRY_PUBKEY` — an ed25519 signature. Misses and verification failures degrade to local extraction.
+- Cache lifecycle: `research4jar cache stats` reports shard/session usage; `research4jar cache gc` removes stale-extractor-version shards and orphan files, evicts least-recently-used shards over `--max-size`, drops sessions idle past `--max-age`, and supports `--dry-run`. Cache hits now refresh `last_access_at` so LRU order reflects real use.
+- Downloaded shards register in the manifest with `source='remote'` and their embedded Maven coordinate; a Go-side extractor-version constant is guarded against drift from `Research4JarVersions.kt` by test.
 - End-to-end coverage: signed registry round-trip over a local HTTP server, prefetch-only indexing (zero local extraction), and cache GC.
 
 ### Added (M2 + distribution)
@@ -31,9 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Meta-annotation expansion in `find-by-annotation`: querying `@Component` now returns `@Service`/`@Repository`/`@Controller` classes; results carry `matched_annotation` provenance (`--direct` opts out; `@AliasFor` merging is out of scope).
 - New commands: `get-class`, `get-bean-definitions`, `explain-conditional`, `find-string`, `list-extension-points`.
 - Session databases now merge `methods`, `bean_definitions`, `conditions`, `string_constants`, and method-target annotations, with a `session_meta` version stamp; pre-M2 sessions rebuild automatically on the next index run.
-- `springdep index`: drives the JVM indexer directly and auto-resolves the runtime classpath via `mvnw`/`mvn` or `gradlew`/`gradle` when `--jars` is omitted.
-- `springdep mcp`: stdio MCP server exposing indexing and all queries as tools for Cursor, Claude Code, and other MCP hosts.
-- `make install` / `install.sh`: installs `springdep` and the indexer under a prefix (default `~/.local`) for use from any project.
+- `research4jar index`: drives the JVM indexer directly and auto-resolves the runtime classpath via `mvnw`/`mvn` or `gradlew`/`gradle` when `--jars` is omitted.
+- `research4jar mcp`: stdio MCP server exposing indexing and all queries as tools for Cursor, Claude Code, and other MCP hosts.
+- `make install` / `install.sh`: installs `research4jar` and the indexer under a prefix (default `~/.local`) for use from any project.
 
 ### Added
 

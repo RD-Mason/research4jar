@@ -26,28 +26,28 @@ func ResolveFor(explicitHome string, env map[string]string, goos, userHome strin
 	switch {
 	case explicitHome != "":
 		home = explicitHome
-	case env["SPRINGDEP_HOME"] != "":
-		home = env["SPRINGDEP_HOME"]
+	case env["RESEARCH4JAR_HOME"] != "":
+		home = env["RESEARCH4JAR_HOME"]
 	case goos == "darwin":
-		home = filepath.Join(userHome, "Library", "Application Support", "springdep")
+		home = filepath.Join(userHome, "Library", "Application Support", "research4jar")
 	case goos == "windows":
 		if env["LOCALAPPDATA"] == "" {
 			return DataPaths{}, fmt.Errorf(
-				"LOCALAPPDATA is required on Windows when SPRINGDEP_HOME is unset",
+				"LOCALAPPDATA is required on Windows when RESEARCH4JAR_HOME is unset",
 			)
 		}
-		home = filepath.Join(env["LOCALAPPDATA"], "springdep")
+		home = filepath.Join(env["LOCALAPPDATA"], "research4jar")
 	default:
 		if env["XDG_DATA_HOME"] != "" {
-			home = filepath.Join(env["XDG_DATA_HOME"], "springdep")
+			home = filepath.Join(env["XDG_DATA_HOME"], "research4jar")
 		} else {
-			home = filepath.Join(userHome, ".local", "share", "springdep")
+			home = filepath.Join(userHome, ".local", "share", "research4jar")
 		}
 	}
 
 	absolute, err := filepath.Abs(home)
 	if err != nil {
-		return DataPaths{}, fmt.Errorf("resolve SpringDep home: %w", err)
+		return DataPaths{}, fmt.Errorf("resolve Research4Jar home: %w", err)
 	}
 	return DataPaths{
 		Home:     absolute,

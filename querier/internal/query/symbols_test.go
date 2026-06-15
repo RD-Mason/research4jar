@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dev.springdep/querier/internal/project"
+	"dev.research4jar/querier/internal/project"
 )
 
 func TestFindImplementationsTransitiveClosure(t *testing.T) {
@@ -34,10 +34,10 @@ func TestFindImplementationsTransitiveClosure(t *testing.T) {
 		t.Fatalf("unexpected response: %#v", response)
 	}
 	expected := []string{
-		"example.SubContract",       // subinterface joins the closure
+		"example.SubContract", // subinterface joins the closure
 		"other.DirectImplementation",
-		"other.GrandChild",          // extends DirectImplementation
-		"other.IndirectImpl",        // implements the subinterface
+		"other.GrandChild",   // extends DirectImplementation
+		"other.IndirectImpl", // implements the subinterface
 	}
 	for index, fqn := range expected {
 		if response.Results[index].FQN != fqn {

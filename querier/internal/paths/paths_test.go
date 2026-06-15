@@ -17,14 +17,14 @@ func TestResolveFor(t *testing.T) {
 		{
 			name:     "explicit",
 			explicit: "/custom",
-			env:      map[string]string{"SPRINGDEP_HOME": "/environment"},
+			env:      map[string]string{"RESEARCH4JAR_HOME": "/environment"},
 			goos:     "linux",
 			userHome: "/home/test",
 			want:     "/custom",
 		},
 		{
 			name:     "environment",
-			env:      map[string]string{"SPRINGDEP_HOME": "/environment"},
+			env:      map[string]string{"RESEARCH4JAR_HOME": "/environment"},
 			goos:     "darwin",
 			userHome: "/Users/test",
 			want:     "/environment",
@@ -34,21 +34,21 @@ func TestResolveFor(t *testing.T) {
 			env:      map[string]string{},
 			goos:     "darwin",
 			userHome: "/Users/test",
-			want:     "/Users/test/Library/Application Support/springdep",
+			want:     "/Users/test/Library/Application Support/research4jar",
 		},
 		{
 			name:     "Linux XDG",
 			env:      map[string]string{"XDG_DATA_HOME": "/xdg"},
 			goos:     "linux",
 			userHome: "/home/test",
-			want:     "/xdg/springdep",
+			want:     "/xdg/research4jar",
 		},
 		{
 			name:     "Linux fallback",
 			env:      map[string]string{},
 			goos:     "linux",
 			userHome: "/home/test",
-			want:     "/home/test/.local/share/springdep",
+			want:     "/home/test/.local/share/research4jar",
 		},
 	}
 

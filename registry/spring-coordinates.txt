@@ -1,7 +1,7 @@
-# Artifacts seeded into the official SpringDep shard registry.
+# Artifacts seeded into the official Research4Jar shard registry.
 # One group:artifact:version per line; # comments and blank lines are skipped.
 #
-# Selection: the jars whose hidden behavior SpringDep queries answer most —
+# Selection: the jars whose hidden behavior Research4Jar queries answer most —
 # auto-configuration, conditions, config properties, SPI registrations.
 # Versions track recent stable Spring Boot release trains; a download miss is
 # warned and skipped, so adding a not-yet-released version is harmless.

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"dev.springdep/querier/internal/manifest"
+	"dev.research4jar/querier/internal/manifest"
 	_ "modernc.org/sqlite"
 )
 

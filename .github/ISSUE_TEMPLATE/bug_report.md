@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible SpringDep defect
+about: Report a reproducible Research4Jar defect
 title: "[Bug] "
 labels: bug
 assignees: ""
@@ -16,7 +16,7 @@ List the smallest reproducible steps, including the command and relevant jar coo
 
 ## Environment
 
-- SpringDep commit/version:
+- Research4Jar commit/version:
 - Operating system:
 - JDK:
 - Go:

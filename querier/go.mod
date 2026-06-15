@@ -1,4 +1,4 @@
-module dev.springdep/querier
+module dev.research4jar/querier
 
 go 1.23.0
 

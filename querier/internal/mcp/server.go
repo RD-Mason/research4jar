@@ -1,5 +1,5 @@
 // Package mcp implements a minimal Model Context Protocol server over stdio
-// (newline-delimited JSON-RPC 2.0), exposing every springdep command as a
+// (newline-delimited JSON-RPC 2.0), exposing every research4jar command as a
 // tool so MCP hosts — Cursor, Claude Code, Windsurf, etc. — can index and
 // query Spring dependency jars directly.
 package mcp
@@ -14,15 +14,15 @@ import (
 	"io"
 	"os"
 
-	"dev.springdep/querier/internal/depgraph"
-	"dev.springdep/querier/internal/indexer"
-	"dev.springdep/querier/internal/project"
-	"dev.springdep/querier/internal/query"
+	"dev.research4jar/querier/internal/depgraph"
+	"dev.research4jar/querier/internal/indexer"
+	"dev.research4jar/querier/internal/project"
+	"dev.research4jar/querier/internal/query"
 )
 
 const (
 	protocolVersion = "2024-11-05"
-	serverName      = "springdep"
+	serverName      = "research4jar"
 	serverVersion   = "0.2.0"
 )
 
@@ -149,7 +149,7 @@ func callTool(params json.RawMessage) map[string]any {
 	result, err := dispatchTool(call.Name, arguments)
 	if errors.Is(err, project.ErrNotFound) {
 		return toolError(
-			"No SpringDep index found for this project. " +
+			"No Research4Jar index found for this project. " +
 				"Run the index_project tool first (it auto-resolves the classpath " +
 				"via Maven/Gradle), or pass project_dir explicitly.",
 		)
@@ -305,7 +305,7 @@ func runIndex(arguments toolArguments) (any, error) {
 		"status":                "indexed",
 		"project_dir":           projectDir,
 		"dependency_provenance": provenance,
-		"note":                  "Project pointer written to .springdep/project.json; query tools are ready.",
+		"note":                  "Project pointer written to .research4jar/project.json; query tools are ready.",
 	}, nil
 }
 
@@ -328,7 +328,7 @@ func firstNonEmpty(values ...string) string {
 func toolCatalog() []toolDefinition {
 	projectDir := map[string]any{
 		"type": "string",
-		"description": "Spring project root (directory containing .springdep). " +
+		"description": "Spring project root (directory containing .research4jar). " +
 			"Defaults to searching upward from the server's working directory.",
 	}
 	paging := map[string]any{

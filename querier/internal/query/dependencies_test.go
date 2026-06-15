@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dev.springdep/querier/internal/depgraph"
+	"dev.research4jar/querier/internal/depgraph"
 )
 
 func dependencyFixture(t *testing.T) (string, string, string) {

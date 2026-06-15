@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"sync"
 
-	"dev.springdep/querier/internal/manifest"
+	"dev.research4jar/querier/internal/manifest"
 )
 
 // ShardRef names one valid local shard after a prefetch.

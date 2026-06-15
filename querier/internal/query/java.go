@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"dev.springdep/querier/internal/project"
+	"dev.research4jar/querier/internal/project"
 )
 
 type ClassSearchResult struct {

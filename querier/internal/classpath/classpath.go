@@ -1,5 +1,5 @@
 // Package classpath discovers a Spring Boot project's dependency jars by
-// asking its own build tool, so `springdep index` works without the user
+// asking its own build tool, so `research4jar index` works without the user
 // exporting jars manually.
 package classpath
 
@@ -17,10 +17,10 @@ var ErrNoBuildTool = errors.New(
 	"no pom.xml or build.gradle(.kts) found; pass --jars with a jar directory, glob, or list",
 )
 
-const gradleMarker = "SPRINGDEP_JAR:"
+const gradleMarker = "RESEARCH4JAR_JAR:"
 
 const gradleInitScript = `allprojects { project ->
-    project.tasks.register("springdepClasspath") {
+    project.tasks.register("research4jarClasspath") {
         doLast {
             def cfg = project.configurations.findByName("runtimeClasspath")
             if (cfg != null && cfg.canBeResolved) {
@@ -52,7 +52,7 @@ func Discover(projectDir string) ([]string, error) {
 }
 
 func discoverMaven(projectDir string) ([]string, error) {
-	output, err := os.CreateTemp("", "springdep-classpath-*.txt")
+	output, err := os.CreateTemp("", "research4jar-classpath-*.txt")
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func discoverMaven(projectDir string) ([]string, error) {
 }
 
 func discoverGradle(projectDir string) ([]string, error) {
-	script, err := os.CreateTemp("", "springdep-init-*.gradle")
+	script, err := os.CreateTemp("", "research4jar-init-*.gradle")
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func discoverGradle(projectDir string) ([]string, error) {
 
 	command := buildCommand(
 		projectDir, "gradlew", "gradle",
-		"--init-script", scriptPath, "-q", "springdepClasspath",
+		"--init-script", scriptPath, "-q", "research4jarClasspath",
 	)
 	combined, err := command.CombinedOutput()
 	if err != nil {

@@ -11,38 +11,38 @@ import (
 	"runtime"
 	"strings"
 
-	"dev.springdep/querier/internal/classpath"
+	"dev.research4jar/querier/internal/classpath"
 )
 
 var ErrNotFound = errors.New(
-	"springdep-index not found; set SPRINGDEP_INDEX, pass --indexer, " +
-		"or install it next to the springdep binary",
+	"research4jar-index not found; set RESEARCH4JAR_INDEX, pass --indexer, " +
+		"or install it next to the research4jar binary",
 )
 
-// Locate finds the springdep-index launcher: explicit flag, SPRINGDEP_INDEX
+// Locate finds the research4jar-index launcher: explicit flag, RESEARCH4JAR_INDEX
 // env var, the install layout next to this executable, then PATH.
 func Locate(explicit string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
-	if env := os.Getenv("SPRINGDEP_INDEX"); env != "" {
+	if env := os.Getenv("RESEARCH4JAR_INDEX"); env != "" {
 		return env, nil
 	}
-	launcher := "springdep-index"
+	launcher := "research4jar-index"
 	if runtime.GOOS == "windows" {
-		launcher = "springdep-index.bat"
+		launcher = "research4jar-index.bat"
 	}
 	if executable, err := os.Executable(); err == nil {
 		binDir := filepath.Dir(executable)
 		candidates := []string{
 			filepath.Join(binDir, launcher),
-			// `make install` layout: bin/springdep next to
-			// libexec/springdep-index/bin/springdep-index.
-			filepath.Join(binDir, "..", "libexec", "springdep-index", "bin", launcher),
+			// `make install` layout: bin/research4jar next to
+			// libexec/research4jar-index/bin/research4jar-index.
+			filepath.Join(binDir, "..", "libexec", "research4jar-index", "bin", launcher),
 			// In-repo layout for development builds.
 			filepath.Join(
 				binDir, "..", "..", "indexer", "build", "install",
-				"springdep-index", "bin", launcher,
+				"research4jar-index", "bin", launcher,
 			),
 		}
 		for _, candidate := range candidates {
@@ -71,7 +71,7 @@ func Run(indexerBin, jars, projectDir, home string) error {
 		}
 		fmt.Fprintf(
 			os.Stderr,
-			"springdep: resolved %d dependency jars from the build tool\n",
+			"research4jar: resolved %d dependency jars from the build tool\n",
 			len(discovered),
 		)
 		jars = strings.Join(discovered, ",")

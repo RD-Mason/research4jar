@@ -15,7 +15,7 @@ The maintainer will acknowledge the report, assess severity, and coordinate disc
 
 ## Security Model
 
-SpringDep treats input jars as untrusted data. The indexer reads ZIP entries and parses class bytes with ASM; it does not load classes, initialize them, or execute jar code. Malformed and unsupported class files are isolated as warnings.
+Research4Jar treats input jars as untrusted data. The indexer reads ZIP entries and parses class bytes with ASM; it does not load classes, initialize them, or execute jar code. Malformed and unsupported class files are isolated as warnings.
 
 Shard writes use temporary files, `fsync`, and atomic rename. The manifest records shard checksums. A future shard download feature will accept a shard only after verifying that its identity matches the local jar hash and extractor version.
 

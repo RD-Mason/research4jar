@@ -3,8 +3,8 @@ package query
 import (
 	"fmt"
 
-	springpaths "dev.springdep/querier/internal/paths"
-	"dev.springdep/querier/internal/project"
+	springpaths "dev.research4jar/querier/internal/paths"
+	"dev.research4jar/querier/internal/project"
 )
 
 // ResolveProject locates and loads the project pointer and derives the

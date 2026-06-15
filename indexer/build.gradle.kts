@@ -3,7 +3,7 @@ plugins {
     application
 }
 
-group = "dev.springdep"
+group = "dev.research4jar"
 version = "0.1.0"
 
 kotlin {
@@ -31,12 +31,12 @@ dependencies {
 }
 
 application {
-    mainClass = "dev.springdep.indexer.MainKt"
-    applicationName = "springdep-index"
+    mainClass = "dev.research4jar.indexer.MainKt"
+    applicationName = "research4jar-index"
 }
 
 tasks.jar {
-    archiveBaseName = "springdep-index"
+    archiveBaseName = "research4jar-index"
     manifest {
         attributes["Main-Class"] = application.mainClass.get()
     }

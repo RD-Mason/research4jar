@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"dev.springdep/querier/internal/project"
+	"dev.research4jar/querier/internal/project"
 	_ "modernc.org/sqlite"
 )
 

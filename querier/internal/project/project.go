@@ -31,7 +31,7 @@ func Locate(projectDir string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve project directory: %w", err)
 		}
-		candidate := filepath.Join(absolute, ".springdep", "project.json")
+		candidate := filepath.Join(absolute, ".research4jar", "project.json")
 		if isRegularFile(candidate) {
 			return candidate, nil
 		}
@@ -43,7 +43,7 @@ func Locate(projectDir string) (string, error) {
 		return "", fmt.Errorf("get working directory: %w", err)
 	}
 	for {
-		candidate := filepath.Join(current, ".springdep", "project.json")
+		candidate := filepath.Join(current, ".research4jar", "project.json")
 		if isRegularFile(candidate) {
 			return candidate, nil
 		}
@@ -55,7 +55,7 @@ func Locate(projectDir string) (string, error) {
 	}
 }
 
-// Root returns the project root that owns .springdep/project.json.
+// Root returns the project root that owns .research4jar/project.json.
 func Root(projectDir string) (string, error) {
 	projectPath, err := Locate(projectDir)
 	if err != nil {

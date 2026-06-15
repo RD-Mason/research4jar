@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"dev.springdep/querier/internal/manifest"
+	"dev.research4jar/querier/internal/manifest"
 )
 
 // Metadata is written to registry.json at the export root so tooling can

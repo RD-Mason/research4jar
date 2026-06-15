@@ -1,6 +1,6 @@
-# Contributing to SpringDep
+# Contributing to Research4Jar
 
-SpringDep is early-stage software. Focused bug reports, reproducible fixtures, documentation corrections, and small well-tested pull requests are especially useful.
+Research4Jar is early-stage software. Focused bug reports, reproducible fixtures, documentation corrections, and small well-tested pull requests are especially useful.
 
 ## Development Setup
 

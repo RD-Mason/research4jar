@@ -25,7 +25,7 @@ const (
 
 var ErrUnsupported = errors.New("dependency provenance is currently only available for Maven projects")
 
-// Graph is written to .springdep/dependencies.json.
+// Graph is written to .research4jar/dependencies.json.
 type Graph struct {
 	SchemaVersion int        `json:"schema_version"`
 	BuildTool     string     `json:"build_tool"`
@@ -58,7 +58,7 @@ type node struct {
 
 // Path returns the dependency provenance file for a project root.
 func Path(projectDir string) string {
-	return filepath.Join(projectDir, ".springdep", fileName)
+	return filepath.Join(projectDir, ".research4jar", fileName)
 }
 
 // Load reads a previously captured graph.
@@ -81,9 +81,9 @@ func Load(projectDir string) (Graph, error) {
 	return graph, nil
 }
 
-// Write stores the graph under .springdep/dependencies.json.
+// Write stores the graph under .research4jar/dependencies.json.
 func Write(projectDir string, graph Graph) error {
-	directory := filepath.Join(projectDir, ".springdep")
+	directory := filepath.Join(projectDir, ".research4jar")
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func Capture(projectDir string) (Graph, error) {
 	if !fileExists(filepath.Join(absolute, "pom.xml")) {
 		return Graph{}, ErrUnsupported
 	}
-	output, err := os.CreateTemp("", "springdep-dependency-tree-*.tgf")
+	output, err := os.CreateTemp("", "research4jar-dependency-tree-*.tgf")
 	if err != nil {
 		return Graph{}, err
 	}

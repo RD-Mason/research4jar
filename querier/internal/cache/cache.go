@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"dev.springdep/querier/internal/manifest"
-	"dev.springdep/querier/internal/paths"
+	"dev.research4jar/querier/internal/manifest"
+	"dev.research4jar/querier/internal/paths"
 )
 
 // Stats summarizes the global cache.
@@ -97,7 +97,7 @@ func CollectStats(dataPaths paths.DataPaths, currentExtractorVersion int) (Stats
 // GC collects garbage in four passes: shards from older extractor versions,
 // shard files the manifest does not track, least-recently-used shards beyond
 // the size budget, and sessions older than the age limit. Sessions are always
-// rebuildable from shards by the next `springdep index` run.
+// rebuildable from shards by the next `research4jar index` run.
 func GC(
 	dataPaths paths.DataPaths, currentExtractorVersion int, options GCOptions,
 ) (GCResult, error) {

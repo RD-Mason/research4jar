@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"dev.springdep/querier/internal/depgraph"
-	"dev.springdep/querier/internal/project"
+	"dev.research4jar/querier/internal/depgraph"
+	"dev.research4jar/querier/internal/project"
 )
 
 type DependencyWhyResult struct {
@@ -52,7 +52,7 @@ func WhyDependency(
 	if err != nil {
 		if errors.Is(err, depgraph.ErrUnsupported) {
 			return DependencyWhyResponse{}, errors.New(
-				"no dependency provenance found; run springdep index in a Maven project to create .springdep/dependencies.json",
+				"no dependency provenance found; run research4jar index in a Maven project to create .research4jar/dependencies.json",
 			)
 		}
 		return DependencyWhyResponse{}, fmt.Errorf("load dependency provenance: %w", err)

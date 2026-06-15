@@ -6,11 +6,11 @@
 
 # Go
 /querier/bin/
-/querier/springdep
+/querier/research4jar
 /build/bin/
 
-# SpringDep runtime data
-.springdep/
+# Research4Jar runtime data
+.research4jar/
 *.db
 *.db-shm
 *.db-wal

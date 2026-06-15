@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dev.springdep/querier/internal/project"
+	"dev.research4jar/querier/internal/project"
 )
 
 func TestFindConfigProperties(t *testing.T) {

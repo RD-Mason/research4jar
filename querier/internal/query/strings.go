@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"dev.springdep/querier/internal/project"
+	"dev.research4jar/querier/internal/project"
 )
 
 type StringConstant struct {
