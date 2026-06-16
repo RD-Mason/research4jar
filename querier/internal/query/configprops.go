@@ -155,34 +155,13 @@ func InferManifestPath(sessionDBPath string) string {
 }
 
 func loadSourceJars(ctx context.Context, manifestPath string) (map[string]string, error) {
-	if manifestPath == "" {
-		return map[string]string{}, nil
-	}
-	manifest, err := openReadOnly(manifestPath, false)
+	rows, err := loadManifestRows(ctx, manifestPath)
 	if err != nil {
-		return nil, fmt.Errorf("open manifest database: %w", err)
+		return nil, err
 	}
-	defer manifest.Close()
-
-	rows, err := manifest.QueryContext(
-		ctx,
-		`SELECT shard_id, COALESCE(NULLIF(jar_coordinate, ''), jar_filename) FROM shards`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query manifest sources: %w", err)
-	}
-	defer rows.Close()
-
-	sources := make(map[string]string)
-	for rows.Next() {
-		var shardID, source string
-		if err := rows.Scan(&shardID, &source); err != nil {
-			return nil, fmt.Errorf("scan manifest source: %w", err)
-		}
-		sources[shardID] = source
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate manifest sources: %w", err)
+	sources := make(map[string]string, len(rows))
+	for _, row := range rows {
+		sources[row.shardID] = row.source
 	}
 	return sources, nil
 }
