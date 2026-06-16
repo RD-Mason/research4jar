@@ -27,7 +27,7 @@ Research4Jar ships as a CLI plus an MCP stdio server. The current repository has
 **To use a prebuilt CLI/MCP plugin:**
 
 - `research4jar` on `PATH` (the archive's `bin/` directory).
-- Java runtime 17+ for local jar extraction. If every shard is served by a configured registry, indexing can complete without starting the JVM, but registry misses still need Java.
+- Java runtime 11+ for local jar extraction. If every shard is served by a configured registry, indexing can complete without starting the JVM, but registry misses still need Java.
 - A target project Maven/Gradle wrapper (`./mvnw` or `./gradlew`) or `mvn`/`gradle` on `PATH` when you run `research4jar index` without `--jars`.
 - Cursor, Claude Code, or another MCP host if you want to use `research4jar mcp` as a plugin.
 
@@ -37,6 +37,8 @@ Research4Jar ships as a CLI plus an MCP stdio server. The current repository has
 - Go 1.23+
 - `make`
 - Bash (`install.sh` uses `/usr/bin/env bash`)
+
+The built indexer runtime is compiled for Java 11 bytecode; JDK 17+ is only required to run the current Gradle/Kotlin build and Spring Boot 3 test fixtures.
 
 **To run the full local verification suite:**
 
@@ -55,7 +57,7 @@ When an agent is installing the environment, have it run `research4jar doctor --
 
 ## Install
 
-**Prebuilt archives** (Linux/macOS/Windows, amd64/arm64) are published on the [Releases page](https://github.com/RD-Mason/research4jar/releases): unpack, put `bin/` on your PATH. The JVM indexer is bundled under `libexec/` and found automatically; a JRE 17+ is only needed for jars the shard registry does not cover.
+**Prebuilt archives** (Linux/macOS/Windows, amd64/arm64) are published on the [Releases page](https://github.com/RD-Mason/research4jar/releases): unpack, put `bin/` on your PATH. The JVM indexer is bundled under `libexec/` and found automatically; Java 11+ is only needed for jars the shard registry does not cover.
 
 **From source:**
 

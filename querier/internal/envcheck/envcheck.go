@@ -91,6 +91,7 @@ func (i inspector) Run(options Options) Report {
 	if options.SourceBuild {
 		checks = append(
 			checks,
+			i.checkBuildJava(),
 			i.checkJavac(),
 			i.checkGo(),
 			i.checkCommand(
@@ -158,12 +159,12 @@ func (i inspector) checkIndexer() Check {
 }
 
 func (i inspector) checkJava() Check {
-	guide := javaGuide(i.goos)
+	guide := javaRuntimeGuide(i.goos)
 	check := Check{
 		ID:           "java",
-		Name:         "Java runtime 17+",
+		Name:         "Java runtime 11+",
 		RequiredFor:  []string{"running the JVM indexer", "local jar extraction", "registry misses"},
-		Minimum:      "17",
+		Minimum:      "11",
 		UserInstall:  guide.user,
 		AgentInstall: guide.agent,
 		Verify:       guide.verify,
@@ -182,18 +183,53 @@ func (i inspector) checkJava() Check {
 		return check
 	}
 	check.Version = firstLine(output)
-	if major, ok := parseJavaMajor(output); ok && major >= 17 {
+	if major, ok := parseJavaMajor(output); ok && major >= 11 {
 		check.Status = StatusOK
 		check.Message = "Java is new enough."
 		return check
 	}
 	check.Status = StatusMissing
-	check.Message = "Java is installed but version 17 or newer is required."
+	check.Message = "Java is installed but version 11 or newer is required."
+	return check
+}
+
+func (i inspector) checkBuildJava() Check {
+	guide := javaBuildGuide(i.goos)
+	check := Check{
+		ID:           "java-source-build",
+		Name:         "Java runtime 17+ for source builds",
+		RequiredFor:  []string{"running Gradle and Kotlin build tools"},
+		Minimum:      "17",
+		UserInstall:  guide.user,
+		AgentInstall: guide.agent,
+		Verify:       []string{"java -version"},
+	}
+	found, err := i.lookup("java")
+	if err != nil {
+		check.Status = StatusMissing
+		check.Message = "java was not found on PATH."
+		return check
+	}
+	check.Found = found
+	output, err := i.run("java", "-version")
+	if err != nil {
+		check.Status = StatusMissing
+		check.Message = "java exists but java -version failed: " + oneLine(output)
+		return check
+	}
+	check.Version = firstLine(output)
+	if major, ok := parseJavaMajor(output); ok && major >= 17 {
+		check.Status = StatusOK
+		check.Message = "Java is new enough for source builds."
+		return check
+	}
+	check.Status = StatusMissing
+	check.Message = "Source builds require Java 17 or newer, even though the released indexer runtime supports Java 11."
 	return check
 }
 
 func (i inspector) checkJavac() Check {
-	guide := javaGuide(i.goos)
+	guide := javaBuildGuide(i.goos)
 	check := Check{
 		ID:           "javac",
 		Name:         "JDK compiler 17+",
@@ -399,7 +435,34 @@ func parseGoVersion(output string) (int, int, bool) {
 	return major, minor, majorErr == nil && minorErr == nil
 }
 
-func javaGuide(goos string) installGuide {
+func javaRuntimeGuide(goos string) installGuide {
+	switch goos {
+	case "darwin":
+		return installGuide{
+			user: "Install any Java runtime 11+; install JDK 17+ if you will build from source.",
+			agent: []string{
+				"if command -v brew >/dev/null 2>&1; then brew install --cask temurin; else echo 'Install Java 11+ manually: https://adoptium.net/' >&2; exit 1; fi",
+			},
+			verify: []string{"java -version"},
+		}
+	case "windows":
+		return installGuide{
+			user:   "Install any Java runtime 11+; install JDK 17+ if you will build from source.",
+			agent:  []string{"winget install EclipseAdoptium.Temurin.17.JDK"},
+			verify: []string{"java -version"},
+		}
+	default:
+		return installGuide{
+			user: "Install any Java runtime 11+ with your system package manager.",
+			agent: []string{
+				"if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y openjdk-17-jre; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y java-17-openjdk; elif command -v yum >/dev/null 2>&1; then sudo yum install -y java-17-openjdk; else echo 'Install Java 11+ manually' >&2; exit 1; fi",
+			},
+			verify: []string{"java -version"},
+		}
+	}
+}
+
+func javaBuildGuide(goos string) installGuide {
 	switch goos {
 	case "darwin":
 		return installGuide{

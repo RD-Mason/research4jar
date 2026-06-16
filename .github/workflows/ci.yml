@@ -25,7 +25,19 @@ jobs:
           cache: gradle
       - name: Test indexer
         shell: bash
-        run: ./gradlew :indexer:test
+        run: ./gradlew :indexer:check
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "11"
+      - name: Smoke test indexer on Java 11
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmd //c indexer\\build\\install\\research4jar-index\\bin\\research4jar-index.bat --help
+          else
+            indexer/build/install/research4jar-index/bin/research4jar-index --help
+          fi
 
   querier:
     name: Querier (${{ matrix.os }})

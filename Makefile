@@ -14,7 +14,7 @@ build:
 	cd querier && $(GO) build -o ../$(QUERIER) ./cmd/research4jar
 
 test:
-	$(GRADLEW) :indexer:test
+	$(GRADLEW) :indexer:check
 	cd querier && $(GO) test ./...
 	cd querier && $(GO) vet ./...
 

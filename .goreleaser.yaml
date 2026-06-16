@@ -3,7 +3,7 @@ version: 2
 project_name: research4jar
 
 # The JVM indexer distribution is platform-independent; build it once and
-# bundle it into every archive so releases are self-contained (JDK 17+ is
+# bundle it into every archive so releases are self-contained (Java 11+ is
 # still required at runtime).
 before:
   hooks:
@@ -67,4 +67,4 @@ release:
 
     Download the archive for your platform, unpack it, and put `bin/` on your PATH.
     The JVM indexer is bundled under `libexec/` and found automatically; running
-    `research4jar index` requires a JDK 17+ on the machine.
+    `research4jar index` requires Java 11+ on the machine.

@@ -10,6 +10,7 @@ import (
 func TestParseJavaMajor(t *testing.T) {
 	cases := map[string]int{
 		`openjdk version "17.0.11" 2024-04-16`: 17,
+		`openjdk version "11.0.24" 2024-07-16`: 11,
 		`java version "1.8.0_412"`:             8,
 		`javac 21.0.2`:                         21,
 	}
@@ -25,6 +26,27 @@ func TestParseGoVersion(t *testing.T) {
 	major, minor, ok := parseGoVersion("go version go1.23.4 darwin/arm64")
 	if !ok || major != 1 || minor != 23 {
 		t.Fatalf("parseGoVersion() = %d.%d, %t; want 1.23, true", major, minor, ok)
+	}
+}
+
+func TestRunAcceptsJava11ForRuntime(t *testing.T) {
+	report := testInspectorWithVersions(map[string]string{
+		"java": "/usr/bin/java",
+	}, `openjdk version "11.0.24" 2024-07-16`, "javac 11.0.24", "go version go1.23.4 darwin/arm64").
+		Run(Options{ProjectDir: t.TempDir()})
+
+	check := findCheck(report, "java")
+	if check == nil {
+		t.Fatal("java check not found")
+	}
+	if check.Status != StatusOK {
+		t.Fatalf("java status = %s, want ok", check.Status)
+	}
+	if check.Minimum != "11" {
+		t.Fatalf("java minimum = %q, want 11", check.Minimum)
+	}
+	if !report.OK {
+		t.Fatal("runtime report should pass with Java 11")
 	}
 }
 
@@ -80,7 +102,47 @@ func TestRunSourceBuildChecksGoVersion(t *testing.T) {
 	}
 }
 
+func TestRunSourceBuildRequiresJava17(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, "gradlew"), []byte("#!/usr/bin/env sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report := testInspectorWithVersions(map[string]string{
+		"java":  "/usr/bin/java",
+		"javac": "/usr/bin/javac",
+		"go":    "/usr/local/bin/go",
+		"make":  "/usr/bin/make",
+		"bash":  "/bin/bash",
+	}, `openjdk version "11.0.24" 2024-07-16`, "javac 11.0.24", "go version go1.23.4 darwin/arm64").
+		Run(Options{ProjectDir: project, SourceBuild: true})
+
+	runtime := findCheck(report, "java")
+	if runtime == nil || runtime.Status != StatusOK {
+		t.Fatalf("runtime java check = %#v, want ok", runtime)
+	}
+	build := findCheck(report, "java-source-build")
+	if build == nil {
+		t.Fatal("java-source-build check not found")
+	}
+	if build.Status != StatusMissing {
+		t.Fatalf("source-build java status = %s, want missing", build.Status)
+	}
+	javac := findCheck(report, "javac")
+	if javac == nil || javac.Status != StatusMissing {
+		t.Fatalf("javac check = %#v, want missing", javac)
+	}
+}
+
 func testInspector(paths map[string]string) inspector {
+	return testInspectorWithVersions(
+		paths,
+		`openjdk version "17.0.11" 2024-04-16`,
+		"javac 17.0.11",
+		"go version go1.22.9 darwin/arm64",
+	)
+}
+
+func testInspectorWithVersions(paths map[string]string, javaVersion, javacVersion, goVersion string) inspector {
 	return inspector{
 		goos: "darwin",
 		lookup: func(name string) (string, error) {
@@ -96,11 +158,11 @@ func testInspector(paths map[string]string) inspector {
 		run: func(name string, args ...string) (string, error) {
 			switch name {
 			case "java":
-				return `openjdk version "17.0.11" 2024-04-16`, nil
+				return javaVersion, nil
 			case "javac":
-				return "javac 17.0.11", nil
+				return javacVersion, nil
 			case "go":
-				return "go version go1.22.9 darwin/arm64", nil
+				return goVersion, nil
 			default:
 				return name + " version", nil
 			}
