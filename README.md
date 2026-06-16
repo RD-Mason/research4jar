@@ -31,6 +31,8 @@ Research4Jar ships as a CLI plus an MCP stdio server. The current repository has
 - A target project Maven/Gradle wrapper (`./mvnw` or `./gradlew`) or `mvn`/`gradle` on `PATH` when you run `research4jar index` without `--jars`.
 - Cursor, Claude Code, or another MCP host if you want to use `research4jar mcp` as a plugin.
 
+Prebuilt plugin users do not need JDK 17. JDK 17 is only for building this repository from source.
+
 **To build from source in this repository:**
 
 - JDK 17+ (`java` and `javac`)
@@ -58,6 +60,8 @@ When an agent is installing the environment, have it run `research4jar doctor --
 ## Install
 
 **Prebuilt archives** (Linux/macOS/Windows, amd64/arm64) are published on the [Releases page](https://github.com/RD-Mason/research4jar/releases): unpack, put `bin/` on your PATH. The JVM indexer is bundled under `libexec/` and found automatically; Java 11+ is only needed for jars the shard registry does not cover.
+
+Installing a prebuilt archive does not require JDK 17; install JDK 17+ only when you choose the source-build path below.
 
 **From source:**
 
