@@ -17,6 +17,16 @@ data class ManifestShard(
     val sizeBytes: Long?,
 )
 
+/**
+ * One cached jar content hash, valid only while the jar's size and mtime are
+ * unchanged. Lets warm re-indexing skip re-hashing immutable dependency jars.
+ */
+data class CachedDigest(
+    val sizeBytes: Long,
+    val mtimeMillis: Long,
+    val sha256: String,
+)
+
 class Manifest(
     private val path: Path,
 ) {
@@ -116,6 +126,62 @@ class Manifest(
         }
     }
 
+    /**
+     * Loads the whole jar-digest cache keyed by absolute path. Callers must
+     * re-validate each entry against the file's current size+mtime before
+     * trusting the hash; a stale or missing entry just means "re-hash".
+     */
+    fun loadJarDigests(): Map<String, CachedDigest> = connect().use { connection ->
+        connection.prepareStatement(
+            "SELECT abs_path, size_bytes, mtime_millis, sha256 FROM jar_digest_cache",
+        ).use { statement ->
+            statement.executeQuery().use { result ->
+                val digests = HashMap<String, CachedDigest>()
+                while (result.next()) {
+                    digests[result.getString("abs_path")] = CachedDigest(
+                        sizeBytes = result.getLong("size_bytes"),
+                        mtimeMillis = result.getLong("mtime_millis"),
+                        sha256 = result.getString("sha256"),
+                    )
+                }
+                digests
+            }
+        }
+    }
+
+    /** Upserts jar-digest cache rows in one transaction. Keys are absolute paths. */
+    fun putJarDigests(entries: Map<String, CachedDigest>) {
+        if (entries.isEmpty()) return
+        connect().use { connection ->
+            val previousAutoCommit = connection.autoCommit
+            connection.autoCommit = false
+            try {
+                connection.prepareStatement(
+                    """
+                    INSERT OR REPLACE INTO jar_digest_cache(
+                      abs_path, size_bytes, mtime_millis, sha256
+                    ) VALUES (?, ?, ?, ?)
+                    """.trimIndent(),
+                ).use { statement ->
+                    entries.forEach { (path, digest) ->
+                        statement.setString(1, path)
+                        statement.setLong(2, digest.sizeBytes)
+                        statement.setLong(3, digest.mtimeMillis)
+                        statement.setString(4, digest.sha256)
+                        statement.addBatch()
+                    }
+                    statement.executeBatch()
+                }
+                connection.commit()
+            } catch (exception: Exception) {
+                connection.rollback()
+                throw exception
+            } finally {
+                connection.autoCommit = previousAutoCommit
+            }
+        }
+    }
+
     private fun connect(): Connection =
         DriverManager.getConnection("jdbc:sqlite:${path.toAbsolutePath()}").also { connection ->
             connection.createStatement().use { statement ->
@@ -147,6 +213,16 @@ class Manifest(
             statement.execute("CREATE INDEX IF NOT EXISTS idx_shards_sha ON shards(jar_sha256)")
             statement.execute(
                 "CREATE INDEX IF NOT EXISTS idx_shards_coord ON shards(jar_coordinate)",
+            )
+            statement.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jar_digest_cache (
+                  abs_path TEXT PRIMARY KEY,
+                  size_bytes INTEGER NOT NULL,
+                  mtime_millis INTEGER NOT NULL,
+                  sha256 TEXT NOT NULL
+                )
+                """.trimIndent(),
             )
         }
     }

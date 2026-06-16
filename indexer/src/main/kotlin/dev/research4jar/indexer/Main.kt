@@ -2,12 +2,15 @@ package dev.research4jar.indexer
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import dev.research4jar.indexer.extract.JarExtractor
+import dev.research4jar.indexer.store.CachedDigest
 import dev.research4jar.indexer.store.Manifest
+import dev.research4jar.indexer.store.ManifestShard
 import dev.research4jar.indexer.store.SessionBuilder
 import dev.research4jar.indexer.store.SessionShard
 import dev.research4jar.indexer.store.ShardWriter
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.BasicFileAttributes
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.Callable
@@ -36,6 +39,12 @@ private data class Options(
 private data class HashedJar(
     val path: Path,
     val sha256: String,
+)
+
+private data class JarStat(
+    val abs: String,
+    val size: Long,
+    val mtime: Long,
 )
 
 private data class ExtractionOutcome(
@@ -84,41 +93,77 @@ private fun runIndex(options: Options) {
         .coerceAtLeast(1)
     val executor = Executors.newFixedThreadPool(threadCount)
     try {
-        // Hashing dominates the warm path (every jar plus every cached shard is
-        // re-hashed on each run), so both validation phases fan out to workers.
-        val uniqueByHash = linkedMapOf<String, HashedJar>()
-        inputPaths
+        // Hashing dominates the warm path. Dependency jars in the Maven/Gradle
+        // caches are immutable, so a digest-cache row matching the current
+        // size+mtime lets us skip re-hashing entirely; only misses fan out.
+        val digestCache = manifest.loadJarDigests()
+        val statByPath = LinkedHashMap<Path, JarStat>()
+        val resolvedShas = HashMap<Path, String>()
+        val toHash = mutableListOf<Path>()
+        for (path in inputPaths) {
+            val attributes = try {
+                Files.readAttributes(path, BasicFileAttributes::class.java)
+            } catch (exception: Exception) {
+                warn("${path}: cannot read jar: ${exception.message}")
+                missing += path.fileName?.toString() ?: path.toString()
+                continue
+            }
+            val stat = JarStat(
+                abs = path.toAbsolutePath().normalize().toString(),
+                size = attributes.size(),
+                mtime = attributes.lastModifiedTime().toMillis(),
+            )
+            statByPath[path] = stat
+            val cached = digestCache[stat.abs]
+            if (cached != null && cached.sizeBytes == stat.size && cached.mtimeMillis == stat.mtime) {
+                resolvedShas[path] = cached.sha256
+            } else {
+                toHash.add(path)
+            }
+        }
+
+        val freshDigests = HashMap<String, CachedDigest>()
+        toHash
             .map { path -> path to executor.submit(Callable { Hashing.sha256(path) }) }
             .forEach { (path, future) ->
                 try {
                     val hash = future.get()
-                    uniqueByHash.putIfAbsent(hash, HashedJar(path, hash))
+                    resolvedShas[path] = hash
+                    statByPath[path]?.let { stat ->
+                        freshDigests[stat.abs] = CachedDigest(stat.size, stat.mtime, hash)
+                    }
                 } catch (exception: Exception) {
                     warn("${path}: cannot read jar: ${exception.cause?.message ?: exception.message}")
                     missing += path.fileName?.toString() ?: path.toString()
                 }
             }
+        if (freshDigests.isNotEmpty()) {
+            try {
+                manifest.putJarDigests(freshDigests)
+            } catch (exception: Exception) {
+                warn("cannot persist jar digest cache: ${exception.message}")
+            }
+        }
+
+        // Dedupe by content hash, preserving input order.
+        val uniqueByHash = linkedMapOf<String, HashedJar>()
+        for (path in inputPaths) {
+            val sha = resolvedShas[path] ?: continue
+            uniqueByHash.putIfAbsent(sha, HashedJar(path, sha))
+        }
 
         uniqueByHash.values
-            .map { jar ->
+            .forEach { jar ->
                 val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
                 val existing = manifest.find(shardId)
-                val valid = if (existing == null) {
-                    null
-                } else {
-                    executor.submit(Callable { validShard(existing.shardPath, existing.shardChecksum) })
-                }
-                Triple(jar, existing, valid)
-            }
-            .forEach { (jar, existing, valid) ->
-                if (existing != null && valid?.get() == true) {
-                    selectedShards += SessionShard("${jar.sha256}@$EXTRACTOR_VERSION", existing.shardPath)
+                if (existing != null && validShard(existing)) {
+                    selectedShards += SessionShard(shardId, existing.shardPath)
                     skipped++
                     cacheHits += existing.shardId
                     return@forEach
                 }
                 if (existing != null) {
-                    warn("${jar.path}: cached shard failed checksum validation; rebuilding")
+                    warn("${jar.path}: cached shard missing or wrong size; rebuilding")
                     manifest.remove(existing.shardId)
                 }
                 pending += jar
@@ -209,10 +254,17 @@ private fun runIndex(options: Options) {
     println(objectMapper.writeValueAsString(statistics))
 }
 
-private fun validShard(path: Path, expectedChecksum: String?): Boolean {
-    if (expectedChecksum.isNullOrBlank() || !Files.isRegularFile(path)) return false
+// A cached shard is reused when its file still exists and its on-disk size
+// matches the size recorded at registration. The shard was checksum-verified
+// when written and lives in research4jar's own cache directory, so a per-run
+// content re-hash costs far more than it catches; the size check still detects
+// truncation and missing files. (The Go registry prefetch likewise trusts the
+// manifest without re-hashing shard databases.)
+private fun validShard(shard: ManifestShard): Boolean {
+    if (!Files.isRegularFile(shard.shardPath)) return false
+    val recordedSize = shard.sizeBytes ?: return false
     return try {
-        Hashing.sha256(path) == expectedChecksum
+        Files.size(shard.shardPath) == recordedSize
     } catch (_: Exception) {
         false
     }

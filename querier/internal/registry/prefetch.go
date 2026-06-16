@@ -59,28 +59,77 @@ func Prefetch(
 		sha256 string
 	}
 	hashed := make([]hashedJar, len(jarPaths))
-	hashWorkers := min(runtime.NumCPU(), len(jarPaths))
+
+	// Jar-digest cache: jars in the local Maven/Gradle caches are immutable,
+	// so a row matching the current size+mtime lets us skip re-hashing — which
+	// otherwise dominates the warm path. A load error just disables the cache.
+	digestCache, _ := manifestDB.LoadJarDigests()
+	type jarStat struct {
+		abs   string
+		size  int64
+		mtime int64
+		ok    bool
+	}
+	stats2 := make([]jarStat, len(jarPaths))
+	var needHash []int
+	for index, path := range jarPaths {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			continue // unreadable; counted as a hash failure downstream
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		stat := jarStat{abs: abs, size: info.Size(), mtime: info.ModTime().UnixMilli(), ok: true}
+		stats2[index] = stat
+		if entry, hit := digestCache[abs]; hit &&
+			entry.SizeBytes == stat.size && entry.MtimeMillis == stat.mtime {
+			hashed[index] = hashedJar{path: path, sha256: entry.SHA256}
+			continue
+		}
+		needHash = append(needHash, index)
+	}
+
 	var wg sync.WaitGroup
-	jobs := make(chan int)
-	wg.Add(hashWorkers)
-	for worker := 0; worker < hashWorkers; worker++ {
-		go func() {
-			defer wg.Done()
-			for index := range jobs {
-				digest, err := hashFile(jarPaths[index])
-				if err != nil {
-					// The indexer reports unreadable jars itself.
-					continue
+	if len(needHash) > 0 {
+		hashWorkers := min(runtime.NumCPU(), len(needHash))
+		jobs := make(chan int)
+		wg.Add(hashWorkers)
+		for worker := 0; worker < hashWorkers; worker++ {
+			go func() {
+				defer wg.Done()
+				for index := range jobs {
+					digest, err := hashFile(jarPaths[index])
+					if err != nil {
+						// The indexer reports unreadable jars itself.
+						continue
+					}
+					hashed[index] = hashedJar{path: jarPaths[index], sha256: digest}
 				}
-				hashed[index] = hashedJar{path: jarPaths[index], sha256: digest}
+			}()
+		}
+		for _, index := range needHash {
+			jobs <- index
+		}
+		close(jobs)
+		wg.Wait()
+
+		fresh := map[string]manifest.DigestEntry{}
+		for _, index := range needHash {
+			if hashed[index].sha256 == "" || !stats2[index].ok {
+				continue
 			}
-		}()
+			fresh[stats2[index].abs] = manifest.DigestEntry{
+				SizeBytes:   stats2[index].size,
+				MtimeMillis: stats2[index].mtime,
+				SHA256:      hashed[index].sha256,
+			}
+		}
+		if err := manifestDB.PutJarDigests(fresh); err != nil {
+			fmt.Fprintf(warnings, "warning: registry prefetch: cache jar digests: %v\n", err)
+		}
 	}
-	for index := range jarPaths {
-		jobs <- index
-	}
-	close(jobs)
-	wg.Wait()
 
 	// Manifest decisions and registration stay on this goroutine; only the
 	// network downloads fan out.

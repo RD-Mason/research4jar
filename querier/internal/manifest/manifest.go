@@ -30,6 +30,15 @@ type Shard struct {
 	Source           string
 }
 
+// DigestEntry is one cached jar content hash, valid only while the jar's size
+// and mtime are unchanged. It lets repeated indexing/prefetch skip re-hashing
+// the (immutable) dependency jars that dominate the warm path.
+type DigestEntry struct {
+	SizeBytes   int64
+	MtimeMillis int64
+	SHA256      string
+}
+
 type DB struct {
 	db *sql.DB
 }
@@ -174,6 +183,60 @@ func (m *DB) SetLastAccess(shardID string, epoch int64) error {
 	return err
 }
 
+// LoadJarDigests returns the whole jar-digest cache keyed by absolute path.
+// Callers validate each entry against the file's current size+mtime before
+// trusting the hash; a stale or absent entry simply means "re-hash".
+func (m *DB) LoadJarDigests() (map[string]DigestEntry, error) {
+	rows, err := m.db.Query(
+		"SELECT abs_path, size_bytes, mtime_millis, sha256 FROM jar_digest_cache",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query jar digests: %w", err)
+	}
+	defer rows.Close()
+	result := map[string]DigestEntry{}
+	for rows.Next() {
+		var path string
+		var entry DigestEntry
+		if err := rows.Scan(
+			&path, &entry.SizeBytes, &entry.MtimeMillis, &entry.SHA256,
+		); err != nil {
+			return nil, fmt.Errorf("scan jar digest: %w", err)
+		}
+		result[path] = entry
+	}
+	return result, rows.Err()
+}
+
+// PutJarDigests upserts cache rows in one transaction. Keys are absolute paths.
+func (m *DB) PutJarDigests(entries map[string]DigestEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	transaction, err := m.db.Begin()
+	if err != nil {
+		return err
+	}
+	statement, err := transaction.Prepare(
+		`INSERT OR REPLACE INTO jar_digest_cache(abs_path, size_bytes, mtime_millis, sha256)
+		 VALUES (?, ?, ?, ?)`,
+	)
+	if err != nil {
+		transaction.Rollback()
+		return err
+	}
+	defer statement.Close()
+	for path, entry := range entries {
+		if _, err := statement.Exec(
+			path, entry.SizeBytes, entry.MtimeMillis, entry.SHA256,
+		); err != nil {
+			transaction.Rollback()
+			return fmt.Errorf("put jar digest %s: %w", path, err)
+		}
+	}
+	return transaction.Commit()
+}
+
 const selectColumns = `SELECT shard_id, jar_coordinate, jar_filename, jar_sha256,
        extractor_version, shard_path, shard_checksum, size_bytes,
        created_at, last_access_at, source`
@@ -220,6 +283,14 @@ func createSchema(db *sql.DB) error {
 		)`,
 		"CREATE INDEX IF NOT EXISTS idx_shards_sha ON shards(jar_sha256)",
 		"CREATE INDEX IF NOT EXISTS idx_shards_coord ON shards(jar_coordinate)",
+		// Additive jar-digest cache; keyed by absolute path, validated against
+		// size+mtime so unchanged jars skip re-hashing on warm runs.
+		`CREATE TABLE IF NOT EXISTS jar_digest_cache (
+		  abs_path TEXT PRIMARY KEY,
+		  size_bytes INTEGER NOT NULL,
+		  mtime_millis INTEGER NOT NULL,
+		  sha256 TEXT NOT NULL
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

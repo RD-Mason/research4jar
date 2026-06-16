@@ -317,6 +317,19 @@ func TestPrefetchInstallsAndRegisters(t *testing.T) {
 		t.Fatalf("coordinate = %v", row.JarCoordinate)
 	}
 
+	// The first run records the jar's digest so a warm run skips re-hashing.
+	digests, err := manifestDB.LoadJarDigests()
+	if err != nil {
+		t.Fatal(err)
+	}
+	absJar, err := filepath.Abs(jarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry, ok := digests[absJar]; !ok || entry.SHA256 != realSHA {
+		t.Fatalf("jar digest cache not populated for %s: %+v", absJar, digests)
+	}
+
 	// Second run: pure cache hit, no download.
 	stats = Prefetch(
 		context.Background(), client, manifestDB, shardsDir,
