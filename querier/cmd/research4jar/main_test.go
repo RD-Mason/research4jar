@@ -46,3 +46,13 @@ func TestParseOptionsDirectFlagAndOptionalArg(t *testing.T) {
 		t.Fatalf("unexpected options: %#v", options)
 	}
 }
+
+func TestParseOptionsSourceGrepFlag(t *testing.T) {
+	options, err := parseOptions([]string{"--no-source-grep", "example.Service"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.sourceGrep || options.arg != "example.Service" {
+		t.Fatalf("unexpected options: %#v", options)
+	}
+}

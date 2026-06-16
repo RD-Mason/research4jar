@@ -77,6 +77,10 @@ Inside any Maven or Gradle Spring Boot project:
 
 ```bash
 research4jar index                # resolves the runtime classpath via mvnw/gradlew, indexes every jar
+research4jar dep precise 'import org.springframework.context.ApplicationContext;'
+research4jar artifact spring-boot-autoconfigure
+research4jar class DataSourceAutoConfiguration
+research4jar method DataSourceAutoConfiguration#dataSource
 research4jar find-config-properties spring.datasource
 research4jar find-implementations jakarta.servlet.Filter
 research4jar find-by-annotation org.springframework.stereotype.Component
@@ -87,6 +91,7 @@ research4jar find-string X-Forwarded-For
 research4jar list-extension-points
 research4jar search-symbol DataSourceAutoConfiguration
 research4jar open-symbol org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+research4jar dep why org.springframework.boot:spring-boot-autoconfigure
 research4jar why-dependency org.springframework.boot:spring-boot-autoconfigure
 research4jar find-class FilterRegistrationBean
 research4jar find-method org.example.Foo#bar
@@ -97,7 +102,9 @@ research4jar list-packages org.springframework.boot.autoconfigure
 
 `find-implementations` is transitive by default (subinterface and superclass chains across jars); `find-by-annotation` expands meta-annotations by default (querying `@Component` finds `@Service` classes). Pass `--direct` for declared-only matching.
 
-All query commands support `--format json|text`, `--page`, `--page-size`, and `--project-dir`. Use `--home` or `RESEARCH4JAR_HOME` to override the global data directory.
+`dep precise` is the direct "symbol to dependency" entrypoint: pass an import line, class FQN/simple name, `Class#method`, Maven coordinate, artifact id, or jar filename. It returns the owning jar/coordinate, the Maven dependency path when `.research4jar/dependencies.json` is available, and bounded `source_usages` from source/build-file search so agents can confirm both "the dependency exists" and "where the project consumes it". `class <NAME|FQN>` is the class-only version of that origin lookup; use `find-class` when you want fuzzy class search instead.
+
+Query commands support `--format json|text` and `--project-dir`; search/list commands also support `--page` and `--page-size`. Use `--home` or `RESEARCH4JAR_HOME` to override the global data directory. Use `--no-source-grep` on `dep precise`/`artifact` to skip the bounded source/build-file usage search.
 For high-fanout retrieval commands (`find-class`, `find-method`, `list-packages`, and `search-symbol`), JSON responses include `has_more`; use it to continue paging instead of relying on an exact pre-count.
 
 ## Use from Cursor, Claude Code, or any MCP host
@@ -120,7 +127,7 @@ For high-fanout retrieval commands (`find-class`, `find-method`, `list-packages`
 claude mcp add research4jar -- research4jar mcp
 ```
 
-Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath via Maven/Gradle), `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, the intended retrieval flow is broad search first (`search_symbols`), then expand one result (`open_symbol`) or explain why its jar is present (`why_dependency`).
+Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath via Maven/Gradle), `project_status`, `dependency_precise`, `class_origin`, `find_artifact`, `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, call `project_status` to check whether an index exists and inspect coverage/provenance state, then use broad search first (`search_symbols`) and expand one result (`open_symbol`) or use `dependency_precise`/`class_origin` to answer "which jar owns this import/class?", "which dependency brought this jar in?", and "where does this project consume it?".
 
 Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`. `index_project` also accepts `registry` and `registry_pubkey`; when the registry covers the classpath, MCP indexing finishes in pure Go without launching the JVM indexer.
 
@@ -202,7 +209,10 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Meta-annotation expansion at query time (`@Component` finds `@Service`/`@Repository`/`@Controller` classes)
 - Class detail, bean-definition, conditional-explanation, string-constant, and extension-point queries
 - General Java retrieval: indexed class search, method search, package summaries, broad `search-symbol`, and `open-symbol`
-- Maven dependency provenance: `research4jar index` captures `.research4jar/dependencies.json` for Maven projects and `why-dependency` explains direct/transitive dependency paths by coordinate, jar filename, or class FQN
+- Explicit dependency tools: `dep precise`, `artifact`, `class`, and `method` CLI entries plus MCP `project_status`/`dependency_precise`/`class_origin`/`find_artifact` tools for direct agent calls instead of reading JSON/SQLite files by hand
+- Symbol-to-dependency reverse lookup: answer which jar owns an import/class, which Maven dependency introduced that jar, and which direct dependency is responsible
+- Source grep linkage: dependency facts confirm the jar/dependency exists; `dep precise` source usages confirm where the project consumes it
+- Maven dependency provenance: `research4jar index` captures `.research4jar/dependencies.json` for Maven projects and `why-dependency`/`dep why` explains direct/transitive dependency paths by coordinate, jar filename, artifact id, or class FQN
 - Maven/Gradle classpath auto-discovery (`research4jar index`) and an MCP stdio server (`research4jar mcp`)
 - Shard registry: static-hostable export (`research4jar registry export`), verified download-instead-of-extract (`research4jar index --registry`), and ed25519 signing
 - Pure-Go indexing for registry-covered classpaths: session merge, project pointer, and CLAUDE.md guidance without a JVM

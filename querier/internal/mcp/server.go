@@ -63,20 +63,21 @@ type toolDefinition struct {
 }
 
 type toolArguments struct {
-	ProjectDir  string `json:"project_dir"`
-	Home        string `json:"home"`
-	Jars        string `json:"jars"`
-	Indexer     string `json:"indexer"`
-	Registry    string `json:"registry"`
-	RegistryKey string `json:"registry_pubkey"`
-	Prefix      string `json:"prefix"`
-	FQN         string `json:"fqn"`
-	Text        string `json:"text"`
-	Arg         string `json:"arg"`
-	Direct      bool   `json:"direct"`
-	Page        int    `json:"page"`
-	PageSize    int    `json:"page_size"`
-	SourceBuild bool   `json:"source_build"`
+	ProjectDir   string `json:"project_dir"`
+	Home         string `json:"home"`
+	Jars         string `json:"jars"`
+	Indexer      string `json:"indexer"`
+	Registry     string `json:"registry"`
+	RegistryKey  string `json:"registry_pubkey"`
+	Prefix       string `json:"prefix"`
+	FQN          string `json:"fqn"`
+	Text         string `json:"text"`
+	Arg          string `json:"arg"`
+	Direct       bool   `json:"direct"`
+	NoSourceGrep bool   `json:"no_source_grep"`
+	Page         int    `json:"page"`
+	PageSize     int    `json:"page_size"`
+	SourceBuild  bool   `json:"source_build"`
 }
 
 // Serve runs the MCP loop until stdin closes.
@@ -191,6 +192,9 @@ func dispatchTool(name string, arguments toolArguments) (any, error) {
 	if name == "index_project" {
 		return runIndex(arguments)
 	}
+	if name == "project_status" {
+		return query.ProjectStatus(arguments.ProjectDir, arguments.Home)
+	}
 	pointer, manifestPath, err := query.ResolveProject(arguments.ProjectDir, arguments.Home)
 	if err != nil {
 		return nil, err
@@ -289,6 +293,57 @@ func dispatchTool(name string, arguments toolArguments) (any, error) {
 		}
 		return query.WhyDependency(
 			ctx, pointer, manifestPath, projectRoot, firstNonEmpty(arguments.FQN, arguments.Arg),
+		)
+	case "dependency_precise":
+		if arguments.Text == "" && arguments.FQN == "" && arguments.Arg == "" {
+			return nil, errors.New("text, fqn, or arg is required")
+		}
+		projectRoot, err := project.Root(arguments.ProjectDir)
+		if err != nil {
+			return nil, err
+		}
+		return query.DependencyPrecise(
+			ctx,
+			pointer,
+			manifestPath,
+			projectRoot,
+			firstNonEmpty(arguments.Text, arguments.FQN, arguments.Arg),
+			arguments.PageSize,
+			!arguments.NoSourceGrep,
+		)
+	case "class_origin":
+		if arguments.Text == "" && arguments.FQN == "" && arguments.Arg == "" {
+			return nil, errors.New("text, fqn, or arg is required")
+		}
+		projectRoot, err := project.Root(arguments.ProjectDir)
+		if err != nil {
+			return nil, err
+		}
+		return query.ClassPrecise(
+			ctx,
+			pointer,
+			manifestPath,
+			projectRoot,
+			firstNonEmpty(arguments.Text, arguments.FQN, arguments.Arg),
+			arguments.PageSize,
+			!arguments.NoSourceGrep,
+		)
+	case "find_artifact":
+		if arguments.Text == "" && arguments.Arg == "" {
+			return nil, errors.New("text or arg is required")
+		}
+		projectRoot, err := project.Root(arguments.ProjectDir)
+		if err != nil {
+			return nil, err
+		}
+		return query.ArtifactPrecise(
+			ctx,
+			pointer,
+			manifestPath,
+			projectRoot,
+			firstNonEmpty(arguments.Text, arguments.Arg),
+			arguments.PageSize,
+			!arguments.NoSourceGrep,
 		)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
@@ -517,6 +572,19 @@ func toolCatalog() []toolDefinition {
 			}),
 		},
 		{
+			Name: "project_status",
+			Description: "Report whether the current project has a Research4Jar index and show " +
+				"project pointer, session database, manifest, coverage, and dependency provenance state. " +
+				"Use before dependency/class queries to decide whether index_project is needed.",
+			InputSchema: schema(map[string]any{
+				"project_dir": projectDir,
+				"home": map[string]any{
+					"type":        "string",
+					"description": "Optional Research4Jar data home; defaults to the standard user data directory.",
+				},
+			}),
+		},
+		{
 			Name: "find_config_properties",
 			Description: "Find Spring configuration properties by prefix (e.g. spring.datasource). " +
 				"Returns name, type, default value, description, and the source jar.",
@@ -624,6 +692,69 @@ func toolCatalog() []toolDefinition {
 				"fqn":         map[string]any{"type": "string", "description": "Class FQN or Class#method symbol."},
 				"project_dir": projectDir,
 			}, "fqn"),
+		},
+		{
+			Name: "dependency_precise",
+			Description: "Resolve an import, class, Class#method, Maven coordinate, artifact id, " +
+				"or jar filename to the owning jar; include Maven dependency path/provenance and " +
+				"bounded source/build-file usages so agents can confirm both dependency presence " +
+				"and project consumption.",
+			InputSchema: schema(map[string]any{
+				"text": map[string]any{
+					"type":        "string",
+					"description": "Import line, class FQN/simple name, Class#method, group:artifact, artifact id, or jar filename.",
+				},
+				"project_dir": projectDir,
+				"page_size": map[string]any{
+					"type":        "integer",
+					"description": "Max origins and source usage rows to return (default 20).",
+				},
+				"no_source_grep": map[string]any{
+					"type":        "boolean",
+					"description": "Skip bounded source/build-file usage search.",
+				},
+			}, "text"),
+		},
+		{
+			Name: "class_origin",
+			Description: "Resolve a class simple name or FQN to the owning jar; include Maven " +
+				"dependency provenance and bounded source/build-file usages. Use find_class " +
+				"for fuzzy class search.",
+			InputSchema: schema(map[string]any{
+				"text": map[string]any{
+					"type":        "string",
+					"description": "Class simple name, class FQN, or import line.",
+				},
+				"project_dir": projectDir,
+				"page_size": map[string]any{
+					"type":        "integer",
+					"description": "Max origins and source usage rows to return (default 20).",
+				},
+				"no_source_grep": map[string]any{
+					"type":        "boolean",
+					"description": "Skip bounded source/build-file usage search.",
+				},
+			}, "text"),
+		},
+		{
+			Name: "find_artifact",
+			Description: "Find a dependency artifact or jar by group:artifact, group:artifact:version, " +
+				"artifact id, or jar filename; returns the indexed jar plus dependency provenance.",
+			InputSchema: schema(map[string]any{
+				"text": map[string]any{
+					"type":        "string",
+					"description": "group:artifact, group:artifact:version, artifact id, or jar filename.",
+				},
+				"project_dir": projectDir,
+				"page_size": map[string]any{
+					"type":        "integer",
+					"description": "Max origins and source usage rows to return (default 20).",
+				},
+				"no_source_grep": map[string]any{
+					"type":        "boolean",
+					"description": "Skip bounded source/build-file usage search.",
+				},
+			}, "text"),
 		},
 		{
 			Name: "why_dependency",

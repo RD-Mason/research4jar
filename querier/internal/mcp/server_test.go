@@ -52,11 +52,11 @@ func TestInitializeAndToolsList(t *testing.T) {
 		names[tool.(map[string]any)["name"].(string)] = true
 	}
 	for _, required := range []string{
-		"check_environment", "index_project", "find_config_properties", "find_implementations",
+		"check_environment", "index_project", "project_status", "find_config_properties", "find_implementations",
 		"find_by_annotation", "get_class", "get_bean_definitions",
 		"explain_conditional", "find_string", "list_extension_points",
 		"find_class", "find_method", "list_packages", "search_symbols",
-		"open_symbol", "why_dependency",
+		"open_symbol", "dependency_precise", "class_origin", "find_artifact", "why_dependency",
 	} {
 		if !names[required] {
 			t.Fatalf("missing tool %q in %v", required, names)
@@ -77,6 +77,27 @@ func TestInitializeAndToolsList(t *testing.T) {
 	properties := schema["properties"].(map[string]any)
 	if properties["registry"] == nil || properties["registry_pubkey"] == nil {
 		t.Fatalf("index_project should expose registry fields: %#v", properties)
+	}
+}
+
+func TestProjectStatusToolWorksWithoutIndex(t *testing.T) {
+	dir := t.TempDir()
+	responses := roundTrip(
+		t,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"project_status","arguments":{"project_dir":"`+
+			strings.ReplaceAll(dir, `\`, `\\`)+`"}}}`,
+	)
+	result := responses[0]["result"].(map[string]any)
+	if result["isError"] == true {
+		t.Fatalf("project_status should not be an error without an index: %#v", result)
+	}
+	text := result["content"].([]any)[0].(map[string]any)["text"].(string)
+	var status map[string]any
+	if err := json.Unmarshal([]byte(text), &status); err != nil {
+		t.Fatalf("project_status returned invalid JSON %q: %v", text, err)
+	}
+	if status["indexed"] != false || status["project_dir"] != dir {
+		t.Fatalf("unexpected project_status result: %#v", status)
 	}
 }
 
