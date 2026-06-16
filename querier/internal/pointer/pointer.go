@@ -23,13 +23,19 @@ const snippet = heading + `
 本项目已用 Research4Jar 索引了 Maven/Java 依赖 jar 里的类、方法、注解、字符串、
 SPI、Spring 配置项与字节码事实。
 
-当用户询问依赖 jar 里的 Java/Spring 行为、某个类/方法来自哪里、某个 Maven 依赖为什么存在、
+依赖、JAR、外部类、import 来源问题优先使用 ` + "`.research4jar/project.json`" + ` 指向的索引与
+Research4Jar CLI/MCP 工具。不要只读 ` + "`.research4jar`" + ` 里的 JSON/SQLite 文件；先调用工具拿结构化答案。
+当用户询问依赖 jar 里的 Java/Spring 行为、某个类/方法/import 来自哪里、某个 Maven 依赖为什么存在、
 或配置项、接口实现、注解使用、@Bean 定义、条件装配、SPI 扩展点时，先检索再展开：
 
 ` + "```bash" + `
+research4jar dep precise <import|类|坐标|jar>       # 直接回答 import/class 来自哪个 jar，并联动源码消费位置
+research4jar artifact <坐标|artifactId|jar>         # 显式查 artifact/jar 及其依赖路径
+research4jar class <类名或 FQN>                     # 类来源 jar/依赖路径/源码消费位置
+research4jar method <方法名或 Class#method>         # 显式查方法（find-method 的短入口）
 research4jar search-symbol <关键词>                # 首选宽检索：类/方法/注解/SPI/配置项/字符串
 research4jar open-symbol <类 FQN 或 Class#method>  # 展开 search-symbol 返回的符号
-research4jar why-dependency <坐标|jar|类 FQN>      # 解释 Maven 依赖来源与传递链路
+research4jar dep why <坐标|jar|类 FQN>              # 解释 Maven 依赖来源与传递链路
 research4jar find-class <类名或包前缀>             # 通用 Java 类查询
 research4jar find-method <方法名或 Class#method>   # 通用 Java 方法查询
 research4jar list-packages [包前缀]                # 按 jar/package 查看包结构
@@ -44,7 +50,8 @@ research4jar list-extension-points [key]           # SPI 注册总览/明细
 ` + "```" + `
 
 输出包含匹配结果、来源 jar，以及 ` + "`coverage`" + ` 字段（已索引多少个 jar、哪些 jar 未索引）。
-` + "`why-dependency`" + ` 依赖 Maven 项目索引时生成的 ` + "`.research4jar/dependencies.json`" + `。
+` + "`dep precise`" + ` 会同时用依赖索引确认「有没有这个依赖/来自哪个 jar」，并用源码搜索确认「项目哪里消费」。
+` + "`dep why`" + ` 依赖 Maven 项目索引时生成的 ` + "`.research4jar/dependencies.json`" + `。
 加 ` + "`--direct`" + ` 可关闭传递闭包/元注解展开；注解查询不合并 @AliasFor 属性别名。
 依赖变更后运行 ` + "`research4jar index`" + ` 增量更新索引。
 如果用户问的内容不在结果里，结合 ` + "`coverage`" + ` 判断是「确实不存在」还是「所在 jar 未被索引」，并如实说明。`

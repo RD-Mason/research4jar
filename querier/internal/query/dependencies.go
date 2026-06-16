@@ -2,7 +2,6 @@ package query
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -14,17 +13,18 @@ import (
 )
 
 type DependencyWhyResult struct {
-	Coordinate  string   `json:"coordinate"`
-	Artifact    string   `json:"artifact"`
-	Version     string   `json:"version"`
-	Scope       string   `json:"scope,omitempty"`
-	Direct      bool     `json:"direct"`
-	Depth       int      `json:"depth"`
-	Path        []string `json:"path"`
-	Parent      string   `json:"parent,omitempty"`
-	MatchedBy   string   `json:"matched_by"`
-	SourceJar   string   `json:"source_jar,omitempty"`
-	SourceClass string   `json:"source_class,omitempty"`
+	Coordinate       string   `json:"coordinate"`
+	Artifact         string   `json:"artifact"`
+	Version          string   `json:"version"`
+	Scope            string   `json:"scope,omitempty"`
+	Direct           bool     `json:"direct"`
+	Depth            int      `json:"depth"`
+	Path             []string `json:"path"`
+	Parent           string   `json:"parent,omitempty"`
+	DirectDependency string   `json:"direct_dependency,omitempty"`
+	MatchedBy        string   `json:"matched_by"`
+	SourceJar        string   `json:"source_jar,omitempty"`
+	SourceClass      string   `json:"source_class,omitempty"`
 }
 
 type DependencyWhyResponse struct {
@@ -66,6 +66,19 @@ func WhyDependency(
 	if err != nil {
 		return DependencyWhyResponse{}, err
 	}
+	results := dependencyWhyResults(graph, targets)
+	return DependencyWhyResponse{
+		Query:    SymbolRequest{Command: "why-dependency", Arg: arg},
+		Results:  results,
+		Total:    len(results),
+		Coverage: coverageFrom(pointer),
+	}, nil
+}
+
+func dependencyWhyResults(
+	graph depgraph.Graph,
+	targets []dependencyTarget,
+) []DependencyWhyResult {
 	seen := map[string]DependencyWhyResult{}
 	for _, target := range targets {
 		for _, artifact := range graph.Artifacts {
@@ -73,17 +86,18 @@ func WhyDependency(
 				continue
 			}
 			result := DependencyWhyResult{
-				Coordinate:  artifact.Coordinate,
-				Artifact:    artifact.Artifact,
-				Version:     artifact.Version,
-				Scope:       artifact.Scope,
-				Direct:      artifact.Direct,
-				Depth:       artifact.Depth,
-				Path:        nonNil(artifact.Path),
-				Parent:      artifact.Parent,
-				MatchedBy:   target.matchedBy,
-				SourceJar:   target.sourceJar,
-				SourceClass: target.sourceClass,
+				Coordinate:       artifact.Coordinate,
+				Artifact:         artifact.Artifact,
+				Version:          artifact.Version,
+				Scope:            artifact.Scope,
+				Direct:           artifact.Direct,
+				Depth:            artifact.Depth,
+				Path:             nonNil(artifact.Path),
+				Parent:           artifact.Parent,
+				DirectDependency: directDependencyFor(artifact),
+				MatchedBy:        target.matchedBy,
+				SourceJar:        target.sourceJar,
+				SourceClass:      target.sourceClass,
 			}
 			key := result.Coordinate + "\x00" + result.MatchedBy + "\x00" + result.SourceClass
 			seen[key] = result
@@ -94,12 +108,7 @@ func WhyDependency(
 		results = append(results, result)
 	}
 	sortDependencyWhy(results)
-	return DependencyWhyResponse{
-		Query:    SymbolRequest{Command: "why-dependency", Arg: arg},
-		Results:  results,
-		Total:    len(results),
-		Coverage: coverageFrom(pointer),
-	}, nil
+	return results
 }
 
 type dependencyTarget struct {
@@ -125,10 +134,11 @@ func dependencyTargets(
 	}
 	for _, source := range sources {
 		switch {
-		case source.Coordinate != "" && artifactMatchesArg(source.Coordinate, arg):
+		case source.Coordinate != "" &&
+			(artifactMatchesArg(source.Coordinate, arg) || coordinateArtifactID(source.Coordinate) == arg):
 			targets = append(targets, dependencyTarget{
 				coordinate: source.Coordinate,
-				matchedBy:  "coordinate",
+				matchedBy:  coordinateMatchReason(source.Coordinate, arg),
 				sourceJar:  source.Source,
 			})
 		case source.Filename == arg || filepath.Base(source.Filename) == arg:
@@ -193,40 +203,18 @@ func classDependencyTargets(
 }
 
 func loadManifestSources(ctx context.Context, manifestPath string) ([]manifestSource, error) {
-	if manifestPath == "" {
-		return []manifestSource{}, nil
-	}
-	manifest, err := openReadOnly(manifestPath, false)
+	rows, err := loadManifestRows(ctx, manifestPath)
 	if err != nil {
-		return nil, fmt.Errorf("open manifest database: %w", err)
+		return nil, err
 	}
-	defer manifest.Close()
-	rows, err := manifest.QueryContext(
-		ctx,
-		`SELECT shard_id, jar_coordinate, jar_filename,
-		        COALESCE(NULLIF(jar_coordinate, ''), jar_filename)
-		 FROM shards`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("query manifest sources: %w", err)
-	}
-	defer rows.Close()
-	sources := []manifestSource{}
-	for rows.Next() {
-		var source manifestSource
-		var coordinate sql.NullString
-		if err := rows.Scan(
-			&source.ShardID, &coordinate, &source.Filename, &source.Source,
-		); err != nil {
-			return nil, fmt.Errorf("scan manifest source: %w", err)
-		}
-		if coordinate.Valid {
-			source.Coordinate = coordinate.String
-		}
-		sources = append(sources, source)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate manifest sources: %w", err)
+	sources := make([]manifestSource, 0, len(rows))
+	for _, row := range rows {
+		sources = append(sources, manifestSource{
+			ShardID:    row.shardID,
+			Coordinate: row.coordinate,
+			Filename:   row.filename,
+			Source:     row.source,
+		})
 	}
 	return sources, nil
 }
@@ -237,6 +225,7 @@ func artifactMatchesTarget(artifact depgraph.Artifact, target string) bool {
 	}
 	return artifactMatchesArg(artifact.Coordinate, target) ||
 		artifact.Artifact == target ||
+		artifact.Name == target ||
 		artifact.Coordinate == target
 }
 
@@ -249,6 +238,31 @@ func artifactMatchesArg(coordinate, arg string) bool {
 		return true
 	}
 	return false
+}
+
+func coordinateArtifactID(coordinate string) string {
+	parts := strings.Split(coordinate, ":")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+func coordinateMatchReason(coordinate, arg string) string {
+	if coordinateArtifactID(coordinate) == arg {
+		return "artifact"
+	}
+	return "coordinate"
+}
+
+func directDependencyFor(artifact depgraph.Artifact) string {
+	if len(artifact.Path) > 0 {
+		return artifact.Path[0]
+	}
+	if artifact.Direct {
+		return artifact.Coordinate
+	}
+	return ""
 }
 
 func dedupeDependencyTargets(targets []dependencyTarget) []dependencyTarget {
