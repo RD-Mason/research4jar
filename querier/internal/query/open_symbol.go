@@ -86,9 +86,9 @@ func openMethodSymbol(
 		`SELECT c.fqn, m.name, m.descriptor, m.return_fqn, m.modifiers, m.source_shard_id
 		 FROM methods m
 		 JOIN classes c ON c.id = m.class_id
-		 WHERE c.fqn = ? AND m.name = ?
+		 WHERE m.symbol = ?
 		 ORDER BY m.descriptor, m.source_shard_id`,
-		classFQN, methodName,
+		classFQN+"#"+methodName,
 	)
 	if err != nil {
 		return OpenSymbolResponse{}, fmt.Errorf("query method symbol: %w", err)

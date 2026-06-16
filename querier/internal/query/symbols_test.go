@@ -221,6 +221,7 @@ func createSymbolSession(t *testing.T, path string) {
 		`CREATE TABLE classes (
 		  id INTEGER PRIMARY KEY, fqn TEXT NOT NULL, kind TEXT, super_fqn TEXT,
 		  modifiers INTEGER, is_abstract INTEGER, source_file TEXT,
+		  simple_name TEXT, package_name TEXT,
 		  source_shard_id TEXT NOT NULL
 		)`,
 		`CREATE TABLE class_interfaces (
@@ -231,18 +232,18 @@ func createSymbolSession(t *testing.T, path string) {
 		  id INTEGER PRIMARY KEY, target_kind TEXT NOT NULL, target_id INTEGER NOT NULL,
 		  annotation_fqn TEXT NOT NULL, attributes TEXT, source_shard_id TEXT NOT NULL
 		)`,
-		`INSERT INTO classes (id, fqn, kind, source_shard_id) VALUES
-		  (1, 'example.Contract', 'interface', 'api@2'),
-		  (2, 'other.DirectImplementation', 'class', 'impl@2'),
-		  (3, 'other.Marked', 'class', 'marked@2'),
-		  (6, 'example.SubContract', 'interface', 'api@2'),
-		  (7, 'other.IndirectImpl', 'class', 'impl@2'),
-		  (9, 'example.Marker', 'annotation', 'api@2'),
-		  (10, 'example.MetaMarker', 'annotation', 'api@2')`,
-		`INSERT INTO classes (id, fqn, kind, super_fqn, source_shard_id) VALUES
-		  (4, 'example.BaseGateway', 'class', NULL, 'api@2'),
-		  (5, 'other.DirectSubclass', 'class', 'example.BaseGateway', 'impl@2'),
-		  (8, 'other.GrandChild', 'class', 'other.DirectImplementation', 'impl@2')`,
+		`INSERT INTO classes (id, fqn, kind, simple_name, package_name, source_shard_id) VALUES
+		  (1, 'example.Contract', 'interface', 'Contract', 'example', 'api@2'),
+		  (2, 'other.DirectImplementation', 'class', 'DirectImplementation', 'other', 'impl@2'),
+		  (3, 'other.Marked', 'class', 'Marked', 'other', 'marked@2'),
+		  (6, 'example.SubContract', 'interface', 'SubContract', 'example', 'api@2'),
+		  (7, 'other.IndirectImpl', 'class', 'IndirectImpl', 'other', 'impl@2'),
+		  (9, 'example.Marker', 'annotation', 'Marker', 'example', 'api@2'),
+		  (10, 'example.MetaMarker', 'annotation', 'MetaMarker', 'example', 'api@2')`,
+		`INSERT INTO classes (id, fqn, kind, super_fqn, simple_name, package_name, source_shard_id) VALUES
+		  (4, 'example.BaseGateway', 'class', NULL, 'BaseGateway', 'example', 'api@2'),
+		  (5, 'other.DirectSubclass', 'class', 'example.BaseGateway', 'DirectSubclass', 'other', 'impl@2'),
+		  (8, 'other.GrandChild', 'class', 'other.DirectImplementation', 'GrandChild', 'other', 'impl@2')`,
 		`INSERT INTO class_interfaces VALUES
 		  (2, 'example.Contract', 'impl@2'),
 		  (6, 'example.Contract', 'api@2'),

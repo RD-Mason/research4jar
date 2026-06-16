@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"dev.research4jar/querier/internal/versions"
 	_ "modernc.org/sqlite"
 )
 
@@ -121,7 +122,7 @@ func TestBuildMergesShardsWithIDRebasing(t *testing.T) {
 	}
 
 	db := openSession(t, target)
-	if got := count(t, db, "SELECT session_schema_version FROM session_meta"); got != 2 {
+	if got := count(t, db, "SELECT session_schema_version FROM session_meta"); got != versions.Session {
 		t.Fatalf("session_schema_version = %d", got)
 	}
 	if got := count(t, db, "SELECT COUNT(*) FROM classes"); got != 2 {
@@ -164,8 +165,27 @@ func TestBuildMergesShardsWithIDRebasing(t *testing.T) {
 		t.Fatalf("bean_definitions = %d", got)
 	}
 	if got := count(t, db, `
-		SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_s_%'`); got != 16 {
-		t.Fatalf("indexes = %d, want 16", got)
+		SELECT COUNT(*) FROM classes
+		WHERE (fqn = 'alpha.One' AND simple_name = 'One' AND package_name = 'alpha')
+		   OR (fqn = 'beta.Two' AND simple_name = 'Two' AND package_name = 'beta')`); got != 2 {
+		t.Fatalf("derived class names = %d, want 2", got)
+	}
+	if got := count(t, db, `
+		SELECT COUNT(*) FROM methods
+		WHERE symbol IN ('alpha.One#value', 'beta.Two#value')`); got != 2 {
+		t.Fatalf("derived method symbols = %d, want 2", got)
+	}
+	if got := count(t, db, "SELECT COUNT(*) FROM search_symbols"); got != 14 {
+		t.Fatalf("search_symbols = %d, want 14", got)
+	}
+	if got := count(t, db, `
+		SELECT COUNT(*) FROM search_symbols
+		WHERE kind = 'annotation' AND owner = 'beta.Two#value'`); got != 1 {
+		t.Fatalf("method annotation search owner = %d, want 1", got)
+	}
+	if got := count(t, db, `
+		SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_s_%'`); got != 24 {
+		t.Fatalf("indexes = %d, want 24", got)
 	}
 	// Provenance must carry the shard id for source-jar attribution.
 	if got := count(t, db,
@@ -212,7 +232,7 @@ func TestBuildIfAbsentReusesCurrentLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	rebuilt := openSession(t, target)
-	if got := count(t, rebuilt, "SELECT session_schema_version FROM session_meta"); got != 2 {
+	if got := count(t, rebuilt, "SELECT session_schema_version FROM session_meta"); got != versions.Session {
 		t.Fatalf("session_schema_version after rebuild = %d", got)
 	}
 }

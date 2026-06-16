@@ -89,6 +89,24 @@ class StoreTest {
                 assertEquals("demo.value", rows.getString("name"))
                 assertEquals("abc123@2", rows.getString("source_shard_id"))
             }
+            connection.createStatement().executeQuery(
+                "SELECT simple_name, package_name FROM classes WHERE fqn = 'example.Demo'",
+            ).use { rows ->
+                assertTrue(rows.next())
+                assertEquals("Demo", rows.getString("simple_name"))
+                assertEquals("example", rows.getString("package_name"))
+            }
+            connection.createStatement().executeQuery(
+                "SELECT kind, COUNT(*) FROM search_symbols GROUP BY kind ORDER BY kind",
+            ).use { rows ->
+                val byKind = buildMap<String, Int> {
+                    while (rows.next()) put(rows.getString(1), rows.getInt(2))
+                }
+                assertEquals(
+                    mapOf("class" to 1, "config-property" to 1, "spi" to 2),
+                    byKind,
+                )
+            }
         }
     }
 

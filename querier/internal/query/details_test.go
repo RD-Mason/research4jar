@@ -23,6 +23,7 @@ func createDetailSession(t *testing.T, path string) {
 		`CREATE TABLE classes (
 		  id INTEGER PRIMARY KEY, fqn TEXT NOT NULL, kind TEXT, super_fqn TEXT,
 		  modifiers INTEGER, is_abstract INTEGER, source_file TEXT,
+		  simple_name TEXT, package_name TEXT,
 		  source_shard_id TEXT NOT NULL
 		)`,
 		`CREATE TABLE class_interfaces (
@@ -36,6 +37,7 @@ func createDetailSession(t *testing.T, path string) {
 		`CREATE TABLE methods (
 		  id INTEGER PRIMARY KEY, class_id INTEGER NOT NULL, name TEXT NOT NULL,
 		  descriptor TEXT NOT NULL, return_fqn TEXT, modifiers INTEGER,
+		  symbol TEXT,
 		  source_shard_id TEXT NOT NULL
 		)`,
 		`CREATE TABLE bean_definitions (
@@ -54,17 +56,25 @@ func createDetailSession(t *testing.T, path string) {
 		  id INTEGER PRIMARY KEY, mechanism TEXT NOT NULL, key TEXT,
 		  impl_fqn TEXT NOT NULL, source_shard_id TEXT NOT NULL
 		)`,
+		`CREATE TABLE search_symbols (
+		  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+		  owner TEXT, detail TEXT, source_shard_id TEXT NOT NULL,
+		  simple_name TEXT, package_name TEXT, score_hint INTEGER NOT NULL
+		)`,
 		`INSERT INTO classes
-		  (id, fqn, kind, super_fqn, modifiers, is_abstract, source_file, source_shard_id)
-		  VALUES (1, 'example.AutoConfig', 'class', NULL, 1, 0, 'AutoConfig.java', 'api@2')`,
+		  (id, fqn, kind, super_fqn, modifiers, is_abstract, source_file,
+		   simple_name, package_name, source_shard_id)
+		  VALUES (1, 'example.AutoConfig', 'class', NULL, 1, 0, 'AutoConfig.java',
+		          'AutoConfig', 'example', 'api@2')`,
 		`INSERT INTO class_interfaces VALUES (1, 'example.Aware', 'api@2')`,
 		`INSERT INTO annotations
 		  (target_kind, target_id, annotation_fqn, attributes, source_shard_id) VALUES
 		  ('class', 1, 'org.springframework.context.annotation.Configuration', '{}', 'api@2'),
 		  ('method', 1, 'org.springframework.context.annotation.Bean', '{}', 'api@2')`,
 		`INSERT INTO methods
-		  (id, class_id, name, descriptor, return_fqn, modifiers, source_shard_id)
-		  VALUES (1, 1, 'dataSource', '()Ljavax/sql/DataSource;', 'javax.sql.DataSource', 1, 'api@2')`,
+		  (id, class_id, name, descriptor, return_fqn, modifiers, symbol, source_shard_id)
+		  VALUES (1, 1, 'dataSource', '()Ljavax/sql/DataSource;', 'javax.sql.DataSource',
+		          1, 'example.AutoConfig#dataSource', 'api@2')`,
 		`INSERT INTO bean_definitions
 		  (config_fqn, method_id, bean_type_fqn, bean_name, source_shard_id)
 		  VALUES ('example.AutoConfig', 1, 'javax.sql.DataSource', 'dataSource', 'api@2')`,
@@ -79,6 +89,22 @@ func createDetailSession(t *testing.T, path string) {
 		  ('autoconfig.imports', NULL, 'example.AutoConfig', 'api@2'),
 		  ('services', 'java.sql.Driver', 'example.FakeDriver', 'api@2'),
 		  ('services', 'java.sql.Driver', 'example.OtherDriver', 'api@2')`,
+		`INSERT INTO search_symbols
+		  (kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint)
+		  VALUES
+		  ('class', 'example.AutoConfig', NULL, 'class', 'api@2', 'AutoConfig', 'example', 55),
+		  ('method', 'example.AutoConfig#dataSource', 'example.AutoConfig',
+		   '()Ljavax/sql/DataSource;', 'api@2', 'dataSource', 'example', 50),
+		  ('annotation', 'org.springframework.context.annotation.Configuration',
+		   'example.AutoConfig', '{}', 'api@2', NULL, 'example', 45),
+		  ('annotation', 'org.springframework.context.annotation.Bean',
+		   'example.AutoConfig#dataSource', '{}', 'api@2', NULL, 'example', 45),
+		  ('spi', 'example.AutoConfig', NULL, 'autoconfig.imports', 'api@2', NULL, NULL, 44),
+		  ('spi', 'example.FakeDriver', 'java.sql.Driver', 'services', 'api@2', NULL, NULL, 44),
+		  ('spi', 'example.OtherDriver', 'java.sql.Driver', 'services', 'api@2', NULL, NULL, 44),
+		  ('string', 'spring.datasource.url', 'example.AutoConfig',
+		   'dataSource()Ljavax/sql/DataSource;', 'api@2', NULL, 'example', 30),
+		  ('string', 'X-Trace-Id', 'example.AutoConfig', NULL, 'api@2', NULL, 'example', 30)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

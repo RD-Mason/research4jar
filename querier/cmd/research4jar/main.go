@@ -727,7 +727,7 @@ func printClassSearchText(response query.ClassSearchResponse) {
 		)
 	}
 	writer.Flush()
-	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+	printSearchSummary(response.Page, response.PageSize, response.Total, response.HasMore, response.Coverage)
 }
 
 func printMethodSearchText(response query.MethodSearchResponse) {
@@ -741,7 +741,7 @@ func printMethodSearchText(response query.MethodSearchResponse) {
 		)
 	}
 	writer.Flush()
-	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+	printSearchSummary(response.Page, response.PageSize, response.Total, response.HasMore, response.Coverage)
 }
 
 func printPackagesText(response query.PackageListResponse) {
@@ -751,7 +751,7 @@ func printPackagesText(response query.PackageListResponse) {
 		fmt.Fprintf(writer, "%s\t%d\t%s\n", result.Package, result.Classes, result.SourceJar)
 	}
 	writer.Flush()
-	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+	printSearchSummary(response.Page, response.PageSize, response.Total, response.HasMore, response.Coverage)
 }
 
 func printSearchSymbolsText(response query.SearchSymbolResponse) {
@@ -765,7 +765,7 @@ func printSearchSymbolsText(response query.SearchSymbolResponse) {
 		)
 	}
 	writer.Flush()
-	printSummary(response.Page, response.PageSize, response.Total, response.Coverage)
+	printSearchSummary(response.Page, response.PageSize, response.Total, response.HasMore, response.Coverage)
 }
 
 func printWhyDependencyText(response query.DependencyWhyResponse) {
@@ -893,6 +893,19 @@ func printSummary(page, pageSize, total int, coverage query.Coverage) {
 		page,
 		pageSize,
 		total,
+		coverage.JarsIndexed,
+		coverage.JarsTotal,
+		len(coverage.JarsMissing),
+	)
+}
+
+func printSearchSummary(page, pageSize, returned int, hasMore bool, coverage query.Coverage) {
+	fmt.Printf(
+		"\npage %d, page size %d, returned %d, has_more %t; coverage %d/%d jars, %d missing\n",
+		page,
+		pageSize,
+		returned,
+		hasMore,
 		coverage.JarsIndexed,
 		coverage.JarsTotal,
 		len(coverage.JarsMissing),

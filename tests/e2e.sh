@@ -469,6 +469,7 @@ import sys
 
 response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["total"] == 1, response
+assert response["has_more"] is False, response
 result = response["results"][0]
 assert result["fqn"] == "other.DirectImplementation", result
 assert result["match_reason"] == "simple_name", result
@@ -485,6 +486,7 @@ import sys
 
 response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["total"] == 1, response
+assert response["has_more"] is False, response
 method = response["results"][0]
 assert method["class_fqn"] == "other.DirectImplementation", method
 assert method["name"] == "value", method
@@ -501,6 +503,7 @@ import sys
 
 response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["total"] == 1, response
+assert response["has_more"] is False, response
 assert response["results"][0]["package"] == "other", response
 assert response["results"][0]["classes"] == 1, response
 PY
@@ -515,6 +518,7 @@ import sys
 
 response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["total"] == 1, response
+assert response["has_more"] is False, response
 result = response["results"][0]
 assert result["kind"] == "string", result
 assert result["owner"] == "other.DirectImplementation", result

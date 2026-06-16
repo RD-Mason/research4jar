@@ -65,6 +65,7 @@ research4jar list-packages org.springframework.boot.autoconfigure
 `find-implementations` is transitive by default (subinterface and superclass chains across jars); `find-by-annotation` expands meta-annotations by default (querying `@Component` finds `@Service` classes). Pass `--direct` for declared-only matching.
 
 All query commands support `--format json|text`, `--page`, `--page-size`, and `--project-dir`. Use `--home` or `RESEARCH4JAR_HOME` to override the global data directory.
+For high-fanout retrieval commands (`find-class`, `find-method`, `list-packages`, and `search-symbol`), JSON responses include `has_more`; use it to continue paging instead of relying on an exact pre-count.
 
 ## Use from Cursor, Claude Code, or any MCP host
 
@@ -165,7 +166,7 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Transitive cross-jar implementation lookup (query-time recursive traversal over symbolic references)
 - Meta-annotation expansion at query time (`@Component` finds `@Service`/`@Repository`/`@Controller` classes)
 - Class detail, bean-definition, conditional-explanation, string-constant, and extension-point queries
-- General Java retrieval: class search, method search, package summaries, broad `search-symbol`, and `open-symbol`
+- General Java retrieval: indexed class search, method search, package summaries, broad `search-symbol`, and `open-symbol`
 - Maven dependency provenance: `research4jar index` captures `.research4jar/dependencies.json` for Maven projects and `why-dependency` explains direct/transitive dependency paths by coordinate, jar filename, or class FQN
 - Maven/Gradle classpath auto-discovery (`research4jar index`) and an MCP stdio server (`research4jar mcp`)
 - Shard registry: static-hostable export (`research4jar registry export`), verified download-instead-of-extract (`research4jar index --registry`), and ed25519 signing

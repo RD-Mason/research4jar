@@ -28,6 +28,13 @@ func javaFixture(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, err = db.Exec(`INSERT INTO search_symbols
+	  (kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint)
+	  VALUES ('config-property', 'spring.datasource.url', 'example.AutoConfig',
+	          'java.lang.String', 'api@2', NULL, NULL, 43)`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return sessionPath, manifestPath
 }
 
@@ -43,6 +50,9 @@ func TestFindClassFindMethodAndPackages(t *testing.T) {
 		classes.Results[0].MatchReason != "simple_name" {
 		t.Fatalf("unexpected class results: %#v", classes)
 	}
+	if classes.HasMore {
+		t.Fatalf("class search should not have another page: %#v", classes)
+	}
 
 	methods, err := FindMethod(context.Background(), pointer, manifestPath, "dataSource", 1, 20)
 	if err != nil {
@@ -52,6 +62,9 @@ func TestFindClassFindMethodAndPackages(t *testing.T) {
 		methods.Results[0].SourceJar != "com.example:api:1.0" {
 		t.Fatalf("unexpected method results: %#v", methods)
 	}
+	if methods.HasMore {
+		t.Fatalf("method search should not have another page: %#v", methods)
+	}
 
 	packages, err := ListPackages(context.Background(), pointer, manifestPath, "example", 1, 20)
 	if err != nil {
@@ -60,6 +73,9 @@ func TestFindClassFindMethodAndPackages(t *testing.T) {
 	if packages.Total != 1 || packages.Results[0].Package != "example" ||
 		packages.Results[0].Classes != 1 {
 		t.Fatalf("unexpected package results: %#v", packages)
+	}
+	if packages.HasMore {
+		t.Fatalf("package search should not have another page: %#v", packages)
 	}
 }
 
@@ -78,6 +94,9 @@ func TestSearchSymbolAndOpenSymbol(t *testing.T) {
 	if !kinds["config-property"] || !kinds["string"] {
 		t.Fatalf("expected config-property and string matches: %#v", search.Results)
 	}
+	if search.HasMore {
+		t.Fatalf("search-symbol should not have another page: %#v", search)
+	}
 
 	opened, err := OpenSymbol(context.Background(), pointer, manifestPath, "example.AutoConfig#dataSource")
 	if err != nil {
@@ -95,13 +114,22 @@ func TestFindClassPaginationPastEnd(t *testing.T) {
 	manifestPath := filepath.Join(root, "manifest.db")
 	createSymbolSession(t, sessionPath)
 	createSymbolManifest(t, manifestPath)
+	firstPage, err := FindClass(
+		context.Background(), symbolPointer(sessionPath), manifestPath, "example", 1, 1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage.Results) != 1 || firstPage.Total != 1 || !firstPage.HasMore {
+		t.Fatalf("expected limit+1 to report another page: %#v", firstPage)
+	}
 	response, err := FindClass(
 		context.Background(), symbolPointer(sessionPath), manifestPath, "example", 99, 20,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Results) != 0 {
+	if len(response.Results) != 0 || response.HasMore {
 		t.Fatalf("expected empty out-of-range page: %#v", response)
 	}
 }

@@ -32,6 +32,8 @@ class SessionBuilder {
                 configure(connection)
                 createTables(connection)
                 shards.sortedBy(SessionShard::shardId).forEach { merge(connection, it) }
+                populateDerivedColumns(connection)
+                populateSearchSymbols(connection)
                 createIndexes(connection)
                 connection.createStatement().use { it.execute("ANALYZE") }
             }
@@ -117,6 +119,8 @@ class SessionBuilder {
                   modifiers INTEGER,
                   is_abstract INTEGER,
                   source_file TEXT,
+                  simple_name TEXT,
+                  package_name TEXT,
                   source_shard_id TEXT NOT NULL
                 )
                 """.trimIndent(),
@@ -151,6 +155,7 @@ class SessionBuilder {
                   descriptor TEXT NOT NULL,
                   return_fqn TEXT,
                   modifiers INTEGER,
+                  symbol TEXT,
                   source_shard_id TEXT NOT NULL
                 )
                 """.trimIndent(),
@@ -187,6 +192,21 @@ class SessionBuilder {
                   method_id INTEGER,
                   value TEXT NOT NULL,
                   source_shard_id TEXT NOT NULL
+                )
+                """.trimIndent(),
+            )
+            statement.execute(
+                """
+                CREATE TABLE search_symbols (
+                  id INTEGER PRIMARY KEY,
+                  kind TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  owner TEXT,
+                  detail TEXT,
+                  source_shard_id TEXT NOT NULL,
+                  simple_name TEXT,
+                  package_name TEXT,
+                  score_hint INTEGER NOT NULL
                 )
                 """.trimIndent(),
             )
@@ -342,6 +362,169 @@ class SessionBuilder {
             }
         }
 
+    private data class DerivedClass(
+        val id: Int,
+        val simpleName: String,
+        val packageName: String,
+    )
+
+    private data class DerivedMethod(
+        val id: Int,
+        val symbol: String,
+    )
+
+    private fun populateDerivedColumns(connection: Connection) {
+        val classes = mutableListOf<DerivedClass>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("SELECT id, fqn FROM classes").use { rows ->
+                while (rows.next()) {
+                    val (packageName, simpleName) = splitFqn(rows.getString("fqn"))
+                    classes += DerivedClass(rows.getInt("id"), simpleName, packageName)
+                }
+            }
+        }
+
+        val methods = mutableListOf<DerivedMethod>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery(
+                """
+                SELECT m.id, c.fqn, m.name
+                FROM methods m
+                JOIN classes c ON c.id = m.class_id
+                """.trimIndent(),
+            ).use { rows ->
+                while (rows.next()) {
+                    methods += DerivedMethod(
+                        rows.getInt("id"),
+                        "${rows.getString("fqn")}#${rows.getString("name")}",
+                    )
+                }
+            }
+        }
+
+        withTransaction(connection) {
+            connection.prepareStatement(
+                "UPDATE classes SET simple_name = ?, package_name = ? WHERE id = ?",
+            ).use { statement ->
+                classes.forEach { item ->
+                    statement.setString(1, item.simpleName)
+                    statement.setString(2, item.packageName)
+                    statement.setInt(3, item.id)
+                    statement.addBatch()
+                }
+                statement.executeBatch()
+            }
+            connection.prepareStatement("UPDATE methods SET symbol = ? WHERE id = ?").use { statement ->
+                methods.forEach { item ->
+                    statement.setString(1, item.symbol)
+                    statement.setInt(2, item.id)
+                    statement.addBatch()
+                }
+                statement.executeBatch()
+            }
+        }
+    }
+
+    private fun populateSearchSymbols(connection: Connection) {
+        val statements = listOf(
+            """
+            INSERT INTO search_symbols(
+              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
+            )
+            SELECT 'class', fqn, NULL, kind, source_shard_id, simple_name, package_name, 55
+            FROM classes
+            """.trimIndent(),
+            """
+            INSERT INTO search_symbols(
+              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
+            )
+            SELECT 'method', m.symbol, c.fqn, m.descriptor, m.source_shard_id,
+                   m.name, c.package_name, 50
+            FROM methods m
+            JOIN classes c ON c.id = m.class_id
+            """.trimIndent(),
+            """
+            INSERT INTO search_symbols(
+              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
+            )
+            SELECT 'annotation',
+                   a.annotation_fqn,
+                   CASE
+                     WHEN a.target_kind = 'class' THEN c.fqn
+                     WHEN a.target_kind = 'method' THEN m.symbol
+                     ELSE NULL
+                   END,
+                   a.attributes,
+                   a.source_shard_id,
+                   NULL,
+                   COALESCE(c.package_name, mc.package_name),
+                   45
+            FROM annotations a
+            LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id
+            LEFT JOIN methods m ON a.target_kind = 'method' AND m.id = a.target_id
+            LEFT JOIN classes mc ON mc.id = m.class_id
+            """.trimIndent(),
+            """
+            INSERT INTO search_symbols(
+              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
+            )
+            SELECT 'spi', impl_fqn, key, mechanism, source_shard_id, NULL, NULL, 44
+            FROM spi_registrations
+            """.trimIndent(),
+            """
+            INSERT INTO search_symbols(
+              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
+            )
+            SELECT 'config-property', name, source_fqn, type_fqn, source_shard_id, NULL, NULL, 43
+            FROM config_properties
+            """.trimIndent(),
+            """
+            INSERT INTO search_symbols(
+              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
+            )
+            SELECT 'string',
+                   sc.value,
+                   c.fqn,
+                   CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END,
+                   sc.source_shard_id,
+                   NULL,
+                   c.package_name,
+                   30
+            FROM string_constants sc
+            JOIN classes c ON c.id = sc.class_id
+            LEFT JOIN methods m ON m.id = sc.method_id
+            """.trimIndent(),
+        )
+        withTransaction(connection) {
+            connection.createStatement().use { statement ->
+                statements.forEach { statement.executeUpdate(it) }
+            }
+        }
+    }
+
+    private fun withTransaction(connection: Connection, block: () -> Unit) {
+        val previousAutoCommit = connection.autoCommit
+        connection.autoCommit = false
+        try {
+            block()
+            connection.commit()
+        } catch (exception: Exception) {
+            connection.rollback()
+            throw exception
+        } finally {
+            connection.autoCommit = previousAutoCommit
+        }
+    }
+
+    private fun splitFqn(fqn: String): Pair<String, String> {
+        val index = fqn.lastIndexOf('.')
+        return if (index < 0) {
+            "" to fqn
+        } else {
+            fqn.substring(0, index) to fqn.substring(index + 1)
+        }
+    }
+
     private fun createIndexes(connection: Connection) {
         connection.createStatement().use { statement ->
             statement.execute("CREATE INDEX idx_s_cfg_prefix ON config_properties(prefix)")
@@ -349,6 +532,8 @@ class SessionBuilder {
             statement.execute("CREATE INDEX idx_s_spi_mech ON spi_registrations(mechanism)")
             statement.execute("CREATE INDEX idx_s_spi_key ON spi_registrations(key)")
             statement.execute("CREATE INDEX idx_s_classes_fqn ON classes(fqn)")
+            statement.execute("CREATE INDEX idx_s_classes_simple ON classes(simple_name)")
+            statement.execute("CREATE INDEX idx_s_classes_package ON classes(package_name)")
             statement.execute("CREATE INDEX idx_s_classes_super ON classes(super_fqn)")
             statement.execute("CREATE INDEX idx_s_ci_iface ON class_interfaces(interface_fqn)")
             statement.execute("CREATE INDEX idx_s_ci_class ON class_interfaces(class_id)")
@@ -359,6 +544,8 @@ class SessionBuilder {
                 "CREATE INDEX idx_s_ann_target ON annotations(target_kind, target_id)",
             )
             statement.execute("CREATE INDEX idx_s_methods_class ON methods(class_id)")
+            statement.execute("CREATE INDEX idx_s_methods_name ON methods(name)")
+            statement.execute("CREATE INDEX idx_s_methods_symbol ON methods(symbol)")
             statement.execute("CREATE INDEX idx_s_bean_type ON bean_definitions(bean_type_fqn)")
             statement.execute("CREATE INDEX idx_s_bean_cfg ON bean_definitions(config_fqn)")
             statement.execute(
@@ -366,6 +553,10 @@ class SessionBuilder {
             )
             statement.execute("CREATE INDEX idx_s_strconst_value ON string_constants(value)")
             statement.execute("CREATE INDEX idx_s_strconst_class ON string_constants(class_id)")
+            statement.execute("CREATE INDEX idx_s_search_kind_name ON search_symbols(kind, name)")
+            statement.execute("CREATE INDEX idx_s_search_name ON search_symbols(name)")
+            statement.execute("CREATE INDEX idx_s_search_simple ON search_symbols(simple_name)")
+            statement.execute("CREATE INDEX idx_s_search_package ON search_symbols(package_name)")
         }
     }
 }

@@ -19,6 +19,7 @@ object Research4JarVersions {
      * compatibility is governed by EXTRACTOR/SCHEMA through the shard_id).
      * M2 == 2: merges methods, bean_definitions, conditions, string_constants
      * and method-target annotations alongside the M1 tables.
+     * M3 == 3: adds retrieval-oriented derived columns and search_symbols.
      */
-    const val SESSION = 2
+    const val SESSION = 3
 }

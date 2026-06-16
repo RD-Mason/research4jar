@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 
 	"dev.research4jar/querier/internal/project"
@@ -25,6 +24,7 @@ type ClassSearchResponse struct {
 	Query    SymbolRequest       `json:"query"`
 	Results  []ClassSearchResult `json:"results"`
 	Total    int                 `json:"total"`
+	HasMore  bool                `json:"has_more"`
 	Page     int                 `json:"page"`
 	PageSize int                 `json:"page_size"`
 	Coverage Coverage            `json:"coverage"`
@@ -45,6 +45,7 @@ type MethodSearchResponse struct {
 	Query    SymbolRequest        `json:"query"`
 	Results  []MethodSearchResult `json:"results"`
 	Total    int                  `json:"total"`
+	HasMore  bool                 `json:"has_more"`
 	Page     int                  `json:"page"`
 	PageSize int                  `json:"page_size"`
 	Coverage Coverage             `json:"coverage"`
@@ -60,6 +61,7 @@ type PackageListResponse struct {
 	Query    SymbolRequest    `json:"query"`
 	Results  []PackageSummary `json:"results"`
 	Total    int              `json:"total"`
+	HasMore  bool             `json:"has_more"`
 	Page     int              `json:"page"`
 	PageSize int              `json:"page_size"`
 	Coverage Coverage         `json:"coverage"`
@@ -79,6 +81,7 @@ type SearchSymbolResponse struct {
 	Query    SymbolRequest        `json:"query"`
 	Results  []SearchSymbolResult `json:"results"`
 	Total    int                  `json:"total"`
+	HasMore  bool                 `json:"has_more"`
 	Page     int                  `json:"page"`
 	PageSize int                  `json:"page_size"`
 	Coverage Coverage             `json:"coverage"`
@@ -99,12 +102,11 @@ func FindClass(
 	defer session.Close()
 
 	args := matchArgs(term)
-	var total int
-	if err := session.QueryRowContext(ctx, classSearchCountSQL, args...).Scan(&total); err != nil {
-		return ClassSearchResponse{}, fmt.Errorf("count class results: %w", err)
-	}
-	selectArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
-	rows, err := session.QueryContext(ctx, classSearchSQL, selectArgs...)
+	rows, err := session.QueryContext(
+		ctx,
+		classSearchSQL,
+		append(args, pageSize+1, (page-1)*pageSize)...,
+	)
 	if err != nil {
 		return ClassSearchResponse{}, fmt.Errorf("query class results: %w", err)
 	}
@@ -117,9 +119,9 @@ func FindClass(
 	pending := []pendingClass{}
 	for rows.Next() {
 		var item pendingClass
-		var kind, super sql.NullString
+		var simpleName, packageName, kind, super sql.NullString
 		if err := rows.Scan(
-			&item.result.FQN, &kind, &super, &item.shardID,
+			&item.result.FQN, &simpleName, &packageName, &kind, &super, &item.shardID,
 			&item.result.Score, &item.result.MatchReason,
 		); err != nil {
 			return ClassSearchResponse{}, fmt.Errorf("scan class result: %w", err)
@@ -127,10 +129,20 @@ func FindClass(
 		item.result.Kind = nullableString(kind)
 		item.result.SuperFQN = nullableString(super)
 		item.result.Package, item.result.SimpleName = splitFQN(item.result.FQN)
+		if packageName.Valid {
+			item.result.Package = packageName.String
+		}
+		if simpleName.Valid {
+			item.result.SimpleName = simpleName.String
+		}
 		pending = append(pending, item)
 	}
 	if err := rows.Err(); err != nil {
 		return ClassSearchResponse{}, fmt.Errorf("iterate class results: %w", err)
+	}
+	hasMore := len(pending) > pageSize
+	if hasMore {
+		pending = pending[:pageSize]
 	}
 
 	sources, err := loadSourcesIfNeeded(ctx, manifestPath, len(pending))
@@ -145,7 +157,8 @@ func FindClass(
 	return ClassSearchResponse{
 		Query:    SymbolRequest{Command: "find-class", Arg: term},
 		Results:  results,
-		Total:    total,
+		Total:    len(results),
+		HasMore:  hasMore,
 		Page:     page,
 		PageSize: pageSize,
 		Coverage: coverageFrom(pointer),
@@ -167,12 +180,11 @@ func FindMethod(
 	defer session.Close()
 
 	args := matchArgs(term)
-	var total int
-	if err := session.QueryRowContext(ctx, methodSearchCountSQL, args...).Scan(&total); err != nil {
-		return MethodSearchResponse{}, fmt.Errorf("count method results: %w", err)
-	}
-	selectArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
-	rows, err := session.QueryContext(ctx, methodSearchSQL, selectArgs...)
+	rows, err := session.QueryContext(
+		ctx,
+		methodSearchSQL,
+		append(args, pageSize+1, (page-1)*pageSize)...,
+	)
 	if err != nil {
 		return MethodSearchResponse{}, fmt.Errorf("query method results: %w", err)
 	}
@@ -199,6 +211,10 @@ func FindMethod(
 	if err := rows.Err(); err != nil {
 		return MethodSearchResponse{}, fmt.Errorf("iterate method results: %w", err)
 	}
+	hasMore := len(pending) > pageSize
+	if hasMore {
+		pending = pending[:pageSize]
+	}
 
 	sources, err := loadSourcesIfNeeded(ctx, manifestPath, len(pending))
 	if err != nil {
@@ -212,7 +228,8 @@ func FindMethod(
 	return MethodSearchResponse{
 		Query:    SymbolRequest{Command: "find-method", Arg: term},
 		Results:  results,
-		Total:    total,
+		Total:    len(results),
+		HasMore:  hasMore,
 		Page:     page,
 		PageSize: pageSize,
 		Coverage: coverageFrom(pointer),
@@ -239,54 +256,53 @@ func ListPackages(
 	}
 	rows, err := session.QueryContext(
 		ctx,
-		`SELECT fqn, source_shard_id
+		`SELECT package_name, source_shard_id, COUNT(*) AS classes
 		 FROM classes
-		 WHERE ? = '' OR fqn = ? OR fqn LIKE ? ESCAPE '\'
-		 ORDER BY fqn, source_shard_id`,
-		prefix, prefix, likePrefix,
+		 WHERE ? = '' OR package_name = ? OR package_name LIKE ? ESCAPE '\'
+		 GROUP BY package_name, source_shard_id
+		 ORDER BY package_name, source_shard_id
+		 LIMIT ? OFFSET ?`,
+		prefix, prefix, likePrefix, pageSize+1, (page-1)*pageSize,
 	)
 	if err != nil {
 		return PackageListResponse{}, fmt.Errorf("query packages: %w", err)
 	}
 	defer rows.Close()
 
-	counts := map[string]int{}
+	type pendingPackage struct {
+		result  PackageSummary
+		shardID string
+	}
+	pending := []pendingPackage{}
 	for rows.Next() {
-		var fqn, shardID string
-		if err := rows.Scan(&fqn, &shardID); err != nil {
+		var item pendingPackage
+		if err := rows.Scan(&item.result.Package, &item.shardID, &item.result.Classes); err != nil {
 			return PackageListResponse{}, fmt.Errorf("scan package row: %w", err)
 		}
-		pkg, _ := splitFQN(fqn)
-		counts[pkg+"\x00"+shardID]++
+		pending = append(pending, item)
 	}
 	if err := rows.Err(); err != nil {
 		return PackageListResponse{}, fmt.Errorf("iterate packages: %w", err)
 	}
+	hasMore := len(pending) > pageSize
+	if hasMore {
+		pending = pending[:pageSize]
+	}
 
-	sources, err := loadSourcesIfNeeded(ctx, manifestPath, len(counts))
+	sources, err := loadSourcesIfNeeded(ctx, manifestPath, len(pending))
 	if err != nil {
 		return PackageListResponse{}, err
 	}
-	all := make([]PackageSummary, 0, len(counts))
-	for key, count := range counts {
-		parts := strings.SplitN(key, "\x00", 2)
-		all = append(all, PackageSummary{
-			Package:   parts[0],
-			SourceJar: sourceJarName(sources, parts[1]),
-			Classes:   count,
-		})
+	results := make([]PackageSummary, 0, len(pending))
+	for _, item := range pending {
+		item.result.SourceJar = sourceJarName(sources, item.shardID)
+		results = append(results, item.result)
 	}
-	sort.Slice(all, func(i, j int) bool {
-		if all[i].Package != all[j].Package {
-			return all[i].Package < all[j].Package
-		}
-		return all[i].SourceJar < all[j].SourceJar
-	})
-	start, end := pageBounds(page, pageSize, len(all))
 	return PackageListResponse{
 		Query:    SymbolRequest{Command: "list-packages", Arg: prefix},
-		Results:  all[start:end],
-		Total:    len(all),
+		Results:  results,
+		Total:    len(results),
+		HasMore:  hasMore,
 		Page:     page,
 		PageSize: pageSize,
 		Coverage: coverageFrom(pointer),
@@ -308,12 +324,11 @@ func SearchSymbol(
 	defer session.Close()
 
 	args := matchArgs(term)
-	var total int
-	if err := session.QueryRowContext(ctx, searchSymbolCountSQL, args...).Scan(&total); err != nil {
-		return SearchSymbolResponse{}, fmt.Errorf("count search-symbol results: %w", err)
-	}
-	selectArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
-	rows, err := session.QueryContext(ctx, searchSymbolSQL, selectArgs...)
+	rows, err := session.QueryContext(
+		ctx,
+		searchSymbolSQL,
+		append(args, pageSize+1, (page-1)*pageSize)...,
+	)
 	if err != nil {
 		return SearchSymbolResponse{}, fmt.Errorf("query search-symbol results: %w", err)
 	}
@@ -340,6 +355,10 @@ func SearchSymbol(
 	if err := rows.Err(); err != nil {
 		return SearchSymbolResponse{}, fmt.Errorf("iterate search-symbol results: %w", err)
 	}
+	hasMore := len(pending) > pageSize
+	if hasMore {
+		pending = pending[:pageSize]
+	}
 
 	sources, err := loadSourcesIfNeeded(ctx, manifestPath, len(pending))
 	if err != nil {
@@ -353,7 +372,8 @@ func SearchSymbol(
 	return SearchSymbolResponse{
 		Query:    SymbolRequest{Command: "search-symbol", Arg: term},
 		Results:  results,
-		Total:    total,
+		Total:    len(results),
+		HasMore:  hasMore,
 		Page:     page,
 		PageSize: pageSize,
 		Coverage: coverageFrom(pointer),
@@ -362,7 +382,7 @@ func SearchSymbol(
 
 func matchArgs(term string) []any {
 	escaped := escapeLike(term)
-	return []any{term, "%." + escaped, escaped + "%", "%" + escaped + "%"}
+	return []any{term, term, escaped + "%", "%" + escaped + "%"}
 }
 
 func splitFQN(fqn string) (string, string) {
@@ -395,31 +415,31 @@ func loadSourcesIfNeeded(ctx context.Context, manifestPath string, count int) (m
 const classSearchBaseSQL = `
 WITH params(term, simple, prefix, contains) AS (VALUES (?, ?, ?, ?)),
 matches AS (
-  SELECT c.fqn, c.kind, c.super_fqn, c.source_shard_id,
+  SELECT c.fqn, c.simple_name, c.package_name, c.kind, c.super_fqn, c.source_shard_id,
          CASE
            WHEN c.fqn = p.term THEN 100
-           WHEN c.fqn LIKE p.simple ESCAPE '\' THEN 90
+           WHEN c.simple_name = p.simple THEN 90
+           WHEN c.simple_name LIKE p.prefix ESCAPE '\' THEN 82
            WHEN c.fqn LIKE p.prefix ESCAPE '\' THEN 80
            ELSE 50
          END AS score,
          CASE
            WHEN c.fqn = p.term THEN 'exact_fqn'
-           WHEN c.fqn LIKE p.simple ESCAPE '\' THEN 'simple_name'
+           WHEN c.simple_name = p.simple THEN 'simple_name'
+           WHEN c.simple_name LIKE p.prefix ESCAPE '\' THEN 'simple_prefix'
            WHEN c.fqn LIKE p.prefix ESCAPE '\' THEN 'prefix'
            ELSE 'contains'
          END AS match_reason
   FROM classes c, params p
   WHERE c.fqn = p.term
-     OR c.fqn LIKE p.simple ESCAPE '\'
+     OR c.simple_name = p.simple
+     OR c.simple_name LIKE p.prefix ESCAPE '\'
      OR c.fqn LIKE p.prefix ESCAPE '\'
      OR c.fqn LIKE p.contains ESCAPE '\'
 )`
 
-const classSearchCountSQL = classSearchBaseSQL + `
-SELECT COUNT(*) FROM matches`
-
 const classSearchSQL = classSearchBaseSQL + `
-SELECT fqn, kind, super_fqn, source_shard_id, score, match_reason
+SELECT fqn, simple_name, package_name, kind, super_fqn, source_shard_id, score, match_reason
 FROM matches
 ORDER BY score DESC, fqn, source_shard_id
 LIMIT ? OFFSET ?`
@@ -430,14 +450,14 @@ matches AS (
   SELECT c.fqn AS class_fqn, m.name, m.descriptor, m.return_fqn, m.modifiers,
          m.source_shard_id,
          CASE
-           WHEN c.fqn || '#' || m.name = p.term THEN 100
+           WHEN m.symbol = p.term THEN 100
            WHEN c.fqn || '.' || m.name = p.term THEN 100
            WHEN m.name = p.term THEN 95
            WHEN m.name LIKE p.prefix ESCAPE '\' THEN 75
            ELSE 50
          END AS score,
          CASE
-           WHEN c.fqn || '#' || m.name = p.term THEN 'exact_method'
+           WHEN m.symbol = p.term THEN 'exact_method'
            WHEN c.fqn || '.' || m.name = p.term THEN 'exact_method'
            WHEN m.name = p.term THEN 'method_name'
            WHEN m.name LIKE p.prefix ESCAPE '\' THEN 'method_prefix'
@@ -446,16 +466,13 @@ matches AS (
   FROM methods m
   JOIN classes c ON c.id = m.class_id
   , params p
-  WHERE c.fqn || '#' || m.name = p.term
+  WHERE m.symbol = p.term
      OR c.fqn || '.' || m.name = p.term
      OR m.name = p.term
      OR m.name LIKE p.prefix ESCAPE '\'
      OR m.name LIKE p.contains ESCAPE '\'
      OR c.fqn LIKE p.contains ESCAPE '\'
 )`
-
-const methodSearchCountSQL = methodSearchBaseSQL + `
-SELECT COUNT(*) FROM matches`
 
 const methodSearchSQL = methodSearchBaseSQL + `
 SELECT class_fqn, name, descriptor, return_fqn, modifiers, source_shard_id, score, match_reason
@@ -466,68 +483,45 @@ LIMIT ? OFFSET ?`
 const searchSymbolBaseSQL = `
 WITH params(term, simple, prefix, contains) AS (VALUES (?, ?, ?, ?)),
 matches AS (
-  SELECT 'class' AS kind, c.fqn AS name, NULL AS owner, c.kind AS detail,
-         c.source_shard_id,
-         CASE WHEN c.fqn = p.term THEN 100 WHEN c.fqn LIKE p.simple ESCAPE '\' THEN 90 ELSE 55 END AS score,
-         CASE WHEN c.fqn = p.term THEN 'exact_fqn' WHEN c.fqn LIKE p.simple ESCAPE '\' THEN 'simple_name' ELSE 'class_contains' END AS match_reason
-  FROM classes c, params p
-  WHERE c.fqn = p.term OR c.fqn LIKE p.simple ESCAPE '\' OR c.fqn LIKE p.contains ESCAPE '\'
-
-  UNION ALL
-  SELECT 'method', c.fqn || '#' || m.name, c.fqn, m.descriptor,
-         m.source_shard_id,
-         CASE WHEN c.fqn || '#' || m.name = p.term THEN 98 WHEN m.name = p.term THEN 92 ELSE 50 END,
-         CASE WHEN c.fqn || '#' || m.name = p.term THEN 'exact_method' WHEN m.name = p.term THEN 'method_name' ELSE 'method_contains' END
-  FROM methods m JOIN classes c ON c.id = m.class_id, params p
-  WHERE c.fqn || '#' || m.name = p.term OR m.name = p.term
-     OR m.name LIKE p.contains ESCAPE '\' OR c.fqn LIKE p.contains ESCAPE '\'
-
-  UNION ALL
-  SELECT 'annotation', a.annotation_fqn, c.fqn, a.attributes,
-         a.source_shard_id,
-         CASE WHEN a.annotation_fqn = p.term THEN 88 ELSE 45 END,
-         CASE WHEN a.annotation_fqn = p.term THEN 'annotation_fqn' ELSE 'annotation_contains' END
-  FROM annotations a
-  LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id,
-       params p
-  WHERE a.annotation_fqn = p.term OR a.annotation_fqn LIKE p.contains ESCAPE '\'
-     OR c.fqn LIKE p.contains ESCAPE '\'
-
-  UNION ALL
-  SELECT 'spi', s.impl_fqn, s.key, s.mechanism,
-         s.source_shard_id,
-         CASE WHEN s.impl_fqn = p.term OR s.key = p.term THEN 86 ELSE 44 END,
-         CASE WHEN s.impl_fqn = p.term THEN 'spi_impl' WHEN s.key = p.term THEN 'spi_key' ELSE 'spi_contains' END
-  FROM spi_registrations s, params p
-  WHERE s.impl_fqn = p.term OR s.key = p.term OR s.mechanism = p.term
-     OR s.impl_fqn LIKE p.contains ESCAPE '\'
-     OR s.key LIKE p.contains ESCAPE '\'
-     OR s.mechanism LIKE p.contains ESCAPE '\'
-
-  UNION ALL
-  SELECT 'config-property', cp.name, cp.source_fqn, cp.type_fqn,
-         cp.source_shard_id,
-         CASE WHEN cp.name = p.term THEN 84 WHEN cp.name LIKE p.prefix ESCAPE '\' THEN 70 ELSE 43 END,
-         CASE WHEN cp.name = p.term THEN 'config_property' WHEN cp.name LIKE p.prefix ESCAPE '\' THEN 'config_prefix' ELSE 'config_contains' END
-  FROM config_properties cp, params p
-  WHERE cp.name = p.term OR cp.name LIKE p.prefix ESCAPE '\' OR cp.name LIKE p.contains ESCAPE '\'
-     OR cp.source_fqn LIKE p.contains ESCAPE '\'
-
-  UNION ALL
-  SELECT 'string', sc.value, c.fqn,
-         CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END,
-         sc.source_shard_id,
-         CASE WHEN sc.value = p.term THEN 65 ELSE 30 END,
-         CASE WHEN sc.value = p.term THEN 'string_constant' ELSE 'string_contains' END
-  FROM string_constants sc
-  JOIN classes c ON c.id = sc.class_id
-  LEFT JOIN methods m ON m.id = sc.method_id,
-       params p
-  WHERE sc.value = p.term OR sc.value LIKE p.contains ESCAPE '\'
+  SELECT s.kind, s.name, s.owner, s.detail, s.source_shard_id,
+         CASE
+           WHEN s.kind = 'class' AND s.name = p.term THEN 100
+           WHEN s.kind = 'method' AND s.name = p.term THEN 98
+           WHEN s.kind = 'method' AND s.simple_name = p.simple THEN 92
+           WHEN s.kind = 'class' AND s.simple_name = p.simple THEN 90
+           WHEN s.kind = 'annotation' AND s.name = p.term THEN 88
+           WHEN s.kind = 'spi' AND (s.name = p.term OR s.owner = p.term) THEN 86
+           WHEN s.kind = 'config-property' AND s.name = p.term THEN 84
+           WHEN s.kind = 'method' AND s.simple_name LIKE p.prefix ESCAPE '\' THEN 75
+           WHEN s.kind = 'config-property' AND s.name LIKE p.prefix ESCAPE '\' THEN 70
+           WHEN s.kind = 'string' AND s.name = p.term THEN 65
+           ELSE s.score_hint
+         END AS score,
+         CASE
+           WHEN s.kind = 'class' AND s.name = p.term THEN 'exact_fqn'
+           WHEN s.kind = 'method' AND s.name = p.term THEN 'exact_method'
+           WHEN s.kind = 'method' AND s.simple_name = p.simple THEN 'method_name'
+           WHEN s.kind = 'class' AND s.simple_name = p.simple THEN 'simple_name'
+           WHEN s.kind = 'annotation' AND s.name = p.term THEN 'annotation_fqn'
+           WHEN s.kind = 'spi' AND s.name = p.term THEN 'spi_impl'
+           WHEN s.kind = 'spi' AND s.owner = p.term THEN 'spi_key'
+           WHEN s.kind = 'config-property' AND s.name = p.term THEN 'config_property'
+           WHEN s.kind = 'method' AND s.simple_name LIKE p.prefix ESCAPE '\' THEN 'method_prefix'
+           WHEN s.kind = 'config-property' AND s.name LIKE p.prefix ESCAPE '\' THEN 'config_prefix'
+           WHEN s.kind = 'string' AND s.name = p.term THEN 'string_constant'
+           ELSE s.kind || '_contains'
+         END AS match_reason
+  FROM search_symbols s, params p
+  WHERE s.name = p.term
+     OR s.simple_name = p.simple
+     OR s.owner = p.term
+     OR s.detail = p.term
+     OR s.name LIKE p.prefix ESCAPE '\'
+     OR s.simple_name LIKE p.prefix ESCAPE '\'
+     OR s.name LIKE p.contains ESCAPE '\'
+     OR s.owner LIKE p.contains ESCAPE '\'
+     OR s.detail LIKE p.contains ESCAPE '\'
 )`
-
-const searchSymbolCountSQL = searchSymbolBaseSQL + `
-SELECT COUNT(*) FROM matches`
 
 const searchSymbolSQL = searchSymbolBaseSQL + `
 SELECT kind, name, owner, detail, source_shard_id, score, match_reason
