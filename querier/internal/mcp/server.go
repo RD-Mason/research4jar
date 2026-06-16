@@ -13,12 +13,22 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
+	"dev.research4jar/querier/internal/classpath"
 	"dev.research4jar/querier/internal/depgraph"
 	"dev.research4jar/querier/internal/envcheck"
 	"dev.research4jar/querier/internal/indexer"
+	"dev.research4jar/querier/internal/jarsource"
+	"dev.research4jar/querier/internal/manifest"
+	"dev.research4jar/querier/internal/paths"
+	"dev.research4jar/querier/internal/pointer"
 	"dev.research4jar/querier/internal/project"
 	"dev.research4jar/querier/internal/query"
+	"dev.research4jar/querier/internal/registry"
+	"dev.research4jar/querier/internal/session"
+	"dev.research4jar/querier/internal/versions"
 )
 
 const (
@@ -57,6 +67,8 @@ type toolArguments struct {
 	Home        string `json:"home"`
 	Jars        string `json:"jars"`
 	Indexer     string `json:"indexer"`
+	Registry    string `json:"registry"`
+	RegistryKey string `json:"registry_pubkey"`
 	Prefix      string `json:"prefix"`
 	FQN         string `json:"fqn"`
 	Text        string `json:"text"`
@@ -284,37 +296,150 @@ func dispatchTool(name string, arguments toolArguments) (any, error) {
 }
 
 func runIndex(arguments toolArguments) (any, error) {
-	indexerBin, err := indexer.Locate(arguments.Indexer)
-	if err != nil {
-		return nil, fmt.Errorf("%w. Call check_environment for installation guidance", err)
-	}
 	projectDir := arguments.ProjectDir
+	var err error
 	if projectDir == "" {
 		if projectDir, err = os.Getwd(); err != nil {
 			return nil, err
 		}
 	}
-	if err := indexer.Run(indexerBin, arguments.Jars, projectDir, arguments.Home); err != nil {
+	jars := arguments.Jars
+	result := map[string]any{
+		"status":      "indexed",
+		"project_dir": projectDir,
+		"index_mode":  "jvm",
+	}
+	registryURL := firstNonEmpty(arguments.Registry, os.Getenv("RESEARCH4JAR_REGISTRY"))
+	registryPubkey := firstNonEmpty(arguments.RegistryKey, os.Getenv("RESEARCH4JAR_REGISTRY_PUBKEY"))
+	if registryURL != "" {
+		resolvedJars, stats, dataPaths, warnings, err := prefetchFromRegistry(
+			registryURL, registryPubkey, jars, projectDir, arguments.Home,
+		)
+		if err != nil {
+			return nil, err
+		}
+		jars = resolvedJars
+		result["registry_prefetch"] = registryPrefetchSummary(stats, warnings)
+		if stats.Complete {
+			if err := finishIndexFromRegistry(stats, dataPaths, projectDir); err != nil {
+				return nil, err
+			}
+			result["index_mode"] = "registry"
+			result["dependency_provenance"] = captureDependencyProvenance(projectDir)
+			result["note"] = "Session built from cached/registry shards; query tools are ready without launching the JVM indexer."
+			return result, nil
+		}
+	}
+
+	indexerBin, err := indexer.Locate(arguments.Indexer)
+	if err != nil {
+		return nil, fmt.Errorf("%w. Call check_environment for installation guidance", err)
+	}
+	if err := indexer.Run(indexerBin, jars, projectDir, arguments.Home); err != nil {
 		return nil, fmt.Errorf("indexing failed: %w. Call check_environment for installation guidance", err)
 	}
-	provenance := "not captured"
+	result["dependency_provenance"] = captureDependencyProvenance(projectDir)
+	result["note"] = "Project pointer written to .research4jar/project.json; query tools are ready."
+	return result, nil
+}
+
+func prefetchFromRegistry(
+	registryURL, registryPubkey, jars, projectDir, home string,
+) (string, registry.PrefetchStats, paths.DataPaths, string, error) {
+	client, err := registry.NewClient(registryURL, registryPubkey)
+	if err != nil {
+		return "", registry.PrefetchStats{}, paths.DataPaths{}, "", err
+	}
+	var jarList []string
+	if jars == "" {
+		jarList, err = classpath.Discover(projectDir)
+		if err != nil {
+			return "", registry.PrefetchStats{}, paths.DataPaths{}, "", err
+		}
+		if len(jarList) == 0 {
+			return "", registry.PrefetchStats{}, paths.DataPaths{}, "",
+				errors.New("build tool resolved an empty runtime classpath")
+		}
+		jars = strings.Join(jarList, ",")
+	} else {
+		jarList, err = jarsource.Resolve(jars)
+		if err != nil {
+			return "", registry.PrefetchStats{}, paths.DataPaths{}, "", err
+		}
+	}
+	dataPaths, err := paths.Resolve(home)
+	if err != nil {
+		return "", registry.PrefetchStats{}, paths.DataPaths{}, "", err
+	}
+	manifestDB, err := manifest.Open(dataPaths.Manifest)
+	if err != nil {
+		return "", registry.PrefetchStats{}, paths.DataPaths{}, "", err
+	}
+	defer manifestDB.Close()
+	var warnings strings.Builder
+	stats := registry.Prefetch(
+		context.Background(), client, manifestDB, dataPaths.Shards,
+		versions.Extractor, jarList, &warnings,
+	)
+	return jars, stats, dataPaths, strings.TrimSpace(warnings.String()), nil
+}
+
+func finishIndexFromRegistry(
+	stats registry.PrefetchStats, dataPaths paths.DataPaths, projectDir string,
+) error {
+	shards := make([]session.Shard, len(stats.Shards))
+	shardIDs := make([]string, len(stats.Shards))
+	for index, shard := range stats.Shards {
+		shards[index] = session.Shard{ShardID: shard.ShardID, Path: shard.Path}
+		shardIDs[index] = shard.ShardID
+	}
+	fingerprint := session.Fingerprint(shardIDs)
+	sessionPath := filepath.Join(dataPaths.Sessions, fingerprint+".db")
+	if err := session.BuildIfAbsent(sessionPath, shards); err != nil {
+		return fmt.Errorf("build session: %w", err)
+	}
+	coverage := project.Coverage{
+		JarsTotal:   len(shards),
+		JarsIndexed: len(shards),
+		JarsMissing: []string{},
+	}
+	if err := pointer.Write(projectDir, fingerprint, sessionPath, coverage); err != nil {
+		return fmt.Errorf("write project pointer: %w", err)
+	}
+	if err := pointer.EnsureClaudeInstructions(projectDir); err != nil {
+		return fmt.Errorf("write CLAUDE.md guidance: %w", err)
+	}
+	return nil
+}
+
+func registryPrefetchSummary(stats registry.PrefetchStats, warnings string) map[string]any {
+	summary := map[string]any{
+		"jars_total":    stats.JarsTotal,
+		"jars_unique":   stats.JarsUnique,
+		"cache_hits":    stats.CacheHits,
+		"downloaded":    stats.Downloaded,
+		"misses":        stats.Misses,
+		"failures":      stats.Failures,
+		"hash_failures": stats.HashFailures,
+		"complete":      stats.Complete,
+	}
+	if warnings != "" {
+		summary["warnings"] = warnings
+	}
+	return summary
+}
+
+func captureDependencyProvenance(projectDir string) string {
 	if graph, err := depgraph.Capture(projectDir); err == nil {
 		if err := depgraph.Write(projectDir, graph); err != nil {
-			provenance = "capture succeeded but write failed: " + err.Error()
-		} else {
-			provenance = "captured"
+			return "capture succeeded but write failed: " + err.Error()
 		}
+		return "captured"
 	} else if errors.Is(err, depgraph.ErrUnsupported) {
-		provenance = "unsupported build tool"
+		return "unsupported build tool"
 	} else {
-		provenance = "capture failed: " + err.Error()
+		return "capture failed: " + err.Error()
 	}
-	return map[string]any{
-		"status":                "indexed",
-		"project_dir":           projectDir,
-		"dependency_provenance": provenance,
-		"note":                  "Project pointer written to .research4jar/project.json; query tools are ready.",
-	}, nil
 }
 
 func toolError(message string) map[string]any {
@@ -380,6 +505,14 @@ func toolCatalog() []toolDefinition {
 				"jars": map[string]any{
 					"type":        "string",
 					"description": "Optional jar directory, glob, or comma-separated jar list. Omit to auto-resolve via the build tool.",
+				},
+				"registry": map[string]any{
+					"type":        "string",
+					"description": "Optional shard registry base URL. When fully covered, indexing finishes without launching the JVM indexer.",
+				},
+				"registry_pubkey": map[string]any{
+					"type":        "string",
+					"description": "Optional hex ed25519 public key; downloaded registry shards must have valid signatures.",
 				},
 			}),
 		},

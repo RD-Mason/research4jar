@@ -118,7 +118,7 @@ claude mcp add research4jar -- research4jar mcp
 
 Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath via Maven/Gradle), `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, the intended retrieval flow is broad search first (`search_symbols`), then expand one result (`open_symbol`) or explain why its jar is present (`why_dependency`).
 
-Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`.
+Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`. `index_project` also accepts `registry` and `registry_pubkey`; when the registry covers the classpath, MCP indexing finishes in pure Go without launching the JVM indexer.
 
 For CLI-driven agents without MCP, `research4jar index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
 

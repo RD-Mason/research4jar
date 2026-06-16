@@ -776,7 +776,7 @@ assert len(lines) == 3, lines
 by_id = {item["id"]: item for item in lines}
 assert by_id[1]["result"]["serverInfo"]["name"] == "research4jar", lines
 tool_names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
-assert {"index_project", "find_implementations", "get_class"} <= tool_names, tool_names
+assert {"check_environment", "index_project", "find_implementations", "get_class"} <= tool_names, tool_names
 call = by_id[3]["result"]
 assert not call.get("isError"), call
 payload = json.loads(call["content"][0]["text"])
@@ -858,6 +858,37 @@ if ! "$RESEARCH4JAR_QUERY" index --jars "$covered_jars" --project-dir "$project3
   cat "$index3_json" "$index3_err" >&2
   exit 1
 fi
+
+mcp_registry_project="$work/mcp-registry-project"
+mcp_registry_home="$work/mcp-registry-home"
+mcp_registry_output="$work/mcp-registry-output.jsonl"
+mkdir -p "$mcp_registry_project"
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"index_project\",\"arguments\":{\"project_dir\":\"$mcp_registry_project\",\"home\":\"$mcp_registry_home\",\"jars\":\"$covered_jars\",\"registry\":\"http://127.0.0.1:$registry_port\",\"registry_pubkey\":\"$pubkey\",\"indexer\":\"/nonexistent/research4jar-index\"}}}"
+} | "$RESEARCH4JAR_QUERY" mcp > "$mcp_registry_output"
+python3 - "$mcp_registry_output" "$mcp_registry_project" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = [
+    json.loads(line)
+    for line in pathlib.Path(sys.argv[1]).read_text().splitlines()
+    if line.strip()
+]
+assert len(lines) == 2, lines
+by_id = {item["id"]: item for item in lines}
+call = by_id[2]["result"]
+assert not call.get("isError"), call
+payload = json.loads(call["content"][0]["text"])
+assert payload["status"] == "indexed", payload
+assert payload["index_mode"] == "registry", payload
+assert payload["registry_prefetch"]["complete"] is True, payload
+assert pathlib.Path(sys.argv[2], ".research4jar", "project.json").is_file(), payload
+PY
+
 # Partial coverage (broken.jar can have no shard) must fall back to the JVM
 # indexer, which then skips every cached shard and reports the broken jar.
 project4="$work/project4"

@@ -52,7 +52,7 @@ func TestInitializeAndToolsList(t *testing.T) {
 		names[tool.(map[string]any)["name"].(string)] = true
 	}
 	for _, required := range []string{
-		"index_project", "find_config_properties", "find_implementations",
+		"check_environment", "index_project", "find_config_properties", "find_implementations",
 		"find_by_annotation", "get_class", "get_bean_definitions",
 		"explain_conditional", "find_string", "list_extension_points",
 		"find_class", "find_method", "list_packages", "search_symbols",
@@ -61,6 +61,22 @@ func TestInitializeAndToolsList(t *testing.T) {
 		if !names[required] {
 			t.Fatalf("missing tool %q in %v", required, names)
 		}
+	}
+	var indexProject map[string]any
+	for _, tool := range tools {
+		item := tool.(map[string]any)
+		if item["name"] == "index_project" {
+			indexProject = item
+			break
+		}
+	}
+	if indexProject == nil {
+		t.Fatal("index_project schema not found")
+	}
+	schema := indexProject["inputSchema"].(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	if properties["registry"] == nil || properties["registry_pubkey"] == nil {
+		t.Fatalf("index_project should expose registry fields: %#v", properties)
 	}
 }
 
