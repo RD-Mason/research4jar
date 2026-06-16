@@ -15,6 +15,7 @@ import (
 	"os"
 
 	"dev.research4jar/querier/internal/depgraph"
+	"dev.research4jar/querier/internal/envcheck"
 	"dev.research4jar/querier/internal/indexer"
 	"dev.research4jar/querier/internal/project"
 	"dev.research4jar/querier/internal/query"
@@ -52,17 +53,18 @@ type toolDefinition struct {
 }
 
 type toolArguments struct {
-	ProjectDir string `json:"project_dir"`
-	Home       string `json:"home"`
-	Jars       string `json:"jars"`
-	Indexer    string `json:"indexer"`
-	Prefix     string `json:"prefix"`
-	FQN        string `json:"fqn"`
-	Text       string `json:"text"`
-	Arg        string `json:"arg"`
-	Direct     bool   `json:"direct"`
-	Page       int    `json:"page"`
-	PageSize   int    `json:"page_size"`
+	ProjectDir  string `json:"project_dir"`
+	Home        string `json:"home"`
+	Jars        string `json:"jars"`
+	Indexer     string `json:"indexer"`
+	Prefix      string `json:"prefix"`
+	FQN         string `json:"fqn"`
+	Text        string `json:"text"`
+	Arg         string `json:"arg"`
+	Direct      bool   `json:"direct"`
+	Page        int    `json:"page"`
+	PageSize    int    `json:"page_size"`
+	SourceBuild bool   `json:"source_build"`
 }
 
 // Serve runs the MCP loop until stdin closes.
@@ -168,6 +170,12 @@ func callTool(params json.RawMessage) map[string]any {
 
 func dispatchTool(name string, arguments toolArguments) (any, error) {
 	ctx := context.Background()
+	if name == "check_environment" {
+		return envcheck.Run(envcheck.Options{
+			ProjectDir:  arguments.ProjectDir,
+			SourceBuild: arguments.SourceBuild,
+		}), nil
+	}
 	if name == "index_project" {
 		return runIndex(arguments)
 	}
@@ -278,7 +286,7 @@ func dispatchTool(name string, arguments toolArguments) (any, error) {
 func runIndex(arguments toolArguments) (any, error) {
 	indexerBin, err := indexer.Locate(arguments.Indexer)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w. Call check_environment for installation guidance", err)
 	}
 	projectDir := arguments.ProjectDir
 	if projectDir == "" {
@@ -287,7 +295,7 @@ func runIndex(arguments toolArguments) (any, error) {
 		}
 	}
 	if err := indexer.Run(indexerBin, arguments.Jars, projectDir, arguments.Home); err != nil {
-		return nil, fmt.Errorf("indexing failed: %w", err)
+		return nil, fmt.Errorf("indexing failed: %w. Call check_environment for installation guidance", err)
 	}
 	provenance := "not captured"
 	if graph, err := depgraph.Capture(projectDir); err == nil {
@@ -350,6 +358,18 @@ func toolCatalog() []toolDefinition {
 		return s
 	}
 	return []toolDefinition{
+		{
+			Name: "check_environment",
+			Description: "List the local tools Research4Jar needs, report missing runtime/build " +
+				"requirements, and include user-facing and agent-executable install guidance.",
+			InputSchema: schema(map[string]any{
+				"project_dir": projectDir,
+				"source_build": map[string]any{
+					"type":        "boolean",
+					"description": "Also check tools needed to build Research4Jar from source.",
+				},
+			}),
+		},
 		{
 			Name: "index_project",
 			Description: "Index a Spring Boot project's dependency jars into the local fact " +

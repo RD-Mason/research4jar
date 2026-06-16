@@ -16,6 +16,7 @@ import (
 	"dev.research4jar/querier/internal/cache"
 	"dev.research4jar/querier/internal/classpath"
 	"dev.research4jar/querier/internal/depgraph"
+	"dev.research4jar/querier/internal/envcheck"
 	"dev.research4jar/querier/internal/indexer"
 	"dev.research4jar/querier/internal/jarsource"
 	"dev.research4jar/querier/internal/manifest"
@@ -84,6 +85,9 @@ func main() {
 		return
 	case command == "index":
 		runIndexCommand(os.Args[2:])
+		return
+	case command == "doctor":
+		runDoctorCommand(os.Args[2:])
 		return
 	case command == "cache":
 		runCacheCommand(os.Args[2:])
@@ -180,6 +184,7 @@ func main() {
 		return
 	}
 	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(response); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -232,12 +237,53 @@ func runIndexCommand(args []string) {
 	}
 	indexerBin, err := indexer.Locate(opts.indexer)
 	if err != nil {
-		fail("indexer_not_found", err.Error(), 1)
+		fail("indexer_not_found", err.Error()+"\n\n"+doctorHint(opts.projectDir, false), 1)
 	}
 	if err := indexer.Run(indexerBin, jars, opts.projectDir, opts.home); err != nil {
-		fail("index_error", err.Error(), 1)
+		fail("index_error", err.Error()+"\n\n"+doctorHint(opts.projectDir, false), 1)
 	}
 	captureDependencyProvenance(opts.projectDir)
+}
+
+func runDoctorCommand(args []string) {
+	options := envcheck.Options{}
+	format := "text"
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		switch argument {
+		case "--project-dir":
+			value, next, err := optionValue(args, index, argument)
+			if err != nil {
+				fail("invalid_arguments", err.Error(), 2)
+			}
+			options.ProjectDir = value
+			index = next
+		case "--format":
+			value, next, err := optionValue(args, index, argument)
+			if err != nil {
+				fail("invalid_arguments", err.Error(), 2)
+			}
+			if value != "json" && value != "text" {
+				fail("invalid_arguments", "--format must be json or text", 2)
+			}
+			format = value
+			index = next
+		case "--source-build":
+			options.SourceBuild = true
+		default:
+			fail("invalid_arguments", "unknown option: "+argument, 2)
+		}
+	}
+
+	report := envcheck.Run(options)
+	if format == "json" {
+		printJSON(report)
+	} else {
+		printDoctorText(report)
+	}
+	if !report.OK {
+		os.Exit(1)
+	}
 }
 
 // finishIndexFromRegistry completes an index run whose every shard came from
@@ -545,7 +591,7 @@ func seedRegistry(outputDir, coordinatesPath, repo, signKey, home, indexerPath s
 
 	indexerBin, err := indexer.Locate(indexerPath)
 	if err != nil {
-		fail("indexer_not_found", err.Error(), 1)
+		fail("indexer_not_found", err.Error()+"\n\n"+doctorHint("", true), 1)
 	}
 	scratchProject, err := os.MkdirTemp("", "research4jar-seed-project-")
 	if err != nil {
@@ -553,7 +599,7 @@ func seedRegistry(outputDir, coordinatesPath, repo, signKey, home, indexerPath s
 	}
 	defer os.RemoveAll(scratchProject)
 	if err := indexer.Run(indexerBin, strings.Join(jars, ","), scratchProject, home); err != nil {
-		fail("index_error", err.Error(), 1)
+		fail("index_error", err.Error()+"\n\n"+doctorHint("", true), 1)
 	}
 
 	dataPaths, err := paths.Resolve(home)
@@ -597,11 +643,91 @@ func seedRegistry(outputDir, coordinatesPath, repo, signKey, home, indexerPath s
 
 func printJSON(response any) {
 	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(response); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func printDoctorText(report envcheck.Report) {
+	fmt.Println("Research4Jar environment")
+	if report.ProjectDir != "" {
+		fmt.Println("Project:", report.ProjectDir)
+	}
+	fmt.Println()
+	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(writer, "STATUS\tCHECK\tFOUND\tVERSION\tREQUIRED FOR")
+	for _, check := range report.Checks {
+		fmt.Fprintf(
+			writer,
+			"%s\t%s\t%s\t%s\t%s\n",
+			doctorStatus(check.Status),
+			check.Name,
+			valueOrText(check.Found, "-"),
+			valueOrText(check.Version, "-"),
+			strings.Join(check.RequiredFor, ", "),
+		)
+	}
+	writer.Flush()
+
+	for _, check := range report.Checks {
+		if check.Status == envcheck.StatusOK {
+			continue
+		}
+		fmt.Printf("\n%s: %s\n", doctorStatus(check.Status), check.Name)
+		fmt.Println("  " + check.Message)
+		if check.UserInstall != "" {
+			fmt.Println("  User install: " + check.UserInstall)
+		}
+		if len(check.AgentInstall) > 0 {
+			fmt.Println("  Agent install:")
+			for _, command := range check.AgentInstall {
+				fmt.Println("    " + command)
+			}
+		}
+		if len(check.Verify) > 0 {
+			fmt.Println("  Verify:")
+			for _, command := range check.Verify {
+				fmt.Println("    " + command)
+			}
+		}
+	}
+	if report.OK {
+		fmt.Println("\nOK: required environment checks passed.")
+	} else {
+		fmt.Println("\nMissing requirements found. Install the missing tools above, then rerun research4jar doctor.")
+	}
+}
+
+func doctorStatus(status envcheck.Status) string {
+	switch status {
+	case envcheck.StatusOK:
+		return "OK"
+	case envcheck.StatusWarning:
+		return "WARN"
+	default:
+		return "MISSING"
+	}
+}
+
+func valueOrText(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func doctorHint(projectDir string, sourceBuild bool) string {
+	args := []string{"research4jar doctor"}
+	if projectDir != "" && projectDir != "." {
+		args = append(args, "--project-dir "+strconv.Quote(projectDir))
+	}
+	if sourceBuild {
+		args = append(args, "--source-build")
+	}
+	return "Run " + strings.Join(args, " ") + " for environment checks and installation guidance."
 }
 
 func parseOptions(args []string, argOptional bool) (options, error) {
@@ -921,6 +1047,7 @@ func valueOrDash(value *string) string {
 
 func fail(code, message string, exitCode int) {
 	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	_ = encoder.Encode(errorResponse{Error: code, Message: message})
 	os.Exit(exitCode)
@@ -933,6 +1060,8 @@ func printHelp() {
                                                        via Maven/Gradle (wrapper preferred).
   research4jar mcp                                        Run as an MCP stdio server (for Cursor,
                                                        Claude Code, and other MCP hosts).
+  research4jar doctor [--source-build]                    Check required runtime/build tools and
+                     [--format json|text]              print install guidance for users/agents.
   research4jar cache stats                                Cache usage: shards, sessions, orphans.
   research4jar cache gc [--max-size <N[K|M|G]>]           Collect garbage: stale extractor versions
                      [--max-age <N[d|h]>] [--dry-run]  and orphans always; LRU shards over the

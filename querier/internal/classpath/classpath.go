@@ -52,6 +52,15 @@ func Discover(projectDir string) ([]string, error) {
 }
 
 func discoverMaven(projectDir string) ([]string, error) {
+	if !hasAnyFile(projectDir, "mvnw", "mvnw.cmd", "mvnw.bat") {
+		if _, err := exec.LookPath("mvn"); err != nil {
+			return nil, fmt.Errorf(
+				"maven classpath resolution needs ./mvnw or mvn on PATH; "+
+					"pass --jars explicitly or run research4jar doctor --project-dir %s",
+				projectDir,
+			)
+		}
+	}
 	output, err := os.CreateTemp("", "research4jar-classpath-*.txt")
 	if err != nil {
 		return nil, err
@@ -80,6 +89,15 @@ func discoverMaven(projectDir string) ([]string, error) {
 }
 
 func discoverGradle(projectDir string) ([]string, error) {
+	if !hasAnyFile(projectDir, "gradlew", "gradlew.cmd", "gradlew.bat") {
+		if _, err := exec.LookPath("gradle"); err != nil {
+			return nil, fmt.Errorf(
+				"gradle classpath resolution needs ./gradlew or gradle on PATH; "+
+					"pass --jars explicitly or run research4jar doctor --project-dir %s",
+				projectDir,
+			)
+		}
+	}
 	script, err := os.CreateTemp("", "research4jar-init-*.gradle")
 	if err != nil {
 		return nil, err
@@ -164,4 +182,13 @@ func tail(output string) string {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+func hasAnyFile(dir string, names ...string) bool {
+	for _, name := range names {
+		if fileExists(filepath.Join(dir, name)) {
+			return true
+		}
+	}
+	return false
 }

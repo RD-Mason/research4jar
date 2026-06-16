@@ -22,9 +22,36 @@ SQLite files are the only contract between the Kotlin indexer and Go querier.
 
 ## Requirements
 
-- JDK 17 or newer
-- Go 1.23 or newer
-- Bash for the end-to-end test script
+Research4Jar ships as a CLI plus an MCP stdio server. The current repository has a Kotlin/JVM indexer and a pure-Go querier, so the environment depends on how you install and use it:
+
+**To use a prebuilt CLI/MCP plugin:**
+
+- `research4jar` on `PATH` (the archive's `bin/` directory).
+- Java runtime 17+ for local jar extraction. If every shard is served by a configured registry, indexing can complete without starting the JVM, but registry misses still need Java.
+- A target project Maven/Gradle wrapper (`./mvnw` or `./gradlew`) or `mvn`/`gradle` on `PATH` when you run `research4jar index` without `--jars`.
+- Cursor, Claude Code, or another MCP host if you want to use `research4jar mcp` as a plugin.
+
+**To build from source in this repository:**
+
+- JDK 17+ (`java` and `javac`)
+- Go 1.23+
+- `make`
+- Bash (`install.sh` uses `/usr/bin/env bash`)
+
+**To run the full local verification suite:**
+
+- Everything needed to build from source
+- `jar`/`javac`, Python 3, and the `sqlite3` CLI for `make e2e`
+
+Check the current machine and get install guidance with:
+
+```bash
+research4jar doctor                         # runtime checks for plugin/CLI use
+research4jar doctor --source-build          # also checks source-build tools
+research4jar doctor --format json           # structured output for agents
+```
+
+When an agent is installing the environment, have it run `research4jar doctor --format json`, execute the failed checks' `agent_install` commands, run each `verify` command, and repeat `research4jar doctor` until `"ok": true`.
 
 ## Install
 
@@ -36,7 +63,7 @@ SQLite files are the only contract between the Kotlin indexer and Go querier.
 ./install.sh                  # builds and installs to ~/.local (override with PREFIX=...)
 ```
 
-Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Requirements: JDK 17+ and Go 1.23+ to build. Make sure `$PREFIX/bin` is on your PATH.
+`install.sh` checks JDK/Go/Make before building. If a requirement is missing or too old, it prints a user-facing install note, an agent-friendly install command, and the verification command to run before retrying. Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Make sure `$PREFIX/bin` is on your PATH.
 
 ## Quick Start
 
@@ -87,7 +114,9 @@ For high-fanout retrieval commands (`find-class`, `find-method`, `list-packages`
 claude mcp add research4jar -- research4jar mcp
 ```
 
-Tools exposed: `index_project` (auto-resolves the classpath via Maven/Gradle), `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, the intended retrieval flow is broad search first (`search_symbols`), then expand one result (`open_symbol`) or explain why its jar is present (`why_dependency`).
+Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath via Maven/Gradle), `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, the intended retrieval flow is broad search first (`search_symbols`), then expand one result (`open_symbol`) or explain why its jar is present (`why_dependency`).
+
+Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`.
 
 For CLI-driven agents without MCP, `research4jar index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
 
