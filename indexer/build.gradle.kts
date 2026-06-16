@@ -27,6 +27,12 @@ tasks.withType<JavaCompile>().configureEach {
     options.release.set(11)
 }
 
+tasks.named<KotlinJvmCompile>("compileKotlin") {
+    compilerOptions {
+        freeCompilerArgs.add("-Xjdk-release=11")
+    }
+}
+
 tasks.named<KotlinJvmCompile>("compileTestKotlin") {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
