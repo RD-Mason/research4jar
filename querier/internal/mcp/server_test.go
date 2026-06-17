@@ -3,6 +3,9 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -98,6 +101,37 @@ func TestProjectStatusToolWorksWithoutIndex(t *testing.T) {
 	}
 	if status["indexed"] != false || status["project_dir"] != dir {
 		t.Fatalf("unexpected project_status result: %#v", status)
+	}
+}
+
+func TestRunIndexIncludesRegistryHintForLocalExtraction(t *testing.T) {
+	t.Setenv("RESEARCH4JAR_REGISTRY", "")
+	t.Setenv("RESEARCH4JAR_REGISTRY_PUBKEY", "")
+	dir := t.TempDir()
+	name := "fake-indexer"
+	script := "#!/bin/sh\nexit 0\n"
+	if runtime.GOOS == "windows" {
+		name += ".bat"
+		script = "@echo off\r\nexit /B 0\r\n"
+	}
+	indexerPath := filepath.Join(dir, name)
+	if err := os.WriteFile(indexerPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := runIndex(toolArguments{
+		ProjectDir: dir,
+		Jars:       filepath.Join(dir, "placeholder.jar"),
+		Indexer:    indexerPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed := result.(map[string]any)
+	hint, ok := typed["hint"].(string)
+	if !ok || !strings.Contains(hint, "No shard registry configured") ||
+		!strings.Contains(hint, "RESEARCH4JAR_REGISTRY") {
+		t.Fatalf("unexpected hint: %#v", typed["hint"])
 	}
 }
 

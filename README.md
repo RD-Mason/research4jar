@@ -98,6 +98,18 @@ research4jar find-method org.example.Foo#bar
 research4jar list-packages org.springframework.boot.autoconfigure
 ```
 
+If you are not sure which command to use, start with the task:
+
+| Task | Command |
+| --- | --- |
+| Check whether the project is ready to query | `research4jar status` |
+| Check whether dependencies changed since the last index | `research4jar status --check-classpath` |
+| Find the jar/dependency behind an import, class, coordinate, or jar | `research4jar dep precise '<import|class|coordinate|jar>'` |
+| Explain why a dependency jar is present | `research4jar dep why '<coordinate|jar|class>'` |
+| Find the owning jar for one class | `research4jar class '<simpleName|fqn>'` |
+| Search broadly when you only have a word or symbol fragment | `research4jar search-symbol '<text>'`, then `research4jar open-symbol '<fqn|Class#method>'` |
+| Inspect Spring Boot behavior | `find-config-properties`, `get-bean-definitions`, `explain-conditional`, `find-implementations`, or `find-by-annotation` |
+
 `research4jar index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache and unchanged classpaths reuse the session database.
 
 `find-implementations` is transitive by default (subinterface and superclass chains across jars); `find-by-annotation` expands meta-annotations by default (querying `@Component` finds `@Service` classes). Pass `--direct` for declared-only matching.

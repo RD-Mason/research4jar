@@ -384,6 +384,12 @@ func runIndex(arguments toolArguments) (any, error) {
 			result["note"] = "Session built from cached/registry shards; query tools are ready without launching the JVM indexer."
 			return result, nil
 		}
+	} else {
+		// Parity with the CLI registry hint: host logs swallow stderr, so the
+		// MCP path surfaces it as a result field instead.
+		result["hint"] = "No shard registry configured; this index extracts every jar " +
+			"locally (can take minutes on a large classpath). Pass the registry argument " +
+			"or set RESEARCH4JAR_REGISTRY to download prebuilt shards instead."
 	}
 
 	indexerBin, err := indexer.Locate(arguments.Indexer)

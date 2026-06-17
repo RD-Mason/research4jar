@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseOptionsAllowsFlagsBeforeAndAfterPrefix(t *testing.T) {
 	options, err := parseOptions([]string{
@@ -54,5 +57,44 @@ func TestParseOptionsSourceGrepFlag(t *testing.T) {
 	}
 	if options.sourceGrep || options.arg != "example.Service" {
 		t.Fatalf("unexpected options: %#v", options)
+	}
+}
+
+func TestNoProjectIndexMessageGivesRecoveryPath(t *testing.T) {
+	message := noProjectIndexMessage("/tmp/example project")
+	for _, expected := range []string{
+		"research4jar index --project-dir",
+		"research4jar status",
+		"research4jar doctor",
+		"/tmp/example project",
+	} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("message missing %q: %s", expected, message)
+		}
+	}
+}
+
+func TestUnknownCommandMessageSuggestsLikelyCommands(t *testing.T) {
+	message := unknownCommandMessage("stats")
+	for _, expected := range []string{
+		"unknown command: stats",
+		"Did you mean:",
+		"research4jar status",
+		"research4jar --help",
+	} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("message missing %q: %s", expected, message)
+		}
+	}
+
+	suggestions := commandSuggestions("find-config-property")
+	if len(suggestions) == 0 || suggestions[0] != "find-config-properties" {
+		t.Fatalf("unexpected suggestions: %#v", suggestions)
+	}
+}
+
+func TestCommandSuggestionsAvoidLowConfidenceGuesses(t *testing.T) {
+	if suggestions := commandSuggestions("zzzzzz"); len(suggestions) != 0 {
+		t.Fatalf("unexpected suggestions: %#v", suggestions)
 	}
 }

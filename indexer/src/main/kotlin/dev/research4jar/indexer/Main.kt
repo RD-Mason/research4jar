@@ -15,6 +15,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipFile
 import kotlin.io.path.name
 import kotlin.system.exitProcess
@@ -172,11 +173,20 @@ private fun runIndex(options: Options) {
         // ObjectMapper is thread-safe for the read/write calls used here;
         // BytecodeExtractor copies it before changing serialization features.
         val sharedMapper = jacksonObjectMapper()
+        // Bytecode extraction is the slow phase on a cold index. Emit progress to
+        // stderr (stdout is reserved for the final stats JSON) so a long first run
+        // is visibly working rather than indistinguishable from a hang.
+        val extractTotal = pending.size
+        if (extractTotal > 0) {
+            progress("extracting $extractTotal jars ($skipped cached, ${selectedShards.size} reused)...")
+        }
+        val extractedCount = AtomicInteger(0)
+        val progressStep = maxOf(1, extractTotal / 10)
         val futures = pending.map { jar ->
             executor.submit(Callable {
                 val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
                 val expectedPath = dataPaths.shards.resolve("$shardId.db").toAbsolutePath().normalize()
-                try {
+                val outcome = try {
                     val extracted = ZipFile(jar.path.toFile()).use {
                         JarExtractor(sharedMapper).extract(it)
                     }
@@ -199,6 +209,11 @@ private fun runIndex(options: Options) {
                 } catch (exception: Exception) {
                     ExtractionOutcome(jar = jar, shard = null, error = exception)
                 }
+                val done = extractedCount.incrementAndGet()
+                if (done == extractTotal || done % progressStep == 0) {
+                    progress("extracted $done/$extractTotal jars")
+                }
+                outcome
             })
         }
         futures.forEach { future ->
@@ -303,6 +318,13 @@ private fun requireValue(args: Array<String>, index: Int, option: String): Strin
 
 private fun warn(message: String) {
     System.err.println("warning: $message")
+}
+
+// Progress goes to stderr; stdout carries only the final stats JSON that
+// agents parse. PrintStream.println is synchronized, so concurrent extraction
+// workers never interleave a line.
+private fun progress(message: String) {
+    System.err.println("research4jar-index: $message")
 }
 
 private fun printHelp() {
