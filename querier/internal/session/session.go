@@ -101,9 +101,6 @@ func buildInto(path string, shards []Shard) error {
 	if err := populateDerivedColumns(db); err != nil {
 		return err
 	}
-	if err := populateSearchSymbols(db); err != nil {
-		return err
-	}
 	if err := createIndexes(db); err != nil {
 		return err
 	}
@@ -207,17 +204,43 @@ var sessionTables = []string{
 	  value TEXT NOT NULL,
 	  source_shard_id TEXT NOT NULL
 	)`,
-	`CREATE TABLE search_symbols (
-	  id INTEGER PRIMARY KEY,
-	  kind TEXT NOT NULL,
-	  name TEXT NOT NULL,
-	  owner TEXT,
-	  detail TEXT,
-	  source_shard_id TEXT NOT NULL,
-	  simple_name TEXT,
-	  package_name TEXT,
-	  score_hint INTEGER NOT NULL
-	)`,
+	// search_symbols is a view, not a copy: the materialized table plus its
+	// four indexes were 65% of the session bytes while the broad-search query
+	// could not use those indexes anyway (leading-wildcard LIKE). Search fast
+	// paths probe the base tables directly; only the contains-scan fallback
+	// reads this view.
+	`CREATE VIEW search_symbols AS
+	SELECT 'class' AS kind, fqn AS name, NULL AS owner, kind AS detail,
+	       source_shard_id, simple_name, package_name, 55 AS score_hint
+	FROM classes
+	UNION ALL
+	SELECT 'method', m.symbol, c.fqn, m.descriptor, m.source_shard_id,
+	       m.name, c.package_name, 50
+	FROM methods m JOIN classes c ON c.id = m.class_id
+	UNION ALL
+	SELECT 'annotation', a.annotation_fqn,
+	       CASE WHEN a.target_kind = 'class' THEN c.fqn
+	            WHEN a.target_kind = 'method' THEN m.symbol
+	            ELSE NULL END,
+	       a.attributes, a.source_shard_id, NULL,
+	       COALESCE(c.package_name, mc.package_name), 45
+	FROM annotations a
+	LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id
+	LEFT JOIN methods m ON a.target_kind = 'method' AND m.id = a.target_id
+	LEFT JOIN classes mc ON mc.id = m.class_id
+	UNION ALL
+	SELECT 'spi', impl_fqn, key, mechanism, source_shard_id, NULL, NULL, 44
+	FROM spi_registrations
+	UNION ALL
+	SELECT 'config-property', name, source_fqn, type_fqn, source_shard_id, NULL, NULL, 43
+	FROM config_properties
+	UNION ALL
+	SELECT 'string', sc.value, c.fqn,
+	       CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END,
+	       sc.source_shard_id, NULL, c.package_name, 30
+	FROM string_constants sc
+	JOIN classes c ON c.id = sc.class_id
+	LEFT JOIN methods m ON m.id = sc.method_id`,
 }
 
 func createTables(db *sql.DB) error {
@@ -330,166 +353,31 @@ var mergeStatements = []struct {
 	},
 }
 
-type classDerived struct {
-	id     int
-	simple string
-	pkg    string
-}
-
-type methodDerived struct {
-	id     int
-	symbol string
-}
-
+// populateDerivedColumns fills classes.simple_name/package_name and
+// methods.symbol with set-based SQL. The rtrim trick is exact lastIndexOf('.')
+// semantics: rtrim's second argument is a character SET, so trimming every
+// non-dot character strips exactly the rightmost run of non-dot characters,
+// leaving the prefix up to and including the last dot.
 func populateDerivedColumns(db *sql.DB) error {
-	classRows, err := db.Query("SELECT id, fqn FROM classes")
-	if err != nil {
-		return fmt.Errorf("query class names: %w", err)
-	}
-	var classes []classDerived
-	for classRows.Next() {
-		var id int
-		var fqn string
-		if err := classRows.Scan(&id, &fqn); err != nil {
-			classRows.Close()
-			return fmt.Errorf("scan class name: %w", err)
-		}
-		pkg, simple := splitFQN(fqn)
-		classes = append(classes, classDerived{id: id, simple: simple, pkg: pkg})
-	}
-	if err := classRows.Err(); err != nil {
-		classRows.Close()
-		return fmt.Errorf("iterate class names: %w", err)
-	}
-	classRows.Close()
-
-	methodRows, err := db.Query(`
-		SELECT m.id, c.fqn, m.name
-		FROM methods m
-		JOIN classes c ON c.id = m.class_id`)
-	if err != nil {
-		return fmt.Errorf("query method names: %w", err)
-	}
-	var methods []methodDerived
-	for methodRows.Next() {
-		var id int
-		var classFQN, name string
-		if err := methodRows.Scan(&id, &classFQN, &name); err != nil {
-			methodRows.Close()
-			return fmt.Errorf("scan method name: %w", err)
-		}
-		methods = append(methods, methodDerived{id: id, symbol: classFQN + "#" + name})
-	}
-	if err := methodRows.Err(); err != nil {
-		methodRows.Close()
-		return fmt.Errorf("iterate method names: %w", err)
-	}
-	methodRows.Close()
-
 	transaction, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	classStatement, err := transaction.Prepare(
-		"UPDATE classes SET simple_name = ?, package_name = ? WHERE id = ?",
-	)
-	if err != nil {
-		transaction.Rollback()
-		return err
+	statements := []string{
+		`UPDATE classes SET
+		  simple_name = CASE
+		    WHEN instr(fqn, '.') = 0 THEN fqn
+		    ELSE substr(fqn, length(rtrim(fqn, replace(fqn, '.', ''))) + 1)
+		  END,
+		  package_name = CASE
+		    WHEN instr(fqn, '.') = 0 THEN ''
+		    ELSE substr(fqn, 1, length(rtrim(fqn, replace(fqn, '.', ''))) - 1)
+		  END`,
+		`UPDATE methods SET symbol = (
+		  SELECT c.fqn FROM classes c WHERE c.id = methods.class_id
+		) || '#' || name`,
 	}
-	for _, item := range classes {
-		if _, err := classStatement.Exec(item.simple, item.pkg, item.id); err != nil {
-			classStatement.Close()
-			transaction.Rollback()
-			return err
-		}
-	}
-	classStatement.Close()
-
-	methodStatement, err := transaction.Prepare("UPDATE methods SET symbol = ? WHERE id = ?")
-	if err != nil {
-		transaction.Rollback()
-		return err
-	}
-	for _, item := range methods {
-		if _, err := methodStatement.Exec(item.symbol, item.id); err != nil {
-			methodStatement.Close()
-			transaction.Rollback()
-			return err
-		}
-	}
-	methodStatement.Close()
-
-	if err := transaction.Commit(); err != nil {
-		return err
-	}
-	return nil
-}
-
-var searchSymbolPopulateStatements = []string{
-	`INSERT INTO search_symbols(
-	  kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-	)
-	SELECT 'class', fqn, NULL, kind, source_shard_id, simple_name, package_name, 55
-	FROM classes`,
-	`INSERT INTO search_symbols(
-	  kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-	)
-	SELECT 'method', m.symbol, c.fqn, m.descriptor, m.source_shard_id,
-	       m.name, c.package_name, 50
-	FROM methods m
-	JOIN classes c ON c.id = m.class_id`,
-	`INSERT INTO search_symbols(
-	  kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-	)
-	SELECT 'annotation',
-	       a.annotation_fqn,
-	       CASE
-	         WHEN a.target_kind = 'class' THEN c.fqn
-	         WHEN a.target_kind = 'method' THEN m.symbol
-	         ELSE NULL
-	       END,
-	       a.attributes,
-	       a.source_shard_id,
-	       NULL,
-	       COALESCE(c.package_name, mc.package_name),
-	       45
-	FROM annotations a
-	LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id
-	LEFT JOIN methods m ON a.target_kind = 'method' AND m.id = a.target_id
-	LEFT JOIN classes mc ON mc.id = m.class_id`,
-	`INSERT INTO search_symbols(
-	  kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-	)
-	SELECT 'spi', impl_fqn, key, mechanism, source_shard_id, NULL, NULL, 44
-	FROM spi_registrations`,
-	`INSERT INTO search_symbols(
-	  kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-	)
-	SELECT 'config-property', name, source_fqn, type_fqn, source_shard_id, NULL, NULL, 43
-	FROM config_properties`,
-	`INSERT INTO search_symbols(
-	  kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-	)
-	SELECT 'string',
-	       sc.value,
-	       c.fqn,
-	       CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END,
-	       sc.source_shard_id,
-	       NULL,
-	       c.package_name,
-	       30
-	FROM string_constants sc
-	JOIN classes c ON c.id = sc.class_id
-	LEFT JOIN methods m ON m.id = sc.method_id`,
-}
-
-func populateSearchSymbols(db *sql.DB) error {
-	transaction, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	for _, statement := range searchSymbolPopulateStatements {
+	for _, statement := range statements {
 		if _, err := transaction.Exec(statement); err != nil {
 			transaction.Rollback()
 			return err
@@ -561,10 +449,7 @@ var sessionIndexes = []string{
 	"CREATE INDEX idx_s_cond_target ON conditions(target_kind, target_id)",
 	"CREATE INDEX idx_s_strconst_value ON string_constants(value)",
 	"CREATE INDEX idx_s_strconst_class ON string_constants(class_id)",
-	"CREATE INDEX idx_s_search_kind_name ON search_symbols(kind, name)",
-	"CREATE INDEX idx_s_search_name ON search_symbols(name)",
-	"CREATE INDEX idx_s_search_simple ON search_symbols(simple_name)",
-	"CREATE INDEX idx_s_search_package ON search_symbols(package_name)",
+	"CREATE INDEX idx_s_spi_impl ON spi_registrations(impl_fqn)",
 }
 
 func createIndexes(db *sql.DB) error {
@@ -601,14 +486,6 @@ func openReadWrite(path string) (*sql.DB, error) {
 func sha256Hex(data []byte) string {
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
-}
-
-func splitFQN(fqn string) (string, string) {
-	index := strings.LastIndexByte(fqn, '.')
-	if index < 0 {
-		return "", fqn
-	}
-	return fqn[:index], fqn[index+1:]
 }
 
 func syncFile(path string) error {

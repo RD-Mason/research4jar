@@ -3,6 +3,7 @@ package dev.research4jar.indexer.store
 import dev.research4jar.indexer.Research4JarVersions
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.sql.Connection
 import java.sql.DriverManager
 import java.time.Instant
@@ -52,7 +53,7 @@ class Manifest(
                     jarCoordinate = result.getString("jar_coordinate"),
                     jarFilename = result.getString("jar_filename"),
                     jarSha256 = result.getString("jar_sha256"),
-                    shardPath = Path.of(result.getString("shard_path")),
+                    shardPath = Paths.get(result.getString("shard_path")),
                     shardChecksum = result.getString("shard_checksum"),
                     sizeBytes = result.getLong("size_bytes").let {
                         if (result.wasNull()) null else it

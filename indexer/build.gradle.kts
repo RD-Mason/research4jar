@@ -13,7 +13,7 @@ version = "0.1.0"
 kotlin {
     jvmToolchain(17)
     compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_11)
+        jvmTarget.set(JvmTarget.JVM_1_8)
     }
 }
 
@@ -24,12 +24,12 @@ java {
 }
 
 tasks.withType<JavaCompile>().configureEach {
-    options.release.set(11)
+    options.release.set(8)
 }
 
 tasks.named<KotlinJvmCompile>("compileKotlin") {
     compilerOptions {
-        freeCompilerArgs.add("-Xjdk-release=11")
+        freeCompilerArgs.add("-Xjdk-release=1.8")
     }
 }
 
@@ -85,14 +85,14 @@ fun multiReleaseVersion(entryName: String): Int? {
     return entryName.removePrefix(prefix).substringBefore('/').toIntOrNull()
 }
 
-tasks.register("verifyJava11Runtime") {
+tasks.register("verifyJava8Runtime") {
     group = "verification"
-    description = "Verifies the installed indexer runtime is loadable on Java 11."
+    description = "Verifies the installed indexer runtime is loadable on Java 8."
     dependsOn(tasks.named("installDist"))
     inputs.dir(layout.buildDirectory.dir("install/research4jar-index/lib"))
 
     doLast {
-        val maxMajor = 55
+        val maxMajor = 52
         val libDir = layout.buildDirectory.dir("install/research4jar-index/lib").get().asFile
         val offenders = mutableListOf<String>()
         libDir.listFiles { file -> file.extension == "jar" }
@@ -101,9 +101,13 @@ tasks.register("verifyJava11Runtime") {
                 ZipFile(jar).use { zip ->
                     zip.entries().asSequence()
                         .filter { !it.isDirectory && it.name.endsWith(".class") }
+                        // module-info.class is a Java 9 module descriptor the
+                        // Java 8 classloader never loads; libraries ship it
+                        // while staying Java 8 compatible.
+                        .filter { !it.name.endsWith("module-info.class") }
                         .forEach entryLoop@{ entry ->
                             val release = multiReleaseVersion(entry.name)
-                            if (release != null && release > 11) return@entryLoop
+                            if (release != null && release > 8) return@entryLoop
                             zip.getInputStream(entry).use { input ->
                                 val header = ByteArray(8)
                                 val read = input.readNBytes(header, 0, header.size)
@@ -122,7 +126,7 @@ tasks.register("verifyJava11Runtime") {
             }
         if (offenders.isNotEmpty()) {
             throw GradleException(
-                "Runtime distribution contains classes newer than Java 11:\n" +
+                "Runtime distribution contains classes newer than Java 8:\n" +
                     offenders.take(20).joinToString("\n") +
                     if (offenders.size > 20) "\n... and ${offenders.size - 20} more" else "",
             )
@@ -131,5 +135,5 @@ tasks.register("verifyJava11Runtime") {
 }
 
 tasks.check {
-    dependsOn(tasks.named("verifyJava11Runtime"))
+    dependsOn(tasks.named("verifyJava8Runtime"))
 }

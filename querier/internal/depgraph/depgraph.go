@@ -61,6 +61,12 @@ func Path(projectDir string) string {
 	return filepath.Join(projectDir, ".research4jar", fileName)
 }
 
+// Exists reports whether a captured provenance file is present.
+func Exists(projectDir string) bool {
+	info, err := os.Stat(Path(projectDir))
+	return err == nil && info.Mode().IsRegular()
+}
+
 // Load reads a previously captured graph.
 func Load(projectDir string) (Graph, error) {
 	file, err := os.Open(Path(projectDir))

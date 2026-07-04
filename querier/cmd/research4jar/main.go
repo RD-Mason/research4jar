@@ -238,13 +238,14 @@ func runIndexCommand(args []string) {
 		}
 	}
 	startedAt := time.Now()
+	previousFingerprint := indexedFingerprint(opts.projectDir)
 	jars := opts.jars
 	if registryURL != "" {
 		var stats registry.PrefetchStats
 		var dataPaths paths.DataPaths
 		jars, stats, dataPaths = prefetchFromRegistry(registryURL, registryPubkey, opts)
 		if stats.Complete {
-			finishIndexFromRegistry(stats, dataPaths, opts.projectDir, startedAt)
+			finishIndexFromRegistry(stats, dataPaths, opts.projectDir, previousFingerprint, startedAt)
 			return
 		}
 	} else {
@@ -257,7 +258,7 @@ func runIndexCommand(args []string) {
 	if err := indexer.Run(indexerBin, jars, opts.projectDir, opts.home); err != nil {
 		fail("index_error", err.Error()+"\n\n"+doctorHint(opts.projectDir, false), 1)
 	}
-	captureDependencyProvenance(opts.projectDir)
+	captureDependencyProvenance(opts.projectDir, previousFingerprint)
 }
 
 func runDoctorCommand(args []string) {
@@ -305,7 +306,11 @@ func runDoctorCommand(args []string) {
 // the cache or the registry: the session merge, project pointer, and
 // CLAUDE.md guidance are produced in pure Go and the JVM never starts.
 func finishIndexFromRegistry(
-	stats registry.PrefetchStats, dataPaths paths.DataPaths, projectDir string, startedAt time.Time,
+	stats registry.PrefetchStats,
+	dataPaths paths.DataPaths,
+	projectDir string,
+	previousFingerprint string,
+	startedAt time.Time,
 ) {
 	shards := make([]session.Shard, len(stats.Shards))
 	shardIDs := make([]string, len(stats.Shards))
@@ -329,7 +334,7 @@ func finishIndexFromRegistry(
 	if err := pointer.EnsureClaudeInstructions(projectDir); err != nil {
 		fail("index_error", "write CLAUDE.md guidance: "+err.Error(), 1)
 	}
-	captureDependencyProvenance(projectDir)
+	captureDependencyProvenance(projectDir, previousFingerprint)
 	fmt.Fprintln(
 		os.Stderr,
 		"research4jar: session built from cached/registry shards; no local extraction needed",
@@ -407,7 +412,19 @@ func prefetchFromRegistry(
 	return jars, stats, dataPaths
 }
 
-func captureDependencyProvenance(projectDir string) {
+// captureDependencyProvenance refreshes .research4jar/dependencies.json via a
+// full `mvn dependency:tree` run. That Maven invocation dwarfs a warm
+// re-index, so it is skipped when the classpath fingerprint did not change
+// and the provenance file already exists.
+func captureDependencyProvenance(projectDir string, previousFingerprint string) {
+	if previousFingerprint != "" && previousFingerprint == indexedFingerprint(projectDir) &&
+		depgraph.Exists(projectDir) {
+		fmt.Fprintln(
+			os.Stderr,
+			"research4jar: classpath unchanged; reusing dependency provenance",
+		)
+		return
+	}
 	graph, err := depgraph.Capture(projectDir)
 	if errors.Is(err, depgraph.ErrUnsupported) {
 		return
@@ -419,6 +436,17 @@ func captureDependencyProvenance(projectDir string) {
 	if err := depgraph.Write(projectDir, graph); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: write dependency provenance: %v\n", err)
 	}
+}
+
+// indexedFingerprint reads the classpath fingerprint from the project pointer,
+// returning "" when no readable pointer exists.
+func indexedFingerprint(projectDir string) string {
+	pointerPath := filepath.Join(projectDir, ".research4jar", "project.json")
+	loaded, err := project.Load(pointerPath)
+	if err != nil {
+		return ""
+	}
+	return loaded.ClasspathFingerprint
 }
 
 func printRegistryHint() {

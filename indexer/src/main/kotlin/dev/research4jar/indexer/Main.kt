@@ -10,6 +10,7 @@ import dev.research4jar.indexer.store.SessionShard
 import dev.research4jar.indexer.store.ShardWriter
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.nio.file.attribute.BasicFileAttributes
 import java.time.Duration
 import java.time.Instant
@@ -293,7 +294,7 @@ private fun parseOptions(args: Array<String>): Options {
     while (index < args.size) {
         when (val argument = args[index]) {
             "--jars" -> jars = requireValue(args, ++index, argument)
-            "--project-dir" -> projectDir = Path.of(requireValue(args, ++index, argument))
+            "--project-dir" -> projectDir = Paths.get(requireValue(args, ++index, argument))
             "--home" -> home = requireValue(args, ++index, argument)
             "--fat-jar" -> throw IllegalArgumentException(
                 "--fat-jar is not implemented in M1; pass extracted dependency jars with --jars",

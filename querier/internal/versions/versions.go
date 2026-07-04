@@ -13,4 +13,4 @@ const Schema = 2
 
 // Session must equal Research4JarVersions.SESSION (the merged session database
 // layout version; sessions with a different stamp are rebuilt, not reused).
-const Session = 3
+const Session = 4

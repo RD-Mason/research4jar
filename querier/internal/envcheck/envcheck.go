@@ -162,9 +162,9 @@ func (i inspector) checkJava() Check {
 	guide := javaRuntimeGuide(i.goos)
 	check := Check{
 		ID:           "java",
-		Name:         "Java runtime 11+",
+		Name:         "Java runtime 8+",
 		RequiredFor:  []string{"running the JVM indexer", "local jar extraction", "registry misses"},
-		Minimum:      "11",
+		Minimum:      "8",
 		UserInstall:  guide.user,
 		AgentInstall: guide.agent,
 		Verify:       guide.verify,
@@ -183,13 +183,13 @@ func (i inspector) checkJava() Check {
 		return check
 	}
 	check.Version = firstLine(output)
-	if major, ok := parseJavaMajor(output); ok && major >= 11 {
+	if major, ok := parseJavaMajor(output); ok && major >= 8 {
 		check.Status = StatusOK
 		check.Message = "Java is new enough."
 		return check
 	}
 	check.Status = StatusMissing
-	check.Message = "Java is installed but version 11 or newer is required."
+	check.Message = "Java is installed but version 8 or newer is required."
 	return check
 }
 

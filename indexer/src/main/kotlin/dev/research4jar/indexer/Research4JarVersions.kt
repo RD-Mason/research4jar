@@ -20,6 +20,9 @@ object Research4JarVersions {
      * M2 == 2: merges methods, bean_definitions, conditions, string_constants
      * and method-target annotations alongside the M1 tables.
      * M3 == 3: adds retrieval-oriented derived columns and search_symbols.
+     * M6 == 4: search_symbols becomes a view over the base tables (the
+     * materialized copy and its four indexes were 65% of the session bytes)
+     * and derived columns are computed set-based in SQL.
      */
-    const val SESSION = 3
+    const val SESSION = 4
 }

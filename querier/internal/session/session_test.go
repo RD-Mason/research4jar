@@ -184,8 +184,12 @@ func TestBuildMergesShardsWithIDRebasing(t *testing.T) {
 		t.Fatalf("method annotation search owner = %d, want 1", got)
 	}
 	if got := count(t, db, `
-		SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_s_%'`); got != 24 {
-		t.Fatalf("indexes = %d, want 24", got)
+		SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_s_%'`); got != 21 {
+		t.Fatalf("indexes = %d, want 21", got)
+	}
+	if got := count(t, db, `
+		SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name = 'search_symbols'`); got != 1 {
+		t.Fatalf("search_symbols view = %d, want 1", got)
 	}
 	// Provenance must carry the shard id for source-jar attribution.
 	if got := count(t, db,

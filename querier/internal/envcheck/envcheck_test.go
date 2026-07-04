@@ -29,10 +29,10 @@ func TestParseGoVersion(t *testing.T) {
 	}
 }
 
-func TestRunAcceptsJava11ForRuntime(t *testing.T) {
+func TestRunAcceptsJava8ForRuntime(t *testing.T) {
 	report := testInspectorWithVersions(map[string]string{
 		"java": "/usr/bin/java",
-	}, `openjdk version "11.0.24" 2024-07-16`, "javac 11.0.24", "go version go1.23.4 darwin/arm64").
+	}, `java version "1.8.0_412"`, "javac 1.8.0_412", "go version go1.23.4 darwin/arm64").
 		Run(Options{ProjectDir: t.TempDir()})
 
 	check := findCheck(report, "java")
@@ -42,11 +42,11 @@ func TestRunAcceptsJava11ForRuntime(t *testing.T) {
 	if check.Status != StatusOK {
 		t.Fatalf("java status = %s, want ok", check.Status)
 	}
-	if check.Minimum != "11" {
-		t.Fatalf("java minimum = %q, want 11", check.Minimum)
+	if check.Minimum != "8" {
+		t.Fatalf("java minimum = %q, want 8", check.Minimum)
 	}
 	if !report.OK {
-		t.Fatal("runtime report should pass with Java 11")
+		t.Fatal("runtime report should pass with Java 8")
 	}
 }
 

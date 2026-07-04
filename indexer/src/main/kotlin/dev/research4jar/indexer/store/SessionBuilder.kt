@@ -33,7 +33,6 @@ class SessionBuilder {
                 createTables(connection)
                 shards.sortedBy(SessionShard::shardId).forEach { merge(connection, it) }
                 populateDerivedColumns(connection)
-                populateSearchSymbols(connection)
                 createIndexes(connection)
                 connection.createStatement().use { it.execute("ANALYZE") }
             }
@@ -195,19 +194,45 @@ class SessionBuilder {
                 )
                 """.trimIndent(),
             )
+            // search_symbols is a view, not a copy: the materialized table
+            // plus its four indexes were 65% of the session bytes while the
+            // broad-search query could not use those indexes anyway
+            // (leading-wildcard LIKE). Must stay identical to the Go writer
+            // in querier/internal/session/session.go.
             statement.execute(
                 """
-                CREATE TABLE search_symbols (
-                  id INTEGER PRIMARY KEY,
-                  kind TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  owner TEXT,
-                  detail TEXT,
-                  source_shard_id TEXT NOT NULL,
-                  simple_name TEXT,
-                  package_name TEXT,
-                  score_hint INTEGER NOT NULL
-                )
+                CREATE VIEW search_symbols AS
+                SELECT 'class' AS kind, fqn AS name, NULL AS owner, kind AS detail,
+                       source_shard_id, simple_name, package_name, 55 AS score_hint
+                FROM classes
+                UNION ALL
+                SELECT 'method', m.symbol, c.fqn, m.descriptor, m.source_shard_id,
+                       m.name, c.package_name, 50
+                FROM methods m JOIN classes c ON c.id = m.class_id
+                UNION ALL
+                SELECT 'annotation', a.annotation_fqn,
+                       CASE WHEN a.target_kind = 'class' THEN c.fqn
+                            WHEN a.target_kind = 'method' THEN m.symbol
+                            ELSE NULL END,
+                       a.attributes, a.source_shard_id, NULL,
+                       COALESCE(c.package_name, mc.package_name), 45
+                FROM annotations a
+                LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id
+                LEFT JOIN methods m ON a.target_kind = 'method' AND m.id = a.target_id
+                LEFT JOIN classes mc ON mc.id = m.class_id
+                UNION ALL
+                SELECT 'spi', impl_fqn, key, mechanism, source_shard_id, NULL, NULL, 44
+                FROM spi_registrations
+                UNION ALL
+                SELECT 'config-property', name, source_fqn, type_fqn, source_shard_id, NULL, NULL, 43
+                FROM config_properties
+                UNION ALL
+                SELECT 'string', sc.value, c.fqn,
+                       CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END,
+                       sc.source_shard_id, NULL, c.package_name, 30
+                FROM string_constants sc
+                JOIN classes c ON c.id = sc.class_id
+                LEFT JOIN methods m ON m.id = sc.method_id
                 """.trimIndent(),
             )
         }
@@ -362,142 +387,38 @@ class SessionBuilder {
             }
         }
 
-    private data class DerivedClass(
-        val id: Int,
-        val simpleName: String,
-        val packageName: String,
-    )
-
-    private data class DerivedMethod(
-        val id: Int,
-        val symbol: String,
-    )
-
+    /**
+     * Fills classes.simple_name/package_name and methods.symbol with
+     * set-based SQL (was ~620k row-by-row UPDATEs on a large classpath).
+     * The rtrim trick is exact lastIndexOf('.') semantics: rtrim's second
+     * argument is a character SET, so trimming every non-dot character
+     * strips exactly the rightmost run of non-dot characters, leaving the
+     * prefix up to and including the last dot. Must stay identical to the
+     * Go writer in querier/internal/session/session.go.
+     */
     private fun populateDerivedColumns(connection: Connection) {
-        val classes = mutableListOf<DerivedClass>()
-        connection.createStatement().use { statement ->
-            statement.executeQuery("SELECT id, fqn FROM classes").use { rows ->
-                while (rows.next()) {
-                    val (packageName, simpleName) = splitFqn(rows.getString("fqn"))
-                    classes += DerivedClass(rows.getInt("id"), simpleName, packageName)
-                }
-            }
-        }
-
-        val methods = mutableListOf<DerivedMethod>()
-        connection.createStatement().use { statement ->
-            statement.executeQuery(
-                """
-                SELECT m.id, c.fqn, m.name
-                FROM methods m
-                JOIN classes c ON c.id = m.class_id
-                """.trimIndent(),
-            ).use { rows ->
-                while (rows.next()) {
-                    methods += DerivedMethod(
-                        rows.getInt("id"),
-                        "${rows.getString("fqn")}#${rows.getString("name")}",
-                    )
-                }
-            }
-        }
-
-        withTransaction(connection) {
-            connection.prepareStatement(
-                "UPDATE classes SET simple_name = ?, package_name = ? WHERE id = ?",
-            ).use { statement ->
-                classes.forEach { item ->
-                    statement.setString(1, item.simpleName)
-                    statement.setString(2, item.packageName)
-                    statement.setInt(3, item.id)
-                    statement.addBatch()
-                }
-                statement.executeBatch()
-            }
-            connection.prepareStatement("UPDATE methods SET symbol = ? WHERE id = ?").use { statement ->
-                methods.forEach { item ->
-                    statement.setString(1, item.symbol)
-                    statement.setInt(2, item.id)
-                    statement.addBatch()
-                }
-                statement.executeBatch()
-            }
-        }
-    }
-
-    private fun populateSearchSymbols(connection: Connection) {
-        val statements = listOf(
-            """
-            INSERT INTO search_symbols(
-              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-            )
-            SELECT 'class', fqn, NULL, kind, source_shard_id, simple_name, package_name, 55
-            FROM classes
-            """.trimIndent(),
-            """
-            INSERT INTO search_symbols(
-              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-            )
-            SELECT 'method', m.symbol, c.fqn, m.descriptor, m.source_shard_id,
-                   m.name, c.package_name, 50
-            FROM methods m
-            JOIN classes c ON c.id = m.class_id
-            """.trimIndent(),
-            """
-            INSERT INTO search_symbols(
-              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-            )
-            SELECT 'annotation',
-                   a.annotation_fqn,
-                   CASE
-                     WHEN a.target_kind = 'class' THEN c.fqn
-                     WHEN a.target_kind = 'method' THEN m.symbol
-                     ELSE NULL
-                   END,
-                   a.attributes,
-                   a.source_shard_id,
-                   NULL,
-                   COALESCE(c.package_name, mc.package_name),
-                   45
-            FROM annotations a
-            LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id
-            LEFT JOIN methods m ON a.target_kind = 'method' AND m.id = a.target_id
-            LEFT JOIN classes mc ON mc.id = m.class_id
-            """.trimIndent(),
-            """
-            INSERT INTO search_symbols(
-              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-            )
-            SELECT 'spi', impl_fqn, key, mechanism, source_shard_id, NULL, NULL, 44
-            FROM spi_registrations
-            """.trimIndent(),
-            """
-            INSERT INTO search_symbols(
-              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-            )
-            SELECT 'config-property', name, source_fqn, type_fqn, source_shard_id, NULL, NULL, 43
-            FROM config_properties
-            """.trimIndent(),
-            """
-            INSERT INTO search_symbols(
-              kind, name, owner, detail, source_shard_id, simple_name, package_name, score_hint
-            )
-            SELECT 'string',
-                   sc.value,
-                   c.fqn,
-                   CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END,
-                   sc.source_shard_id,
-                   NULL,
-                   c.package_name,
-                   30
-            FROM string_constants sc
-            JOIN classes c ON c.id = sc.class_id
-            LEFT JOIN methods m ON m.id = sc.method_id
-            """.trimIndent(),
-        )
         withTransaction(connection) {
             connection.createStatement().use { statement ->
-                statements.forEach { statement.executeUpdate(it) }
+                statement.executeUpdate(
+                    """
+                    UPDATE classes SET
+                      simple_name = CASE
+                        WHEN instr(fqn, '.') = 0 THEN fqn
+                        ELSE substr(fqn, length(rtrim(fqn, replace(fqn, '.', ''))) + 1)
+                      END,
+                      package_name = CASE
+                        WHEN instr(fqn, '.') = 0 THEN ''
+                        ELSE substr(fqn, 1, length(rtrim(fqn, replace(fqn, '.', ''))) - 1)
+                      END
+                    """.trimIndent(),
+                )
+                statement.executeUpdate(
+                    """
+                    UPDATE methods SET symbol = (
+                      SELECT c.fqn FROM classes c WHERE c.id = methods.class_id
+                    ) || '#' || name
+                    """.trimIndent(),
+                )
             }
         }
     }
@@ -513,15 +434,6 @@ class SessionBuilder {
             throw exception
         } finally {
             connection.autoCommit = previousAutoCommit
-        }
-    }
-
-    private fun splitFqn(fqn: String): Pair<String, String> {
-        val index = fqn.lastIndexOf('.')
-        return if (index < 0) {
-            "" to fqn
-        } else {
-            fqn.substring(0, index) to fqn.substring(index + 1)
         }
     }
 
@@ -553,10 +465,7 @@ class SessionBuilder {
             )
             statement.execute("CREATE INDEX idx_s_strconst_value ON string_constants(value)")
             statement.execute("CREATE INDEX idx_s_strconst_class ON string_constants(class_id)")
-            statement.execute("CREATE INDEX idx_s_search_kind_name ON search_symbols(kind, name)")
-            statement.execute("CREATE INDEX idx_s_search_name ON search_symbols(name)")
-            statement.execute("CREATE INDEX idx_s_search_simple ON search_symbols(simple_name)")
-            statement.execute("CREATE INDEX idx_s_search_package ON search_symbols(package_name)")
+            statement.execute("CREATE INDEX idx_s_spi_impl ON spi_registrations(impl_fqn)")
         }
     }
 }

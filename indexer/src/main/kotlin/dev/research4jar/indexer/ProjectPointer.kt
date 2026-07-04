@@ -84,7 +84,11 @@ object ProjectPointer {
     fun ensureClaudeInstructions(projectDir: Path) {
         Files.createDirectories(projectDir)
         val claudeFile = projectDir.resolve("CLAUDE.md")
-        val existing = if (Files.exists(claudeFile)) Files.readString(claudeFile) else ""
+        val existing = if (Files.exists(claudeFile)) {
+            String(Files.readAllBytes(claudeFile), StandardCharsets.UTF_8)
+        } else {
+            ""
+        }
         if (existing.contains(HEADING)) return
 
         val separator = when {
@@ -92,10 +96,9 @@ object ProjectPointer {
             existing.endsWith("\n") -> "\n"
             else -> "\n\n"
         }
-        Files.writeString(
+        Files.write(
             claudeFile,
-            existing + separator + snippet + "\n",
-            StandardCharsets.UTF_8,
+            (existing + separator + snippet + "\n").toByteArray(StandardCharsets.UTF_8),
         )
     }
 }

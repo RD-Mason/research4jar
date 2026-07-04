@@ -359,6 +359,7 @@ func runIndex(arguments toolArguments) (any, error) {
 		}
 	}
 	jars := arguments.Jars
+	previousFingerprint := indexedFingerprint(projectDir)
 	result := map[string]any{
 		"status":      "indexed",
 		"project_dir": projectDir,
@@ -380,7 +381,7 @@ func runIndex(arguments toolArguments) (any, error) {
 				return nil, err
 			}
 			result["index_mode"] = "registry"
-			result["dependency_provenance"] = captureDependencyProvenance(projectDir)
+			result["dependency_provenance"] = captureDependencyProvenance(projectDir, previousFingerprint)
 			result["note"] = "Session built from cached/registry shards; query tools are ready without launching the JVM indexer."
 			return result, nil
 		}
@@ -399,7 +400,7 @@ func runIndex(arguments toolArguments) (any, error) {
 	if err := indexer.Run(indexerBin, jars, projectDir, arguments.Home); err != nil {
 		return nil, fmt.Errorf("indexing failed: %w. Call check_environment for installation guidance", err)
 	}
-	result["dependency_provenance"] = captureDependencyProvenance(projectDir)
+	result["dependency_provenance"] = captureDependencyProvenance(projectDir, previousFingerprint)
 	result["note"] = "Project pointer written to .research4jar/project.json; query tools are ready."
 	return result, nil
 }
@@ -490,7 +491,14 @@ func registryPrefetchSummary(stats registry.PrefetchStats, warnings string) map[
 	return summary
 }
 
-func captureDependencyProvenance(projectDir string) string {
+// captureDependencyProvenance mirrors the CLI: the underlying
+// `mvn dependency:tree` run dwarfs a warm re-index, so it is skipped when the
+// classpath fingerprint did not change and the provenance file exists.
+func captureDependencyProvenance(projectDir string, previousFingerprint string) string {
+	if previousFingerprint != "" && previousFingerprint == indexedFingerprint(projectDir) &&
+		depgraph.Exists(projectDir) {
+		return "reused (classpath unchanged)"
+	}
 	if graph, err := depgraph.Capture(projectDir); err == nil {
 		if err := depgraph.Write(projectDir, graph); err != nil {
 			return "capture succeeded but write failed: " + err.Error()
@@ -501,6 +509,17 @@ func captureDependencyProvenance(projectDir string) string {
 	} else {
 		return "capture failed: " + err.Error()
 	}
+}
+
+// indexedFingerprint reads the classpath fingerprint from the project
+// pointer, returning "" when no readable pointer exists.
+func indexedFingerprint(projectDir string) string {
+	pointerPath := filepath.Join(projectDir, ".research4jar", "project.json")
+	loaded, err := project.Load(pointerPath)
+	if err != nil {
+		return ""
+	}
+	return loaded.ClasspathFingerprint
 }
 
 func toolError(message string) map[string]any {
