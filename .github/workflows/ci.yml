@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  indexer:
-    name: Indexer (${{ matrix.os }})
+  jvm:
+    name: JVM core+cli (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,20 +23,20 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Test indexer
+      - name: Test core and cli
         shell: bash
-        run: ./gradlew :indexer:check
+        run: ./gradlew :core:check :cli:check
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "11"
-      - name: Smoke test indexer on Java 11
+      - name: Smoke test indexer launcher on Java 11
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            cmd //c indexer\\build\\install\\research4jar-index\\bin\\research4jar-index.bat --help
+            cmd //c core\\build\\install\\research4jar-index\\bin\\research4jar-index.bat --help
           else
-            indexer/build/install/research4jar-index/bin/research4jar-index --help
+            core/build/install/research4jar-index/bin/research4jar-index --help
           fi
 
   querier:

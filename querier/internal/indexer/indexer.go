@@ -41,7 +41,7 @@ func Locate(explicit string) (string, error) {
 			filepath.Join(binDir, "..", "libexec", "research4jar-index", "bin", launcher),
 			// In-repo layout for development builds.
 			filepath.Join(
-				binDir, "..", "..", "indexer", "build", "install",
+				binDir, "..", "..", "core", "build", "install",
 				"research4jar-index", "bin", launcher,
 			),
 		}

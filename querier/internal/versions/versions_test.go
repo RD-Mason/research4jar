@@ -14,7 +14,7 @@ import (
 func TestExtractorMatchesKotlin(t *testing.T) {
 	kotlinPath := filepath.Join(
 		"..", "..", "..",
-		"indexer", "src", "main", "kotlin", "dev", "research4jar", "indexer",
+		"core", "src", "main", "kotlin", "dev", "research4jar", "indexer",
 		"Research4JarVersions.kt",
 	)
 	content, err := os.ReadFile(kotlinPath)

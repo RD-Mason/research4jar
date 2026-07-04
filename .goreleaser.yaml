@@ -3,11 +3,12 @@ version: 2
 project_name: research4jar
 
 # The JVM indexer distribution is platform-independent; build it once and
-# bundle it into every archive so releases are self-contained (Java 11+ is
-# still required at runtime).
+# bundle it into every archive so releases are self-contained (Java 8+ is
+# still required at runtime). Deprecated by M6: the pure-Java CLI replaces
+# these archives once the migration completes.
 before:
   hooks:
-    - ./gradlew :indexer:installDist
+    - ./gradlew :core:installDist
 
 builds:
   - id: research4jar
@@ -39,9 +40,9 @@ archives:
     files:
       - LICENSE
       - README.md
-      - src: indexer/build/install/research4jar-index/lib/**
+      - src: core/build/install/research4jar-index/lib/**
         dst: libexec/research4jar-index/lib
-      - src: indexer/build/install/research4jar-index/bin/**
+      - src: core/build/install/research4jar-index/bin/**
         dst: libexec/research4jar-index/bin
         info:
           mode: 0755

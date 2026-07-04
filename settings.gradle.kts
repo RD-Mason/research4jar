@@ -13,4 +13,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "research4jar"
-include("indexer")
+include("core")
+include("cli")
