@@ -48,6 +48,9 @@ dependencies {
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.19.0")
     implementation("org.ow2.asm:asm:9.9.1")
     implementation("org.xerial:sqlite-jdbc:3.49.1.0")
+    // Ed25519 for registry shard signatures; JDK EdDSA needs Java 15+ and the
+    // runtime keeps a Java 8 baseline.
+    implementation("net.i2p.crypto:eddsa:0.3.0")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.12.2")
