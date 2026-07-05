@@ -15,3 +15,5 @@ dependencyResolutionManagement {
 rootProject.name = "research4jar"
 include("core")
 include("cli")
+include("gradle-plugin")
+include("maven-plugin")

@@ -3,8 +3,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 plugins {
     kotlin("jvm") version "2.1.21"
-    application
-    id("com.gradleup.shadow") version "8.3.6"
+    `java-gradle-plugin`
 }
 
 group = "dev.research4jar"
@@ -47,24 +46,21 @@ dependencies {
     implementation(project(":core"))
     implementation("com.fasterxml.jackson.core:jackson-databind:2.19.0")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.19.0")
-    implementation("org.xerial:sqlite-jdbc:3.49.1.0")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.12.2")
-    testImplementation("org.assertj:assertj-core:3.27.6")
+    testImplementation(gradleTestKit())
 }
 
-application {
-    mainClass = "dev.research4jar.cli.MainKt"
-    applicationName = "research4jar"
-}
-
-tasks.shadowJar {
-    archiveBaseName = "research4jar-cli"
-    archiveClassifier = ""
-    mergeServiceFiles()
-    manifest {
-        attributes["Main-Class"] = application.mainClass.get()
+gradlePlugin {
+    plugins {
+        create("research4jar") {
+            id = "dev.research4jar"
+            implementationClass = "dev.research4jar.gradle.Research4JarPlugin"
+            displayName = "Research4Jar"
+            description = "Index dependency jars into a local, queryable fact database " +
+                "for coding agents; runs in-process with native Gradle dependency provenance."
+        }
     }
 }
 
