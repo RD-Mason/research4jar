@@ -8,12 +8,22 @@ import kotlin.system.exitProcess
  * tests/e2e.sh drives via RESEARCH4JAR_INDEX; every other invocation goes
  * through [runCli], the Go-parity dispatcher ported from
  * querier/cmd/research4jar/main.go. Only this wrapper may exit the process —
- * command handlers return exit codes so a daemon can reuse them.
+ * command handlers return exit codes so the daemon can reuse them.
+ *
+ * Daemon fast path: query commands try a warm daemon first (~50-80ms
+ * round-trip vs ~700ms cold JVM); any miss falls through to the in-process
+ * run and spawns a daemon in the background for next time.
  */
 fun main(args: Array<String>) {
     if (args.isNotEmpty() && args[0] == "index-raw") {
         dev.research4jar.indexer.main(args.copyOfRange(1, args.size))
         return
     }
-    exitProcess(runCli(args, System.out, System.err))
+    if (args.isNotEmpty() && args[0] == "daemon") {
+        exitProcess(Daemon.runServer { argv, out, err -> runCli(argv, out, err) })
+    }
+    Daemon.tryServe(args)?.let { exitProcess(it) }
+    val code = runCli(args, System.out, System.err)
+    Daemon.spawnAfterColdRun(args)
+    exitProcess(code)
 }

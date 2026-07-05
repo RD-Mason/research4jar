@@ -132,8 +132,12 @@ object Daemon {
         }
     }
 
-    /** Best-effort background daemon spawn for the NEXT invocation. */
-    fun spawnInBackground() {
+    /**
+     * Best-effort background daemon spawn after a cold run of a daemonable
+     * command, so the NEXT invocation hits the warm path.
+     */
+    fun spawnAfterColdRun(argv: Array<String>) {
+        if (argv.isEmpty() || argv[0] !in DAEMONABLE) return
         if (System.getenv("RESEARCH4JAR_NO_DAEMON") != null) return
         if (System.getenv().keys.any { it.startsWith("RESEARCH4JAR_") }) return
         if (Files.isRegularFile(portFile())) return
