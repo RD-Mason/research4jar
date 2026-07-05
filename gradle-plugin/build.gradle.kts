@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 plugins {
     kotlin("jvm") version "2.1.21"
     `java-gradle-plugin`
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 group = "dev.research4jar"
@@ -66,4 +67,8 @@ gradlePlugin {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+mavenPublishing {
+    coordinates(project.property("GROUP").toString(), "research4jar-gradle-plugin", project.property("VERSION_NAME").toString())
 }

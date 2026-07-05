@@ -5,6 +5,7 @@ plugins {
     kotlin("jvm") version "2.1.21"
     application
     id("com.gradleup.shadow") version "8.3.6"
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 group = "dev.research4jar"
@@ -70,4 +71,8 @@ tasks.shadowJar {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+mavenPublishing {
+    coordinates(project.property("GROUP").toString(), "research4jar-cli", project.property("VERSION_NAME").toString())
 }

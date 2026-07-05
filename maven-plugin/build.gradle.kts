@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 plugins {
     kotlin("jvm") version "2.1.21"
     id("de.benediktritter.maven-plugin-development") version "0.4.3"
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 group = "dev.research4jar"
@@ -45,4 +46,8 @@ dependencies {
     compileOnly("org.apache.maven:maven-plugin-api:3.9.9")
     compileOnly("org.apache.maven:maven-core:3.9.9")
     compileOnly("org.apache.maven.plugin-tools:maven-plugin-annotations:3.15.1")
+}
+
+mavenPublishing {
+    coordinates(project.property("GROUP").toString(), "research4jar-maven-plugin", project.property("VERSION_NAME").toString())
 }

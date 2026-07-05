@@ -5,6 +5,7 @@ import java.util.zip.ZipFile
 plugins {
     kotlin("jvm") version "2.1.21"
     application
+    id("com.vanniktech.maven.publish") version "0.30.0"
 }
 
 group = "dev.research4jar"
@@ -139,4 +140,8 @@ tasks.register("verifyJava8Runtime") {
 
 tasks.check {
     dependsOn(tasks.named("verifyJava8Runtime"))
+}
+
+mavenPublishing {
+    coordinates(project.property("GROUP").toString(), "research4jar-core", project.property("VERSION_NAME").toString())
 }
