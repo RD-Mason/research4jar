@@ -62,7 +62,8 @@ fun main(args: Array<String>) {
         return
     }
     try {
-        runIndex(parseOptions(args))
+        val statistics = executeIndex(parseOptions(args))
+        println(jacksonObjectMapper().writeValueAsString(statistics))
     } catch (exception: IllegalArgumentException) {
         System.err.println("research4jar-index: ${exception.message}")
         System.err.println("Run research4jar-index --help for usage.")
@@ -73,7 +74,22 @@ fun main(args: Array<String>) {
     }
 }
 
-private fun runIndex(options: Options) {
+/**
+ * Library entrypoint for the extraction pipeline: hash, extract-or-reuse,
+ * session build, project pointer, CLAUDE.md guidance. The JVM CLI and MCP
+ * server call this in-process; the launcher `main` wraps it for the raw
+ * `--jars/--project-dir/--home` contract.
+ */
+fun runIndexPipeline(jars: String, projectDir: Path, home: String?): IndexStatistics =
+    executeIndex(
+        Options(
+            jars = jars,
+            projectDir = projectDir.toAbsolutePath().normalize(),
+            home = home,
+        ),
+    )
+
+private fun executeIndex(options: Options): IndexStatistics {
     val startedAt = Instant.now()
     val objectMapper = jacksonObjectMapper()
     val dataPaths = Research4JarPaths.resolve(options.home)
@@ -259,7 +275,7 @@ private fun runIndex(options: Options) {
     )
     ProjectPointer.ensureClaudeInstructions(options.projectDir)
 
-    val statistics = IndexStatistics(
+    return IndexStatistics(
         jars_total = jarsTotal,
         jars_indexed = jarsIndexed,
         jars_newly_indexed = newlyIndexed,
@@ -267,7 +283,6 @@ private fun runIndex(options: Options) {
         jars_missing = missing.sorted(),
         duration_ms = Duration.between(startedAt, Instant.now()).toMillis(),
     )
-    println(objectMapper.writeValueAsString(statistics))
 }
 
 // A cached shard is reused when its file still exists and its on-disk size
