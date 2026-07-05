@@ -11,6 +11,32 @@ data class SessionShard(
     val path: Path,
 )
 
+/**
+ * The set-based derived-column statements, exposed for the unit test that
+ * proves the rtrim/substr SQL is exact lastIndexOf('.') semantics. The rtrim
+ * trick: its second argument is a character SET, so trimming every non-dot
+ * character strips exactly the rightmost run of non-dot characters, leaving
+ * the prefix up to and including the last dot.
+ */
+internal val DERIVED_COLUMN_UPDATES = listOf(
+    """
+    UPDATE classes SET
+      simple_name = CASE
+        WHEN instr(fqn, '.') = 0 THEN fqn
+        ELSE substr(fqn, length(rtrim(fqn, replace(fqn, '.', ''))) + 1)
+      END,
+      package_name = CASE
+        WHEN instr(fqn, '.') = 0 THEN ''
+        ELSE substr(fqn, 1, length(rtrim(fqn, replace(fqn, '.', ''))) - 1)
+      END
+    """.trimIndent(),
+    """
+    UPDATE methods SET symbol = (
+      SELECT c.fqn FROM classes c WHERE c.id = methods.class_id
+    ) || '#' || name
+    """.trimIndent(),
+)
+
 class SessionBuilder {
     /**
      * Sessions are content-addressed by the classpath fingerprint in the file
@@ -390,35 +416,13 @@ class SessionBuilder {
     /**
      * Fills classes.simple_name/package_name and methods.symbol with
      * set-based SQL (was ~620k row-by-row UPDATEs on a large classpath).
-     * The rtrim trick is exact lastIndexOf('.') semantics: rtrim's second
-     * argument is a character SET, so trimming every non-dot character
-     * strips exactly the rightmost run of non-dot characters, leaving the
-     * prefix up to and including the last dot. Must stay identical to the
-     * single session writer since M6.
+     * The statements live in [DERIVED_COLUMN_UPDATES] so the unit test runs
+     * the exact production SQL against edge-case FQNs.
      */
     private fun populateDerivedColumns(connection: Connection) {
         withTransaction(connection) {
             connection.createStatement().use { statement ->
-                statement.executeUpdate(
-                    """
-                    UPDATE classes SET
-                      simple_name = CASE
-                        WHEN instr(fqn, '.') = 0 THEN fqn
-                        ELSE substr(fqn, length(rtrim(fqn, replace(fqn, '.', ''))) + 1)
-                      END,
-                      package_name = CASE
-                        WHEN instr(fqn, '.') = 0 THEN ''
-                        ELSE substr(fqn, 1, length(rtrim(fqn, replace(fqn, '.', ''))) - 1)
-                      END
-                    """.trimIndent(),
-                )
-                statement.executeUpdate(
-                    """
-                    UPDATE methods SET symbol = (
-                      SELECT c.fqn FROM classes c WHERE c.id = methods.class_id
-                    ) || '#' || name
-                    """.trimIndent(),
-                )
+                DERIVED_COLUMN_UPDATES.forEach { statement.executeUpdate(it) }
             }
         }
     }
