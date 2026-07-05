@@ -66,6 +66,8 @@ tasks.shadowJar {
     mergeServiceFiles()
     manifest {
         attributes["Main-Class"] = application.mainClass.get()
+        attributes["Implementation-Title"] = "research4jar"
+        attributes["Implementation-Version"] = project.version.toString()
     }
 }
 

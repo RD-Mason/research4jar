@@ -19,9 +19,11 @@ import java.io.PrintStream
  * exit code it returns to the caller.
  */
 
-// Overridden at release time in Go via -ldflags "-X main.version=..."; the
-// JVM CLI ships the same default until release stamping lands.
-internal const val CLI_VERSION = "dev"
+// Release builds stamp Implementation-Version into the jar manifest (see
+// cli/build.gradle.kts); running from classes (tests, IDE) reports "dev",
+// matching the Go CLI's unstamped default.
+internal val CLI_VERSION: String =
+    object {}.javaClass.`package`?.implementationVersion ?: "dev"
 
 internal val QUERY_COMMANDS = setOf(
     "find-config-properties",

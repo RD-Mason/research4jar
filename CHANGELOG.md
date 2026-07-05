@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-05
+
 ### Changed (M6 pure-Java consolidation)
 
 - The entire toolchain is now one Kotlin/JVM codebase: the Go querier is retired and the single `research4jar` CLI (a Java 8+ fat jar) indexes, queries, and serves MCP. Query semantics, JSON shapes, flags, help texts, and exit codes are byte-compatible with the Go CLI (verified by side-by-side invocation and the full e2e suite driven through the JVM binary).
