@@ -5,7 +5,6 @@ import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
 import org.sqlite.SQLiteConfig
-import org.sqlite.SQLiteOpenMode
 
 /**
  * Read-only SQLite access for the query engine (xerial sqlite-jdbc). Session
@@ -16,7 +15,10 @@ object Db {
     fun openReadOnly(path: String, immutable: Boolean): Connection {
         val absolute = Paths.get(path).toAbsolutePath().normalize()
         val config = SQLiteConfig()
-        config.setOpenMode(SQLiteOpenMode.READONLY)
+        // setReadOnly clears the default READWRITE|CREATE open flags before
+        // adding READONLY; setOpenMode(READONLY) alone ORs onto the defaults,
+        // an invalid combination that sqlite rejects with SQLITE_MISUSE.
+        config.setReadOnly(true)
         if (!immutable) {
             config.busyTimeout = 5000
         }

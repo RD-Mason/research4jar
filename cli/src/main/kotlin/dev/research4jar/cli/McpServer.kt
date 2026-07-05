@@ -159,9 +159,12 @@ object McpServer {
 
     private fun dispatchTool(name: String, arguments: ToolArguments): Any {
         if (name == "check_environment") {
+            // EnvCheck.run takes an envcheck.Options value, not named fields.
             return EnvCheck.run(
-                projectDir = arguments.projectDir,
-                sourceBuild = arguments.sourceBuild,
+                dev.research4jar.envcheck.Options(
+                    projectDir = arguments.projectDir,
+                    sourceBuild = arguments.sourceBuild,
+                ),
             )
         }
         if (name == "index_project") {
