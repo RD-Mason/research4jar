@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build Research4Jar from source and install it for the current user.
-# Requirements: JDK 17+, Go 1.23+, make. Override with PREFIX=/some/path.
+# Requirements: JDK 17+ (build only; the installed CLI runs on Java 8+), make.
+# Override the target with PREFIX=/some/path.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -11,14 +12,12 @@ agent_install() {
     Darwin)
       case "$package" in
         jdk) printf '%s\n' "if command -v brew >/dev/null 2>&1; then brew install --cask temurin; else echo 'Install Homebrew or JDK 17+ manually: https://adoptium.net/' >&2; exit 1; fi" ;;
-        go) printf '%s\n' "if command -v brew >/dev/null 2>&1; then brew install go; else echo 'Install Go 1.23+ manually: https://go.dev/dl/' >&2; exit 1; fi" ;;
         make) printf '%s\n' "xcode-select --install" ;;
       esac
       ;;
     Linux)
       case "$package" in
         jdk) printf '%s\n' "if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y openjdk-17-jdk; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y java-17-openjdk-devel; elif command -v yum >/dev/null 2>&1; then sudo yum install -y java-17-openjdk-devel; else echo 'Install OpenJDK 17+ manually' >&2; exit 1; fi" ;;
-        go) printf '%s\n' "if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y golang-go; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y golang; elif command -v yum >/dev/null 2>&1; then sudo yum install -y golang; else echo 'Install Go 1.23+ manually: https://go.dev/dl/' >&2; exit 1; fi" ;;
         make) printf '%s\n' "if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y make; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y make; elif command -v yum >/dev/null 2>&1; then sudo yum install -y make; else echo 'Install make manually' >&2; exit 1; fi" ;;
       esac
       ;;
@@ -58,7 +57,7 @@ require_java_command() {
   local command="$1"
   local label="$2"
   if ! command -v "$command" >/dev/null 2>&1; then
-    missing "$label 17+ is required to build Research4Jar" \
+    missing "$label 17+ is required to build Research4Jar (the installed CLI runs on Java 8+)" \
       "Install Eclipse Temurin/OpenJDK 17+ and reopen the terminal." \
       "$(agent_install jdk)" \
       "$command -version"
@@ -73,30 +72,6 @@ require_java_command() {
   fi
 }
 
-go_minor() {
-  go version 2>/dev/null | awk '{print $3}' | sed -nE 's/^go([0-9]+)\.([0-9]+).*/\1 \2/p'
-}
-
-require_go() {
-  if ! command -v go >/dev/null 2>&1; then
-    missing "Go 1.23+ is required to build the querier" \
-      "Install Go 1.23+ from https://go.dev/dl/ or your package manager." \
-      "$(agent_install go)" \
-      "go version"
-  fi
-  read -r major minor <<EOF
-$(go_minor)
-EOF
-  if [[ -z "${major:-}" || -z "${minor:-}" ||
-    ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ ||
-    "$major" -lt 1 || ( "$major" -eq 1 && "$minor" -lt 23 ) ]]; then
-    missing "Go 1.23+ is required; found $(go version 2>/dev/null || echo unknown)" \
-      "Install Go 1.23+ from https://go.dev/dl/ or your package manager." \
-      "$(agent_install go)" \
-      "go version"
-  fi
-}
-
 if ! command -v make >/dev/null 2>&1; then
   missing "make is required to run make install" \
     "Install build tools for your OS." \
@@ -105,7 +80,6 @@ if ! command -v make >/dev/null 2>&1; then
 fi
 require_java_command java "Java runtime"
 require_java_command javac "JDK compiler"
-require_go
 
 PREFIX="${PREFIX:-$HOME/.local}"
 make install PREFIX="$PREFIX"

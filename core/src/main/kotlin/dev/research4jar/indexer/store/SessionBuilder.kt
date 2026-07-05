@@ -197,8 +197,8 @@ class SessionBuilder {
             // search_symbols is a view, not a copy: the materialized table
             // plus its four indexes were 65% of the session bytes while the
             // broad-search query could not use those indexes anyway
-            // (leading-wildcard LIKE). Must stay identical to the Go writer
-            // in querier/internal/session/session.go.
+            // (leading-wildcard LIKE). The single source of truth for the
+            // session layout since M6.
             statement.execute(
                 """
                 CREATE VIEW search_symbols AS
@@ -394,7 +394,7 @@ class SessionBuilder {
      * argument is a character SET, so trimming every non-dot character
      * strips exactly the rightmost run of non-dot characters, leaving the
      * prefix up to and including the last dot. Must stay identical to the
-     * Go writer in querier/internal/session/session.go.
+     * single session writer since M6.
      */
     private fun populateDerivedColumns(connection: Connection) {
         withTransaction(connection) {

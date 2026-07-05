@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  jvm:
-    name: JVM core+cli (${{ matrix.os }})
+  build:
+    name: Build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -23,47 +23,22 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - name: Test core and cli
+      - name: Test all modules
         shell: bash
-        run: ./gradlew :core:check :cli:check
+        run: ./gradlew check
+      - name: Build fat jar
+        shell: bash
+        run: ./gradlew :cli:shadowJar
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "11"
-      - name: Smoke test indexer launcher on Java 11
+          java-version: "8"
+      - name: Smoke test the CLI on Java 8
         shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cmd //c core\\build\\install\\research4jar-index\\bin\\research4jar-index.bat --help
-          else
-            core/build/install/research4jar-index/bin/research4jar-index --help
-          fi
-
-  querier:
-    name: Querier (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: querier/go.mod
-          cache-dependency-path: querier/go.sum
-      - name: Build
-        working-directory: querier
-        run: go build ./...
-      - name: Test
-        working-directory: querier
-        run: go test ./...
-      - name: Vet
-        working-directory: querier
-        run: go vet ./...
+        run: java -jar cli/build/libs/research4jar-cli-*.jar --help || java -jar cli/build/libs/research4jar-cli-*.jar help
 
   e2e:
-    name: E2E (cross-language contract)
+    name: E2E (JVM CLI end to end)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -72,10 +47,6 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: querier/go.mod
-          cache-dependency-path: querier/go.sum
-      - name: Run e2e (indexer + querier through real SQLite)
+      - name: Run e2e
         shell: bash
         run: make e2e

@@ -43,10 +43,6 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: querier/go.mod
-          cache-dependency-path: querier/go.sum
       - name: Build
         run: make build
       - name: Seed registry
@@ -59,9 +55,8 @@ jobs:
             chmod 600 /tmp/signing.key
             sign_args=(--sign-key /tmp/signing.key)
           fi
-          ./build/bin/research4jar registry seed ./_site \
+          java -jar cli/build/libs/research4jar-cli-*.jar registry seed ./_site \
             --coordinates registry/spring-coordinates.txt \
-            --indexer indexer/build/install/research4jar-index/bin/research4jar-index \
             --home /tmp/research4jar-seed-home \
             "${sign_args[@]}"
       - name: Upload Pages artifact

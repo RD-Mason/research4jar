@@ -11,41 +11,20 @@ Large Spring Boot applications hide important behavior inside dependency jars: a
 
 ## Architecture
 
-Research4Jar follows a four-layer onion:
+Research4Jar is a single Kotlin/JVM codebase behind one CLI, following a four-layer onion:
 
-1. **Jar facts**: a Kotlin/JVM indexer reads metadata and bytecode with ASM without loading classes or executing jar code.
+1. **Jar facts**: the indexer reads metadata and bytecode with ASM without loading classes or executing jar code.
 2. **Immutable shards**: each jar becomes one content-addressed SQLite shard identified by `<jar_sha256>@<extractor_version>`.
 3. **Project session**: shards selected by a project's classpath are merged into a compact session database. Symbol references remain unresolved until query time, so relationships can cross jar boundaries.
-4. **Query and host integration**: a pure-Go CLI opens the session read-only and returns JSON with provenance and coverage. A project pointer and `CLAUDE.md` guidance let coding agents call it directly.
-
-SQLite files are the only contract between the Kotlin indexer and Go querier.
+4. **Query and host integration**: the same CLI opens the session read-only (C SQLite via sqlite-jdbc) and returns JSON with provenance and coverage. A project pointer and `CLAUDE.md` guidance let coding agents call it directly; a background daemon keeps warm CLI queries at ~90 ms.
 
 ## Requirements
 
-Research4Jar ships as a CLI plus an MCP stdio server. The current repository has a Kotlin/JVM indexer and a pure-Go querier, so the environment depends on how you install and use it:
+**To run Research4Jar: any Java 8+ runtime.** If your project builds with Maven or Gradle, the JVM you already have is enough — there is nothing else to install. `research4jar index` without `--jars` additionally wants the project's `./mvnw`/`./gradlew` wrapper or `mvn`/`gradle` on `PATH` (the same tools the project itself needs).
 
-**To use a prebuilt CLI/MCP plugin:**
+**To build this repository from source:** JDK 17+ and `make` (`install.sh` uses Bash). The shipped CLI is compiled to Java 8 bytecode; 17 is only the build toolchain.
 
-- `research4jar` on `PATH` (the archive's `bin/` directory).
-- Java runtime 11+ for local jar extraction. If every shard is served by a configured registry, indexing can complete without starting the JVM, but registry misses still need Java.
-- A target project Maven/Gradle wrapper (`./mvnw` or `./gradlew`) or `mvn`/`gradle` on `PATH` when you run `research4jar index` without `--jars`.
-- Cursor, Claude Code, or another MCP host if you want to use `research4jar mcp` as a plugin.
-
-Prebuilt plugin users do not need JDK 17. JDK 17 is only for building this repository from source.
-
-**To build from source in this repository:**
-
-- JDK 17+ (`java` and `javac`)
-- Go 1.23+
-- `make`
-- Bash (`install.sh` uses `/usr/bin/env bash`)
-
-The built indexer runtime is compiled for Java 11 bytecode; JDK 17+ is only required to run the current Gradle/Kotlin build and Spring Boot 3 test fixtures.
-
-**To run the full local verification suite:**
-
-- Everything needed to build from source
-- `jar`/`javac`, Python 3, and the `sqlite3` CLI for `make e2e`
+**To run the full local verification suite:** the source-build tools plus `jar`/`javac`, Python 3, and the `sqlite3` CLI for `make e2e`.
 
 Check the current machine and get install guidance with:
 
@@ -59,9 +38,27 @@ When an agent is installing the environment, have it run `research4jar doctor --
 
 ## Install
 
-**Prebuilt archives** (Linux/macOS/Windows, amd64/arm64) are published on the [Releases page](https://github.com/RD-Mason/research4jar/releases): unpack, put `bin/` on your PATH. The JVM indexer is bundled under `libexec/` and found automatically; Java 11+ is only needed for jars the shard registry does not cover.
+**Zero-install via your build tool** (available once the first Maven Central release lands):
 
-Installing a prebuilt archive does not require JDK 17; install JDK 17+ only when you choose the source-build path below.
+```bash
+# Maven — no pom.xml change, Maven pulls the plugin itself:
+mvn dev.research4jar:research4jar-maven-plugin:index
+
+# Gradle — add the plugin and run the task:
+#   plugins { id("dev.research4jar") version "0.1.0" }
+./gradlew research4jarIndex
+```
+
+Both resolve the runtime classpath and the full dependency graph in-process from the build tool itself — no second Maven/Gradle invocation — and Gradle projects get dependency provenance (`why-dependency`) natively.
+
+**Fat jar** from the [Releases page](https://github.com/RD-Mason/research4jar/releases): a single `research4jar-cli.jar` for every platform.
+
+```bash
+java -jar research4jar-cli.jar index
+# optional launcher:
+echo '#!/usr/bin/env bash
+exec java -jar /path/to/research4jar-cli.jar "$@"' > ~/.local/bin/research4jar && chmod +x ~/.local/bin/research4jar
+```
 
 **From source:**
 
@@ -69,7 +66,17 @@ Installing a prebuilt archive does not require JDK 17; install JDK 17+ only when
 ./install.sh                  # builds and installs to ~/.local (override with PREFIX=...)
 ```
 
-`install.sh` checks JDK/Go/Make before building. If a requirement is missing or too old, it prints a user-facing install note, an agent-friendly install command, and the verification command to run before retrying. Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Make sure `$PREFIX/bin` is on your PATH.
+`install.sh` checks JDK/Make before building and prints agent-friendly install commands for anything missing. Or step by step: `make build` then `make install PREFIX=$HOME/.local`. Make sure `$PREFIX/bin` is on your PATH.
+
+### CLI daemon
+
+One-shot JVM startup is real: a cold query pays ~0.7 s. The first query command
+therefore starts a background daemon (TCP loopback, token-authenticated,
+30-minute idle exit) and subsequent queries round-trip in ~90 ms with
+byte-identical output. `RESEARCH4JAR_NO_DAEMON=1` opts out; any
+`RESEARCH4JAR_*` environment override also bypasses the daemon so custom homes
+and registries always see exact semantics. Long-lived hosts (MCP) never need
+it — the server process itself stays warm.
 
 ## Quick Start
 
@@ -141,7 +148,7 @@ claude mcp add research4jar -- research4jar mcp
 
 Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath via Maven/Gradle), `project_status`, `dependency_precise`, `class_origin`, `find_artifact`, `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, call `project_status` to check whether an index exists and inspect coverage/provenance state, then use broad search first (`search_symbols`) and expand one result (`open_symbol`) or use `dependency_precise`/`class_origin` to answer "which jar owns this import/class?", "which dependency brought this jar in?", and "where does this project consume it?".
 
-Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`. `index_project` also accepts `registry` and `registry_pubkey`; when the registry covers the classpath, MCP indexing finishes in pure Go without launching the JVM indexer.
+Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`. `index_project` also accepts `registry` and `registry_pubkey`; when the registry covers the classpath, MCP indexing skips extraction entirely and only merges downloaded shards.
 
 For CLI-driven agents without MCP, `research4jar index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
 
@@ -156,7 +163,7 @@ v2/<jar_sha256>.db.sha256          checksum sidecar (required)
 v2/<jar_sha256>.db.sig             ed25519 signature (required for verifying clients)
 ```
 
-Point `research4jar index` at a registry and missing shards download instead of extracting locally — on a large classpath the first index drops from minutes of JVM extraction to seconds of downloads. When the registry covers every jar, the session merge also runs in pure Go and **no JVM is needed at all**:
+Point `research4jar index` at a registry and missing shards download instead of extracting locally — on a large classpath the first index drops from local bytecode extraction to seconds of downloads plus the session merge:
 
 ```bash
 research4jar index --registry https://shards.example.com            # or RESEARCH4JAR_REGISTRY
@@ -229,14 +236,13 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Shard registry: static-hostable export (`research4jar registry export`), verified download-instead-of-extract (`research4jar index --registry`), and ed25519 signing
 - Pure-Go indexing for registry-covered classpaths: session merge, project pointer, and CLAUDE.md guidance without a JVM
 - Cache lifecycle: usage stats, stale-version and orphan cleanup, LRU eviction, and session expiry (`research4jar cache stats|gc`)
-- Linux, macOS, and Windows-compatible data paths; pure-Go SQLite querying without CGO
+- Linux, macOS, and Windows-compatible data paths; one Java 8+ fat jar runs everywhere
 
 ## Known Limitations
 
 - `find-by-annotation` expands meta-annotations but does not merge `@AliasFor` attribute aliases; attributes are reported as written on the matched annotation.
 - `find-string` is substring matching over extracted constants, not full-text search with ranking.
-- `why-dependency` currently requires a Maven project indexed through `research4jar index`; Gradle dependency provenance is not captured yet.
-- A JRE is only needed when at least one jar misses the registry (or no registry is configured); fully covered classpaths index in pure Go.
+- `why-dependency` requires dependency provenance: captured automatically for Maven projects by `research4jar index`, and natively by the Gradle build plugin (`research4jarIndex`); the standalone CLI does not capture Gradle provenance.
 - `--fat-jar` is not implemented; extract `BOOT-INF/lib/*.jar` first.
 
 ## Verification
@@ -256,8 +262,9 @@ The suite includes generated cross-jar fixtures, fixed-version Spring golden jar
 - M3: build-tool/classpath discovery ✅ (pulled forward) and distribution foundations ✅
 - M4: host integrations and MCP ✅ (pulled forward)
 - M5: shard lifecycle — registry export/download with signing, LRU, and garbage collection ✅
+- [M6](docs/M6.md): pure-Java consolidation — one Kotlin codebase, Maven/Gradle build plugins, CLI daemon, Maven Central packaging ✅
 
-Next up: a hosted public registry of pre-indexed shards for popular Spring artifacts, and cross-platform packaged binaries via the release pipeline.
+Next up: the first Maven Central release (activating zero-install onboarding) and a hosted public registry of pre-indexed shards for popular Spring artifacts.
 
 ## Contributing
 

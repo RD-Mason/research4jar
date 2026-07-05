@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed (M6 pure-Java consolidation)
+
+- The entire toolchain is now one Kotlin/JVM codebase: the Go querier is retired and the single `research4jar` CLI (a Java 8+ fat jar) indexes, queries, and serves MCP. Query semantics, JSON shapes, flags, help texts, and exit codes are byte-compatible with the Go CLI (verified by side-by-side invocation and the full e2e suite driven through the JVM binary).
+- Queries now run on C SQLite (sqlite-jdbc): broad substring scans are ~7x faster than the previous pure-Go engine.
+- `search_symbols` became a view over the base tables and derived columns are computed set-based: the session database shrank ~64% (1.07 GB -> 387 MB on a 99-jar Spring Boot classpath) and cold indexing dropped 12.3 s -> ~5-8 s. search-symbol/find-class/find-method use index-backed fast paths first (typical broad search 960 ms -> ~30 ms end to end) with new prefix ranking tiers above the contains tier.
+- The indexer JVM defaults to -Xmx512m (peak RSS 2.09 GB -> ~0.8 GB); the runtime baseline dropped from Java 11 to Java 8.
+- `research4jar index` skips the `mvn dependency:tree` provenance run when the classpath fingerprint is unchanged.
+
+### Added (M6)
+
+- Maven plugin (`mvn dev.research4jar:research4jar-maven-plugin:index`) and Gradle plugin (`id("dev.research4jar")` -> `research4jarIndex`): zero-install onboarding through the build tool, classpath and dependency graph taken in-process from the build itself — **Gradle dependency provenance ships for the first time**.
+- CLI daemon: query commands round-trip in ~90 ms against a warm background JVM (token-authenticated loopback, 30-minute idle exit, byte-identical output; `RESEARCH4JAR_NO_DAEMON=1` opts out).
+- Maven Central publishing configuration for `research4jar-core`/`-cli`/`-gradle-plugin`/`-maven-plugin` (Central Portal; publication pending namespace verification).
+
+### Removed (M6)
+
+- The Go querier, goreleaser archives, and the Kotlin/Go dual-writer session contract (tagged `pre-m6-go` before removal).
+
+
 ### Added (general Java agent retrieval)
 
 - General Java queries: `find-class`, `find-method`, `list-packages`, `search-symbol`, and `open-symbol` let agents search and expand ordinary Java dependency facts, not just Spring-specific facts.
