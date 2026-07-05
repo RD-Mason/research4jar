@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and attach the fat jar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Build and verify
+        run: |
+          ./gradlew check :cli:shadowJar
+          make e2e
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            cli/build/libs/research4jar-cli-*.jar
+      # Maven Central publication needs the portal token + signing key secrets;
+      # run manually once the dev.research4jar namespace is verified:
+      #   ./gradlew publishAllPublicationsToMavenCentralRepository

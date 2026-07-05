@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${SPRINGDEP_INDEX:?SPRINGDEP_INDEX must point to springdep-index}"
-: "${SPRINGDEP_QUERY:?SPRINGDEP_QUERY must point to springdep}"
+: "${RESEARCH4JAR_INDEX:?RESEARCH4JAR_INDEX must point to research4jar-index}"
+: "${RESEARCH4JAR_QUERY:?RESEARCH4JAR_QUERY must point to research4jar}"
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/springdep-e2e.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d "${TMPDIR:-/tmp}/research4jar-e2e.XXXXXX")"
+registry_server=""
+trap '[ -n "$registry_server" ] && kill "$registry_server" 2>/dev/null; rm -rf "$work"' EXIT
 
 jars="$work/jars"
 project="$work/project"
@@ -28,6 +29,16 @@ cat > "$api_src/example/Contract.java" <<'EOF'
 package example;
 public interface Contract {}
 EOF
+cat > "$api_src/example/MetaMarker.java" <<'EOF'
+package example;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+@Retention(RetentionPolicy.CLASS)
+@Target(ElementType.ANNOTATION_TYPE)
+public @interface MetaMarker {}
+EOF
 cat > "$api_src/example/Marker.java" <<'EOF'
 package example;
 import java.lang.annotation.ElementType;
@@ -36,11 +47,13 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 @Retention(RetentionPolicy.CLASS)
 @Target(ElementType.TYPE)
+@MetaMarker
 public @interface Marker {
   String value();
 }
 EOF
-javac -d "$api_classes" "$api_src/example/Contract.java" "$api_src/example/Marker.java"
+javac -d "$api_classes" "$api_src/example/Contract.java" \
+  "$api_src/example/Marker.java" "$api_src/example/MetaMarker.java"
 cat > "$api_classes/META-INF/maven/com.example/api/pom.properties" <<'EOF'
 groupId=com.example
 artifactId=api
@@ -56,10 +69,10 @@ package other;
 import example.Contract;
 import example.Marker;
 @Marker("direct")
-public final class DirectImplementation implements Contract {
-  public static final String HEADER = "X-SpringDep-Test";
+public class DirectImplementation implements Contract {
+  public static final String HEADER = "X-Research4Jar-Test";
   public String value() {
-    return "springdep.fixture.enabled";
+    return "research4jar.fixture.enabled";
   }
 }
 EOF
@@ -71,6 +84,71 @@ artifactId=implementation
 version=1.0
 EOF
 make_jar "$impl_classes" "$jars/implementation.jar"
+
+# A third jar whose class only reaches example.Contract through the
+# superclass chain — exercises the M2 transitive closure across jars.
+deep_src="$work/deep-src"
+deep_classes="$work/deep-classes"
+mkdir -p "$deep_src/deep" "$deep_classes"
+cat > "$deep_src/deep/Indirect.java" <<'EOF'
+package deep;
+import other.DirectImplementation;
+public final class Indirect extends DirectImplementation {}
+EOF
+javac -cp "$jars/api.jar:$jars/implementation.jar" -d "$deep_classes" \
+  "$deep_src/deep/Indirect.java"
+make_jar "$deep_classes" "$jars/deep.jar"
+
+# Fake Spring annotations compiled under the real FQNs let the e2e cover
+# @Bean and @ConditionalOn* extraction without shipping Spring jars.
+cfg_src="$work/cfg-src"
+cfg_classes="$work/cfg-classes"
+mkdir -p \
+  "$cfg_src/org/springframework/context/annotation" \
+  "$cfg_src/org/springframework/boot/autoconfigure/condition" \
+  "$cfg_src/cfg"
+cat > "$cfg_src/org/springframework/context/annotation/Bean.java" <<'EOF'
+package org.springframework.context.annotation;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+@Retention(RetentionPolicy.CLASS)
+@Target(ElementType.METHOD)
+public @interface Bean {
+  String[] name() default {};
+}
+EOF
+cat > "$cfg_src/org/springframework/boot/autoconfigure/condition/ConditionalOnClass.java" <<'EOF'
+package org.springframework.boot.autoconfigure.condition;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+@Retention(RetentionPolicy.CLASS)
+@Target({ElementType.TYPE, ElementType.METHOD})
+public @interface ConditionalOnClass {
+  String[] value() default {};
+}
+EOF
+cat > "$cfg_src/cfg/DemoConfiguration.java" <<'EOF'
+package cfg;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.context.annotation.Bean;
+@ConditionalOnClass({"javax.sql.DataSource"})
+public class DemoConfiguration {
+  @ConditionalOnClass({"java.util.List"})
+  @Bean(name = {"demoBean"})
+  public String demo() {
+    return "demo";
+  }
+}
+EOF
+javac -d "$cfg_classes" \
+  "$cfg_src/org/springframework/context/annotation/Bean.java" \
+  "$cfg_src/org/springframework/boot/autoconfigure/condition/ConditionalOnClass.java" \
+  "$cfg_src/cfg/DemoConfiguration.java"
+make_jar "$cfg_classes" "$jars/demo-config.jar"
 
 legacy_home="$work/legacy-home"
 legacy_project="$work/legacy-project"
@@ -110,7 +188,7 @@ INSERT INTO shards VALUES (
   '$legacy_shard', '$legacy_checksum', 0, 0, 0, 'local'
 );
 SQL
-"$SPRINGDEP_INDEX" --jars "$jars/api.jar" --project-dir "$legacy_project" \
+"$RESEARCH4JAR_INDEX" --jars "$jars/api.jar" --project-dir "$legacy_project" \
   --home "$legacy_home" > "$work/version-invalidation.json"
 python3 - "$work/version-invalidation.json" "$legacy_home" "$api_sha" <<'PY'
 import json
@@ -201,27 +279,27 @@ printf 'not a zip archive\n' > "$jars/broken.jar"
 
 first_stats="$work/first-stats.json"
 first_warnings="$work/first-warnings.txt"
-"$SPRINGDEP_INDEX" \
+"$RESEARCH4JAR_INDEX" \
   --jars "$jars" \
   --project-dir "$project" \
   --home "$home1" \
   > "$first_stats" 2> "$first_warnings"
 
-python3 - "$first_stats" "$project/.springdep/project.json" <<'PY'
+python3 - "$first_stats" "$project/.research4jar/project.json" <<'PY'
 import json
 import pathlib
 import sys
 
 stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
 pointer = json.loads(pathlib.Path(sys.argv[2]).read_text())
-assert stats["jars_total"] == 7, stats
-assert stats["jars_indexed"] == 6, stats
-assert stats["jars_newly_indexed"] == 6, stats
+assert stats["jars_total"] == 9, stats
+assert stats["jars_indexed"] == 8, stats
+assert stats["jars_newly_indexed"] == 8, stats
 assert stats["jars_skipped"] == 0, stats
 assert stats["jars_missing"] == ["broken.jar"], stats
 assert pointer["coverage"] == {
-    "jars_total": 7,
-    "jars_indexed": 6,
+    "jars_total": 9,
+    "jars_indexed": 8,
     "jars_missing": ["broken.jar"],
 }, pointer
 assert len(pointer["classpath_fingerprint"]) == 16, pointer
@@ -230,15 +308,15 @@ PY
 
 grep -q 'failed to parse META-INF/spring-configuration-metadata.json' "$first_warnings"
 grep -q 'broken.jar: invalid or unreadable jar' "$first_warnings"
-test "$(find "$home1/shards" -name '*.db' | wc -l | tr -d ' ')" = "6"
+test "$(find "$home1/shards" -name '*.db' | wc -l | tr -d ' ')" = "8"
 test -f "$home1/manifest.db"
-test -f "$project/.springdep/project.json"
+test -f "$project/.research4jar/project.json"
 grep -q '^# Existing project instructions' "$project/CLAUDE.md"
-test "$(grep -c '^## SpringDep（jar 配置项查询）$' "$project/CLAUDE.md")" = "1"
+test "$(grep -c '^## Research4Jar（Java 依赖事实查询）$' "$project/CLAUDE.md")" = "1"
 
 query_json="$work/query.json"
 (cd "$project/nested/work" && \
-  "$SPRINGDEP_QUERY" find-config-properties spring.datasource --page-size 10 > "$query_json")
+  "$RESEARCH4JAR_QUERY" find-config-properties spring.datasource --page-size 10 > "$query_json")
 python3 - "$query_json" <<'PY'
 import json
 import pathlib
@@ -254,15 +332,15 @@ assert response["results"][0]["default"] == "10", response
 assert response["results"][0]["source_jar"] == \
     "org.springframework.boot:spring-boot-autoconfigure:3.2.0", response
 assert response["coverage"] == {
-    "jars_total": 7,
-    "jars_indexed": 6,
+    "jars_total": 9,
+    "jars_indexed": 8,
     "jars_missing": ["broken.jar"],
     "extractor_version": 2,
 }, response
 PY
 
 private_json="$work/private-query.json"
-"$SPRINGDEP_QUERY" find-config-properties private.feature \
+"$RESEARCH4JAR_QUERY" find-config-properties private.feature \
   --project-dir "$project" > "$private_json"
 python3 - "$private_json" <<'PY'
 import json
@@ -274,7 +352,7 @@ assert response["results"][0]["source_jar"] == "private-config.jar", response
 assert response["results"][0]["default"] == "false", response
 PY
 
-session_db="$(python3 - "$project/.springdep/project.json" <<'PY'
+session_db="$(python3 - "$project/.research4jar/project.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -289,7 +367,7 @@ test "$(sqlite3 "$session_db" \
   "SELECT COUNT(*) FROM classes WHERE fqn='other.DirectImplementation';")" = "1"
 
 implementations_json="$work/implementations-query.json"
-"$SPRINGDEP_QUERY" find-implementations example.Contract \
+"$RESEARCH4JAR_QUERY" find-implementations example.Contract \
   --project-dir "$project" > "$implementations_json"
 python3 - "$implementations_json" <<'PY'
 import json
@@ -301,16 +379,33 @@ assert response["query"] == {
     "command": "find-implementations",
     "arg": "example.Contract",
 }, response
+# Transitive by default: deep.Indirect reaches Contract only through
+# other.DirectImplementation, which lives in a different jar.
+assert response["total"] == 2, response
+assert [item["fqn"] for item in response["results"]] == [
+    "deep.Indirect",
+    "other.DirectImplementation",
+], response
+assert response["results"][0]["source_jar"] == "deep.jar", response
+assert response["results"][1]["source_jar"] == "com.example:implementation:1.0", response
+PY
+
+direct_impl_json="$work/direct-implementations-query.json"
+"$RESEARCH4JAR_QUERY" find-implementations example.Contract --direct \
+  --project-dir "$project" > "$direct_impl_json"
+python3 - "$direct_impl_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["query"]["direct"] is True, response
 assert response["total"] == 1, response
-assert response["results"] == [{
-    "fqn": "other.DirectImplementation",
-    "source_jar": "com.example:implementation:1.0",
-    "attributes": None,
-}], response
+assert response["results"][0]["fqn"] == "other.DirectImplementation", response
 PY
 
 annotation_json="$work/annotation-query.json"
-"$SPRINGDEP_QUERY" find-by-annotation example.Marker \
+"$RESEARCH4JAR_QUERY" find-by-annotation example.Marker \
   --project-dir "$project" > "$annotation_json"
 python3 - "$annotation_json" <<'PY'
 import json
@@ -323,11 +418,266 @@ assert response["results"][0] == {
     "fqn": "other.DirectImplementation",
     "source_jar": "com.example:implementation:1.0",
     "attributes": {"value": "direct"},
+    "matched_annotation": "example.Marker",
 }, response
 PY
 
+meta_annotation_json="$work/meta-annotation-query.json"
+"$RESEARCH4JAR_QUERY" find-by-annotation example.MetaMarker \
+  --project-dir "$project" > "$meta_annotation_json"
+python3 - "$meta_annotation_json" <<'PY'
+import json
+import pathlib
+import sys
+
+# @Marker is itself annotated @MetaMarker, so querying @MetaMarker finds the
+# annotation type directly plus every @Marker class via meta-expansion.
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 2, response
+assert [
+    (item["fqn"], item["matched_annotation"]) for item in response["results"]
+] == [
+    ("example.Marker", "example.MetaMarker"),
+    ("other.DirectImplementation", "example.Marker"),
+], response
+PY
+
+class_json="$work/get-class.json"
+"$RESEARCH4JAR_QUERY" get-class other.DirectImplementation \
+  --project-dir "$project" > "$class_json"
+python3 - "$class_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+detail = response["results"][0]
+assert detail["kind"] == "class", detail
+assert detail["interfaces"] == ["example.Contract"], detail
+assert any(a["fqn"] == "example.Marker" for a in detail["annotations"]), detail
+assert any(m["name"] == "value" for m in detail["methods"]), detail
+PY
+
+find_class_json="$work/find-class.json"
+"$RESEARCH4JAR_QUERY" find-class DirectImplementation \
+  --project-dir "$project" > "$find_class_json"
+python3 - "$find_class_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+assert response["has_more"] is False, response
+result = response["results"][0]
+assert result["fqn"] == "other.DirectImplementation", result
+assert result["match_reason"] == "simple_name", result
+assert result["source_jar"] == "com.example:implementation:1.0", result
+PY
+
+find_method_json="$work/find-method.json"
+"$RESEARCH4JAR_QUERY" find-method other.DirectImplementation#value \
+  --project-dir "$project" > "$find_method_json"
+python3 - "$find_method_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+assert response["has_more"] is False, response
+method = response["results"][0]
+assert method["class_fqn"] == "other.DirectImplementation", method
+assert method["name"] == "value", method
+assert method["return"] == "java.lang.String", method
+PY
+
+packages_json="$work/list-packages.json"
+"$RESEARCH4JAR_QUERY" list-packages other \
+  --project-dir "$project" > "$packages_json"
+python3 - "$packages_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+assert response["has_more"] is False, response
+assert response["results"][0]["package"] == "other", response
+assert response["results"][0]["classes"] == 1, response
+PY
+
+search_symbol_json="$work/search-symbol.json"
+"$RESEARCH4JAR_QUERY" search-symbol research4jar.fixture \
+  --project-dir "$project" > "$search_symbol_json"
+python3 - "$search_symbol_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+assert response["has_more"] is False, response
+result = response["results"][0]
+assert result["kind"] == "string", result
+assert result["owner"] == "other.DirectImplementation", result
+PY
+
+open_symbol_json="$work/open-symbol.json"
+"$RESEARCH4JAR_QUERY" open-symbol other.DirectImplementation#value \
+  --project-dir "$project" > "$open_symbol_json"
+python3 - "$open_symbol_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+method = response["results"][0]["method"]
+assert method["class_fqn"] == "other.DirectImplementation", method
+assert method["name"] == "value", method
+PY
+
+cat > "$project/.research4jar/dependencies.json" <<'JSON'
+{
+  "schema_version": 1,
+  "build_tool": "maven",
+  "generated_at": 0,
+  "artifacts": [
+    {
+      "coordinate": "com.example:app:1.0",
+      "artifact": "com.example:app",
+      "group": "com.example",
+      "name": "app",
+      "version": "1.0",
+      "direct": false,
+      "depth": 0,
+      "path": []
+    },
+    {
+      "coordinate": "com.example:api:1.0",
+      "artifact": "com.example:api",
+      "group": "com.example",
+      "name": "api",
+      "version": "1.0",
+      "scope": "compile",
+      "parent": "com.example:app:1.0",
+      "direct": true,
+      "depth": 1,
+      "path": ["com.example:api:1.0"]
+    },
+    {
+      "coordinate": "com.example:implementation:1.0",
+      "artifact": "com.example:implementation",
+      "group": "com.example",
+      "name": "implementation",
+      "version": "1.0",
+      "scope": "runtime",
+      "parent": "com.example:api:1.0",
+      "direct": false,
+      "depth": 2,
+      "path": ["com.example:api:1.0", "com.example:implementation:1.0"]
+    }
+  ]
+}
+JSON
+why_dependency_json="$work/why-dependency.json"
+"$RESEARCH4JAR_QUERY" why-dependency other.DirectImplementation \
+  --project-dir "$project" > "$why_dependency_json"
+python3 - "$why_dependency_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+result = response["results"][0]
+assert result["coordinate"] == "com.example:implementation:1.0", result
+assert result["matched_by"] == "class", result
+assert result["path"] == [
+    "com.example:api:1.0",
+    "com.example:implementation:1.0",
+], result
+PY
+
+beans_json="$work/bean-definitions.json"
+"$RESEARCH4JAR_QUERY" get-bean-definitions java.lang.String \
+  --project-dir "$project" > "$beans_json"
+python3 - "$beans_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+bean = response["results"][0]
+assert bean["bean_name"] == "demoBean", bean
+assert bean["config_class"] == "cfg.DemoConfiguration", bean
+assert bean["conditions"] == [{
+    "target": "bean_method",
+    "type": "OnClass",
+    "ref_value": {"value": ["java.util.List"]},
+}], bean
+PY
+
+conditional_json="$work/explain-conditional.json"
+"$RESEARCH4JAR_QUERY" explain-conditional cfg.DemoConfiguration \
+  --project-dir "$project" > "$conditional_json"
+python3 - "$conditional_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+target = response["results"][0]
+assert target["class_conditions"] == [{
+    "target": "class",
+    "type": "OnClass",
+    "ref_value": {"value": ["javax.sql.DataSource"]},
+}], target
+assert len(target["bean_methods"]) == 1, target
+assert target["bean_methods"][0]["bean_name"] == "demoBean", target
+PY
+
+string_json="$work/find-string.json"
+"$RESEARCH4JAR_QUERY" find-string research4jar.fixture \
+  --project-dir "$project" > "$string_json"
+python3 - "$string_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 1, response
+constant = response["results"][0]
+assert constant["value"] == "research4jar.fixture.enabled", constant
+assert constant["class_fqn"] == "other.DirectImplementation", constant
+PY
+
+extensions_json="$work/extension-points.json"
+"$RESEARCH4JAR_QUERY" list-extension-points \
+  --project-dir "$project" > "$extensions_json"
+python3 - "$extensions_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+points = {
+    (item["mechanism"], item["key"]): item["implementations"]
+    for item in response["extension_points"]
+}
+assert points[("autoconfig.imports", None)] == 2, points
+assert points[(
+    "spring.factories",
+    "org.springframework.boot.autoconfigure.EnableAutoConfiguration",
+)] == 2, points
+PY
+
 second_stats="$work/second-stats.json"
-"$SPRINGDEP_INDEX" \
+"$RESEARCH4JAR_INDEX" \
   --jars "$jars" \
   --project-dir "$project" \
   --home "$home1" \
@@ -338,18 +688,18 @@ import pathlib
 import sys
 
 stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert stats["jars_total"] == 7, stats
-assert stats["jars_indexed"] == 6, stats
+assert stats["jars_total"] == 9, stats
+assert stats["jars_indexed"] == 8, stats
 assert stats["jars_newly_indexed"] == 0, stats
-assert stats["jars_skipped"] == 6, stats
+assert stats["jars_skipped"] == 8, stats
 assert stats["jars_missing"] == ["broken.jar"], stats
 PY
-test "$(grep -c '^## SpringDep（jar 配置项查询）$' "$project/CLAUDE.md")" = "1"
+test "$(grep -c '^## Research4Jar（Java 依赖事实查询）$' "$project/CLAUDE.md")" = "1"
 
 corrupt_shard="$(find "$home1/shards" -name '*.db' | sort | head -1)"
 printf 'corruption' >> "$corrupt_shard"
 rebuild_stats="$work/rebuild-stats.json"
-"$SPRINGDEP_INDEX" \
+"$RESEARCH4JAR_INDEX" \
   --jars "$jars" \
   --project-dir "$project" \
   --home "$home1" \
@@ -361,10 +711,10 @@ import sys
 
 stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert stats["jars_newly_indexed"] == 1, stats
-assert stats["jars_skipped"] == 5, stats
+assert stats["jars_skipped"] == 7, stats
 PY
 
-"$SPRINGDEP_INDEX" \
+"$RESEARCH4JAR_INDEX" \
   --jars "$jars" \
   --project-dir "$project2" \
   --home "$home2" \
@@ -374,10 +724,10 @@ for shard in "$home1"/shards/*.db; do
 done
 
 concurrent_home="$work/concurrent-home"
-"$SPRINGDEP_INDEX" --jars "$jars" --project-dir "$work/concurrent-project-a" \
+"$RESEARCH4JAR_INDEX" --jars "$jars" --project-dir "$work/concurrent-project-a" \
   --home "$concurrent_home" > "$work/concurrent-a.json" 2> "$work/concurrent-a.err" &
 pid_a=$!
-"$SPRINGDEP_INDEX" --jars "$jars" --project-dir "$work/concurrent-project-b" \
+"$RESEARCH4JAR_INDEX" --jars "$jars" --project-dir "$work/concurrent-project-b" \
   --home "$concurrent_home" > "$work/concurrent-b.json" 2> "$work/concurrent-b.err" &
 pid_b=$!
 wait "$pid_a"
@@ -387,8 +737,55 @@ for database in "$concurrent_home"/shards/*.db "$concurrent_home"/sessions/*.db;
   test "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = "ok"
 done
 
+# The Go CLI drives the JVM indexer end to end (research4jar index).
+cli_index_project="$work/cli-index-project"
+cli_index_home="$work/cli-index-home"
+mkdir -p "$cli_index_project"
+"$RESEARCH4JAR_QUERY" index --jars "$jars/api.jar" \
+  --project-dir "$cli_index_project" --home "$cli_index_home" \
+  --indexer "$RESEARCH4JAR_INDEX" > "$work/cli-index-stats.json" 2> /dev/null
+python3 - "$work/cli-index-stats.json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["jars_indexed"] == 1, stats
+PY
+test -f "$cli_index_project/.research4jar/project.json"
+
+# MCP stdio handshake: initialize, list tools, call a query tool.
+mcp_output="$work/mcp-output.jsonl"
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"find_implementations\",\"arguments\":{\"fqn\":\"example.Contract\",\"project_dir\":\"$project\"}}}"
+} | "$RESEARCH4JAR_QUERY" mcp > "$mcp_output"
+python3 - "$mcp_output" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = [
+    json.loads(line)
+    for line in pathlib.Path(sys.argv[1]).read_text().splitlines()
+    if line.strip()
+]
+assert len(lines) == 3, lines
+by_id = {item["id"]: item for item in lines}
+assert by_id[1]["result"]["serverInfo"]["name"] == "research4jar", lines
+tool_names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
+assert {"check_environment", "index_project", "find_implementations", "get_class"} <= tool_names, tool_names
+call = by_id[3]["result"]
+assert not call.get("isError"), call
+payload = json.loads(call["content"][0]["text"])
+assert payload["total"] == 2, payload
+assert payload["results"][0]["fqn"] == "deep.Indirect", payload
+PY
+
 error_json="$work/error.json"
-if (cd "$work" && "$SPRINGDEP_QUERY" find-config-properties spring.datasource > "$error_json"); then
+if (cd "$work" && "$RESEARCH4JAR_QUERY" find-config-properties spring.datasource > "$error_json"); then
   echo "query unexpectedly succeeded without a project index" >&2
   exit 1
 fi
@@ -401,4 +798,206 @@ response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["error"] == "no_project_index", response
 PY
 
-echo "SpringDep M1 end-to-end checks passed."
+# --- M5: signed registry export, prefetch-only index, cache stats and GC ---
+registry_dir="$work/registry"
+keygen_json="$work/keygen.json"
+"$RESEARCH4JAR_QUERY" registry keygen "$work/keys/signing.key" > "$keygen_json"
+pubkey="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["public_key"])' "$keygen_json")"
+
+export_json="$work/export.json"
+"$RESEARCH4JAR_QUERY" registry export "$registry_dir" \
+  --sign-key "$work/keys/signing.key" --home "$home1" > "$export_json"
+python3 - "$export_json" <<'PY'
+import json
+import pathlib
+import sys
+
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert result["exported"] >= 3, result
+assert result["signed"] is True, result
+PY
+
+port_file="$work/registry-port"
+python3 - "$registry_dir" "$port_file" <<'PY' &
+import functools
+import http.server
+import pathlib
+import socketserver
+import sys
+
+handler = functools.partial(
+    http.server.SimpleHTTPRequestHandler, directory=sys.argv[1]
+)
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("127.0.0.1", 0), handler) as httpd:
+    pathlib.Path(sys.argv[2]).write_text(str(httpd.server_address[1]))
+    httpd.serve_forever()
+PY
+registry_server=$!
+for _ in $(seq 1 50); do
+  [ -s "$port_file" ] && break
+  sleep 0.1
+done
+[ -s "$port_file" ] || { echo "registry server did not start" >&2; exit 1; }
+registry_port="$(cat "$port_file")"
+
+home3="$work/home3"
+project3="$work/project3"
+mkdir -p "$project3"
+index3_json="$work/index3.json"
+index3_err="$work/index3.err"
+# --indexer points at nothing: a registry-covered classpath must finish in
+# pure Go without ever launching the JVM indexer. broken.jar (not a zip) can
+# never have a shard, so the covered set lists every jar except it.
+covered_jars="$(ls "$jars"/*.jar | grep -v broken.jar | paste -sd, -)"
+if ! "$RESEARCH4JAR_QUERY" index --jars "$covered_jars" --project-dir "$project3" --home "$home3" \
+  --registry "http://127.0.0.1:$registry_port" --registry-pubkey "$pubkey" \
+  --indexer /nonexistent/research4jar-index \
+  > "$index3_json" 2> "$index3_err"; then
+  echo "registry-backed index failed:" >&2
+  cat "$index3_json" "$index3_err" >&2
+  exit 1
+fi
+
+mcp_registry_project="$work/mcp-registry-project"
+mcp_registry_home="$work/mcp-registry-home"
+mcp_registry_output="$work/mcp-registry-output.jsonl"
+mkdir -p "$mcp_registry_project"
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"index_project\",\"arguments\":{\"project_dir\":\"$mcp_registry_project\",\"home\":\"$mcp_registry_home\",\"jars\":\"$covered_jars\",\"registry\":\"http://127.0.0.1:$registry_port\",\"registry_pubkey\":\"$pubkey\",\"indexer\":\"/nonexistent/research4jar-index\"}}}"
+} | "$RESEARCH4JAR_QUERY" mcp > "$mcp_registry_output"
+python3 - "$mcp_registry_output" "$mcp_registry_project" <<'PY'
+import json
+import pathlib
+import sys
+
+lines = [
+    json.loads(line)
+    for line in pathlib.Path(sys.argv[1]).read_text().splitlines()
+    if line.strip()
+]
+assert len(lines) == 2, lines
+by_id = {item["id"]: item for item in lines}
+call = by_id[2]["result"]
+assert not call.get("isError"), call
+payload = json.loads(call["content"][0]["text"])
+assert payload["status"] == "indexed", payload
+assert payload["index_mode"] == "registry", payload
+assert payload["registry_prefetch"]["complete"] is True, payload
+assert pathlib.Path(sys.argv[2], ".research4jar", "project.json").is_file(), payload
+PY
+
+# Partial coverage (broken.jar can have no shard) must fall back to the JVM
+# indexer, which then skips every cached shard and reports the broken jar.
+project4="$work/project4"
+mkdir -p "$project4"
+index4_json="$work/index4.json"
+"$RESEARCH4JAR_QUERY" index --jars "$jars" --project-dir "$project4" --home "$home3" \
+  --registry "http://127.0.0.1:$registry_port" --registry-pubkey "$pubkey" \
+  > "$index4_json" 2> "$work/index4.err"
+python3 - "$index4_json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["jars_newly_indexed"] == 0, stats
+assert stats["jars_missing"] == ["broken.jar"], stats
+PY
+
+kill "$registry_server" 2>/dev/null || true
+registry_server=""
+grep -q "downloaded" "$index3_err" || {
+  echo "expected prefetch summary on stderr:" >&2
+  cat "$index3_err" >&2
+  exit 1
+}
+grep -q "no local extraction" "$index3_err" || {
+  echo "expected the pure-Go session build path:" >&2
+  cat "$index3_err" >&2
+  exit 1
+}
+python3 - "$index3_json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["jars_newly_indexed"] == 0, stats
+assert stats["jars_skipped"] == stats["jars_indexed"], stats
+assert stats["jars_indexed"] >= 3, stats
+PY
+
+registry_query_json="$work/registry-query.json"
+"$RESEARCH4JAR_QUERY" find-implementations example.Contract \
+  --project-dir "$project3" > "$registry_query_json"
+python3 - "$registry_query_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] == 2, response
+PY
+
+registry_string_json="$work/registry-string.json"
+"$RESEARCH4JAR_QUERY" find-string X-Research4Jar-Test \
+  --project-dir "$project3" > "$registry_string_json"
+python3 - "$registry_string_json" <<'PY'
+import json
+import pathlib
+import sys
+
+response = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert response["total"] >= 1, response
+PY
+
+# The Go-written CLAUDE.md snippet must stay byte-identical to the Kotlin one
+# (both writers dedupe by heading, so drift would double-append).
+python3 - "$project/CLAUDE.md" "$project3/CLAUDE.md" <<'PY'
+import pathlib
+import sys
+
+heading = "## Research4Jar（Java 依赖事实查询）"
+kotlin_written = pathlib.Path(sys.argv[1]).read_text()
+go_written = pathlib.Path(sys.argv[2]).read_text()
+kotlin_snippet = kotlin_written[kotlin_written.index(heading):]
+go_snippet = go_written[go_written.index(heading):]
+assert kotlin_snippet == go_snippet, (
+    "CLAUDE.md snippet drift between Kotlin and Go writers:\n"
+    f"kotlin: {kotlin_snippet!r}\ngo: {go_snippet!r}"
+)
+PY
+
+stats_json="$work/cache-stats.json"
+"$RESEARCH4JAR_QUERY" cache stats --home "$home3" > "$stats_json"
+python3 - "$stats_json" <<'PY'
+import json
+import pathlib
+import sys
+
+stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert stats["shard_count"] >= 3, stats
+assert stats["shards_remote"] == stats["shard_count"], stats
+PY
+
+touch "$home3/shards/deadbeef@2.db"
+gc_json="$work/cache-gc.json"
+"$RESEARCH4JAR_QUERY" cache gc --home "$home3" > "$gc_json"
+python3 - "$gc_json" <<'PY'
+import json
+import pathlib
+import sys
+
+result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert result["removed_orphans"] == 1, result
+assert result["remaining_shards"] >= 3, result
+PY
+if [ -e "$home3/shards/deadbeef@2.db" ]; then
+  echo "cache gc left the orphan shard file behind" >&2
+  exit 1
+fi
+
+echo "Research4Jar M2 + M5 end-to-end checks passed."

@@ -1,0 +1,68 @@
+name: Publish shard registry
+
+# Seeds the official Research4Jar shard registry from registry/spring-coordinates.txt
+# and publishes it to GitHub Pages. The registry URL is then:
+#   https://<owner>.github.io/<repo>/
+# Configure clients with:
+#   RESEARCH4JAR_REGISTRY=https://<owner>.github.io/<repo>
+#   RESEARCH4JAR_REGISTRY_PUBKEY=<public key printed when the signing key was generated>
+#
+# Signing: set the repository secret RESEARCH4JAR_SIGNING_KEY to the hex private
+# key produced by `research4jar registry keygen`. Without the secret the registry
+# publishes unsigned (clients without a configured pubkey still verify the
+# checksum sidecar and the shard's embedded identity).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - registry/spring-coordinates.txt
+      - .github/workflows/registry-publish.yml
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    name: Seed and publish
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Build
+        run: make build
+      - name: Seed registry
+        env:
+          RESEARCH4JAR_SIGNING_KEY: ${{ secrets.RESEARCH4JAR_SIGNING_KEY }}
+        run: |
+          sign_args=()
+          if [ -n "$RESEARCH4JAR_SIGNING_KEY" ]; then
+            printf '%s\n' "$RESEARCH4JAR_SIGNING_KEY" > /tmp/signing.key
+            chmod 600 /tmp/signing.key
+            sign_args=(--sign-key /tmp/signing.key)
+          fi
+          java -jar cli/build/libs/research4jar-cli-*.jar registry seed ./_site \
+            --coordinates registry/spring-coordinates.txt \
+            --home /tmp/research4jar-seed-home \
+            "${sign_args[@]}"
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
