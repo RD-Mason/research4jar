@@ -28,6 +28,26 @@ data class CachedDigest(
     val sha256: String,
 )
 
+/**
+ * A complete manifest row, mirroring the Go manifest.Shard struct field for
+ * field (NULL integers read as 0, NULL source as ""). Added for the
+ * registry/cache lifecycle port, whose export and GC passes need every
+ * column; [ManifestShard] stays the narrower shape the indexer reuses.
+ */
+data class ManifestRow(
+    val shardId: String,
+    val jarCoordinate: String?,
+    val jarFilename: String,
+    val jarSha256: String,
+    val extractorVersion: Int,
+    val shardPath: String,
+    val shardChecksum: String?,
+    val sizeBytes: Long,
+    val createdAt: Long,
+    val lastAccessAt: Long,
+    val source: String,
+)
+
 class Manifest(
     private val path: Path,
 ) {
@@ -64,6 +84,43 @@ class Manifest(
     }
 
     /**
+     * Returns every shard row ordered by last access (oldest first), the
+     * order LRU eviction consumes. Added for the registry/cache lifecycle
+     * port; mirrors Go manifest.DB.List.
+     */
+    fun list(): List<ManifestRow> = connect().use { connection ->
+        connection.prepareStatement(
+            """
+            SELECT shard_id, jar_coordinate, jar_filename, jar_sha256,
+                   extractor_version, shard_path, shard_checksum, size_bytes,
+                   created_at, last_access_at, source
+            FROM shards
+            ORDER BY last_access_at ASC, shard_id ASC
+            """.trimIndent(),
+        ).use { statement ->
+            statement.executeQuery().use { result ->
+                val rows = mutableListOf<ManifestRow>()
+                while (result.next()) {
+                    rows += ManifestRow(
+                        shardId = result.getString("shard_id"),
+                        jarCoordinate = result.getString("jar_coordinate"),
+                        jarFilename = result.getString("jar_filename"),
+                        jarSha256 = result.getString("jar_sha256"),
+                        extractorVersion = result.getInt("extractor_version"),
+                        shardPath = result.getString("shard_path"),
+                        shardChecksum = result.getString("shard_checksum"),
+                        sizeBytes = result.getLong("size_bytes"),
+                        createdAt = result.getLong("created_at"),
+                        lastAccessAt = result.getLong("last_access_at"),
+                        source = result.getString("source") ?: "",
+                    )
+                }
+                rows
+            }
+        }
+    }
+
+    /**
      * Refreshes last_access_at for shards reused from the cache so LRU
      * garbage collection evicts genuinely unused shards first.
      */
@@ -93,6 +150,12 @@ class Manifest(
         }
     }
 
+    /**
+     * Inserts a shard row; an existing row for the same id is left untouched.
+     * [source] and [extractorVersion] default to the indexer's local-build
+     * values; the registry prefetch port passes source="remote" and the
+     * registry's extractor version (mirrors Go manifest.DB.Register).
+     */
     fun register(
         shardId: String,
         coordinate: String?,
@@ -101,6 +164,8 @@ class Manifest(
         shardPath: Path,
         shardChecksum: String,
         sizeBytes: Long,
+        source: String = "local",
+        extractorVersion: Int = Research4JarVersions.EXTRACTOR,
     ) {
         val now = Instant.now().epochSecond
         connect().use { connection ->
@@ -109,19 +174,20 @@ class Manifest(
                 INSERT OR IGNORE INTO shards(
                   shard_id, jar_coordinate, jar_filename, jar_sha256, extractor_version,
                   shard_path, shard_checksum, size_bytes, created_at, last_access_at, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'local')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
             ).use { statement ->
                 statement.setString(1, shardId)
                 statement.setString(2, coordinate)
                 statement.setString(3, jarFilename)
                 statement.setString(4, jarSha256)
-                statement.setInt(5, Research4JarVersions.EXTRACTOR)
+                statement.setInt(5, extractorVersion)
                 statement.setString(6, shardPath.toAbsolutePath().normalize().toString())
                 statement.setString(7, shardChecksum)
                 statement.setLong(8, sizeBytes)
                 statement.setLong(9, now)
                 statement.setLong(10, now)
+                statement.setString(11, source)
                 statement.executeUpdate()
             }
         }
