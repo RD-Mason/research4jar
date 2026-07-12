@@ -1,15 +1,19 @@
 package dev.research4jar.query
 
-import dev.research4jar.indexer.store.DERIVED_COLUMN_UPDATES
+import dev.research4jar.indexer.store.PACKAGE_NAME_EXPR
+import dev.research4jar.indexer.store.SIMPLE_NAME_EXPR
 import java.sql.DriverManager
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 /**
- * Proves the set-based derived-column SQL (the rtrim/substr trick) is exact
- * lastIndexOf('.') semantics by running the production statements from
- * [DERIVED_COLUMN_UPDATES] against edge-case FQNs and comparing with the
- * Kotlin reference split.
+ * Proves the derived-column SQL (the rtrim/substr trick) is exact
+ * lastIndexOf('.') semantics by running the production expressions from
+ * [SIMPLE_NAME_EXPR]/[PACKAGE_NAME_EXPR] against edge-case FQNs in the same
+ * INSERT...SELECT shape the merge uses, and comparing with the Kotlin
+ * reference split. Also covers the LEFT JOIN symbol computation, including
+ * the orphaned-method case (missing class row → NULL symbol).
  */
 class DerivedColumnsSqlTest {
     private val edgeCases = listOf(
@@ -32,13 +36,19 @@ class DerivedColumnsSqlTest {
         DriverManager.getConnection("jdbc:sqlite::memory:").use { connection ->
             connection.createStatement().use { statement ->
                 statement.execute(
+                    "CREATE TABLE shard_classes (id INTEGER PRIMARY KEY, fqn TEXT NOT NULL)",
+                )
+                statement.execute(
+                    "CREATE TABLE shard_methods (id INTEGER PRIMARY KEY, class_id INTEGER NOT NULL, name TEXT NOT NULL)",
+                )
+                statement.execute(
                     "CREATE TABLE classes (id INTEGER PRIMARY KEY, fqn TEXT NOT NULL, simple_name TEXT, package_name TEXT)",
                 )
                 statement.execute(
                     "CREATE TABLE methods (id INTEGER PRIMARY KEY, class_id INTEGER NOT NULL, name TEXT NOT NULL, symbol TEXT)",
                 )
             }
-            connection.prepareStatement("INSERT INTO classes(id, fqn) VALUES (?, ?)").use { insert ->
+            connection.prepareStatement("INSERT INTO shard_classes(id, fqn) VALUES (?, ?)").use { insert ->
                 edgeCases.forEachIndexed { index, fqn ->
                     insert.setInt(1, index + 1)
                     insert.setString(2, fqn)
@@ -46,7 +56,7 @@ class DerivedColumnsSqlTest {
                 }
             }
             connection.prepareStatement(
-                "INSERT INTO methods(id, class_id, name) VALUES (?, ?, ?)",
+                "INSERT INTO shard_methods(id, class_id, name) VALUES (?, ?, ?)",
             ).use { insert ->
                 edgeCases.forEachIndexed { index, _ ->
                     insert.setInt(1, index + 1)
@@ -54,10 +64,33 @@ class DerivedColumnsSqlTest {
                     insert.setString(3, "method$index")
                     insert.executeUpdate()
                 }
+                // Orphaned method: class_id points at no class row. The merge's
+                // LEFT JOIN must keep the row and leave symbol NULL, exactly
+                // like the pre-M6 UPDATE's scalar subquery did.
+                insert.setInt(1, edgeCases.size + 1)
+                insert.setInt(2, 9999)
+                insert.setString(3, "orphan")
+                insert.executeUpdate()
             }
 
             connection.createStatement().use { statement ->
-                DERIVED_COLUMN_UPDATES.forEach { statement.executeUpdate(it) }
+                statement.executeUpdate(
+                    """
+                    INSERT INTO classes(fqn, simple_name, package_name)
+                    SELECT fqn, $SIMPLE_NAME_EXPR, $PACKAGE_NAME_EXPR
+                    FROM shard_classes
+                    ORDER BY id
+                    """.trimIndent(),
+                )
+                statement.executeUpdate(
+                    """
+                    INSERT INTO methods(class_id, name, symbol)
+                    SELECT m.class_id, m.name, c.fqn || '#' || m.name
+                    FROM shard_methods m
+                    LEFT JOIN shard_classes c ON c.id = m.class_id
+                    ORDER BY m.id
+                    """.trimIndent(),
+                )
             }
 
             connection.createStatement().use { statement ->
@@ -73,12 +106,14 @@ class DerivedColumnsSqlTest {
                     }
                 }
                 statement.executeQuery(
-                    "SELECT m.symbol, c.fqn, m.name FROM methods m JOIN classes c ON c.id = m.class_id ORDER BY m.id",
+                    "SELECT symbol FROM methods ORDER BY id",
                 ).use { rows ->
                     edgeCases.forEachIndexed { index, fqn ->
                         rows.next()
                         assertEquals("$fqn#method$index", rows.getString(1), "symbol for $fqn")
                     }
+                    rows.next()
+                    assertNull(rows.getString(1), "orphaned method must keep a NULL symbol")
                 }
             }
         }

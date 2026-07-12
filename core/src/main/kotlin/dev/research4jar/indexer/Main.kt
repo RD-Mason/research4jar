@@ -274,6 +274,7 @@ private fun executeIndex(options: Options): IndexStatistics {
         objectMapper,
     )
     ProjectPointer.ensureClaudeInstructions(options.projectDir)
+    sweepStaleSessions(dataPaths)
 
     return IndexStatistics(
         jars_total = jarsTotal,
@@ -339,6 +340,39 @@ private fun warn(message: String) {
 // Progress goes to stderr; stdout carries only the final stats JSON that
 // agents parse. PrintStream.println is synchronized, so concurrent extraction
 // workers never interleave a line.
+/**
+ * Every index run sweeps sessions whose mtime (refreshed on each index reuse
+ * and query open, so it approximates last use) is older than
+ * RESEARCH4JAR_SESSION_MAX_AGE (default 30d; "off" or "0" disables). Old
+ * sessions otherwise accumulate one multi-hundred-MB file per classpath
+ * change with nothing reclaiming them; the swept ones rebuild from cached
+ * shards in seconds if a project still needs them.
+ */
+private fun sweepStaleSessions(dataPaths: DataPaths) {
+    val configured = System.getenv("RESEARCH4JAR_SESSION_MAX_AGE")?.trim()
+    if (configured != null && (configured.equals("off", ignoreCase = true) || configured == "0")) {
+        return
+    }
+    val maxAge = if (configured.isNullOrEmpty()) {
+        Duration.ofDays(30)
+    } else {
+        try {
+            dev.research4jar.cache.parseAge(configured)
+        } catch (exception: IllegalArgumentException) {
+            warn("RESEARCH4JAR_SESSION_MAX_AGE: ${exception.message}; using default 30d")
+            Duration.ofDays(30)
+        }
+    }
+    val sweep = dev.research4jar.cache.collectStaleSessions(dataPaths, maxAge)
+    if (sweep.removed > 0) {
+        val reclaimedMb = sweep.reclaimedBytes / (1024 * 1024)
+        progress(
+            "removed ${sweep.removed} stale session(s), reclaimed ${reclaimedMb}MB " +
+                "(unused for ${maxAge.toDays()}d; set RESEARCH4JAR_SESSION_MAX_AGE=off to keep them)",
+        )
+    }
+}
+
 private fun progress(message: String) {
     System.err.println("research4jar-index: $message")
 }

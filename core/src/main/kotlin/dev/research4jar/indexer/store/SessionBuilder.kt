@@ -12,30 +12,23 @@ data class SessionShard(
 )
 
 /**
- * The set-based derived-column statements, exposed for the unit test that
- * proves the rtrim/substr SQL is exact lastIndexOf('.') semantics. The rtrim
- * trick: its second argument is a character SET, so trimming every non-dot
- * character strips exactly the rightmost run of non-dot characters, leaving
- * the prefix up to and including the last dot.
+ * The derived-column expressions, exposed for the unit test that proves the
+ * rtrim/substr SQL is exact lastIndexOf('.') semantics. The rtrim trick: its
+ * second argument is a character SET, so trimming every non-dot character
+ * strips exactly the rightmost run of non-dot characters, leaving the prefix
+ * up to and including the last dot.
+ *
+ * These are computed inline in the merge INSERT...SELECT (they read the bare
+ * `fqn` column of whatever table the enclosing statement scans) rather than
+ * by a post-merge UPDATE pass: the UPDATE rewrote every row of the two
+ * largest session tables, which cost more than the whole shard merge itself.
  */
-internal val DERIVED_COLUMN_UPDATES = listOf(
-    """
-    UPDATE classes SET
-      simple_name = CASE
-        WHEN instr(fqn, '.') = 0 THEN fqn
-        ELSE substr(fqn, length(rtrim(fqn, replace(fqn, '.', ''))) + 1)
-      END,
-      package_name = CASE
-        WHEN instr(fqn, '.') = 0 THEN ''
-        ELSE substr(fqn, 1, length(rtrim(fqn, replace(fqn, '.', ''))) - 1)
-      END
-    """.trimIndent(),
-    """
-    UPDATE methods SET symbol = (
-      SELECT c.fqn FROM classes c WHERE c.id = methods.class_id
-    ) || '#' || name
-    """.trimIndent(),
-)
+internal const val SIMPLE_NAME_EXPR =
+    "CASE WHEN instr(fqn, '.') = 0 THEN fqn " +
+        "ELSE substr(fqn, length(rtrim(fqn, replace(fqn, '.', ''))) + 1) END"
+internal const val PACKAGE_NAME_EXPR =
+    "CASE WHEN instr(fqn, '.') = 0 THEN '' " +
+        "ELSE substr(fqn, 1, length(rtrim(fqn, replace(fqn, '.', ''))) - 1) END"
 
 class SessionBuilder {
     /**
@@ -46,7 +39,20 @@ class SessionBuilder {
      * check and are rebuilt.
      */
     fun buildIfAbsent(target: Path, shards: List<SessionShard>) {
-        if (isReusable(target)) return
+        if (isReusable(target)) {
+            // Session mtime doubles as the last-use marker for the automatic
+            // stale-session sweep; refresh it so an actively indexed
+            // classpath never ages out.
+            try {
+                Files.setLastModifiedTime(
+                    target,
+                    java.nio.file.attribute.FileTime.from(java.time.Instant.now()),
+                )
+            } catch (_: Exception) {
+                // best-effort: a read-only cache directory must not fail the run
+            }
+            return
+        }
         build(target, shards)
     }
 
@@ -58,9 +64,14 @@ class SessionBuilder {
                 configure(connection)
                 createTables(connection)
                 shards.sortedBy(SessionShard::shardId).forEach { merge(connection, it) }
-                populateDerivedColumns(connection)
                 createIndexes(connection)
-                connection.createStatement().use { it.execute("ANALYZE") }
+                connection.createStatement().use { statement ->
+                    // Sampled ANALYZE: sqlite_stat1 selectivity estimates from a
+                    // few hundred rows per index steer the planner just as well
+                    // as a full scan of a multi-hundred-MB session.
+                    statement.execute("PRAGMA analysis_limit=400")
+                    statement.execute("ANALYZE")
+                }
             }
             AtomicFiles.commit(temporary, target)
         } finally {
@@ -300,9 +311,11 @@ class SessionBuilder {
             connection.prepareStatement(
                 """
                 INSERT INTO classes(
-                  fqn, kind, super_fqn, modifiers, is_abstract, source_file, source_shard_id
+                  fqn, kind, super_fqn, modifiers, is_abstract, source_file,
+                  simple_name, package_name, source_shard_id
                 )
-                SELECT fqn, kind, super_fqn, modifiers, is_abstract, source_file, ?
+                SELECT fqn, kind, super_fqn, modifiers, is_abstract, source_file,
+                  $SIMPLE_NAME_EXPR, $PACKAGE_NAME_EXPR, ?
                 FROM shard.classes
                 ORDER BY id
                 """.trimIndent(),
@@ -324,10 +337,12 @@ class SessionBuilder {
             }
             connection.prepareStatement(
                 """
-                INSERT INTO methods(class_id, name, descriptor, return_fqn, modifiers, source_shard_id)
-                SELECT class_id + ?, name, descriptor, return_fqn, modifiers, ?
-                FROM shard.methods
-                ORDER BY id
+                INSERT INTO methods(class_id, name, descriptor, return_fqn, modifiers, symbol, source_shard_id)
+                SELECT m.class_id + ?, m.name, m.descriptor, m.return_fqn, m.modifiers,
+                  c.fqn || '#' || m.name, ?
+                FROM shard.methods m
+                LEFT JOIN shard.classes c ON c.id = m.class_id
+                ORDER BY m.id
                 """.trimIndent(),
             ).use { statement ->
                 statement.setInt(1, classIdOffset)
@@ -412,34 +427,6 @@ class SessionBuilder {
                 rows.getInt(1)
             }
         }
-
-    /**
-     * Fills classes.simple_name/package_name and methods.symbol with
-     * set-based SQL (was ~620k row-by-row UPDATEs on a large classpath).
-     * The statements live in [DERIVED_COLUMN_UPDATES] so the unit test runs
-     * the exact production SQL against edge-case FQNs.
-     */
-    private fun populateDerivedColumns(connection: Connection) {
-        withTransaction(connection) {
-            connection.createStatement().use { statement ->
-                DERIVED_COLUMN_UPDATES.forEach { statement.executeUpdate(it) }
-            }
-        }
-    }
-
-    private fun withTransaction(connection: Connection, block: () -> Unit) {
-        val previousAutoCommit = connection.autoCommit
-        connection.autoCommit = false
-        try {
-            block()
-            connection.commit()
-        } catch (exception: Exception) {
-            connection.rollback()
-            throw exception
-        } finally {
-            connection.autoCommit = previousAutoCommit
-        }
-    }
 
     private fun createIndexes(connection: Connection) {
         connection.createStatement().use { statement ->

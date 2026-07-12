@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Session build is ~40% faster (3.4-3.6 s vs 4.2-7.1 s for a 222-jar, 184 MB classpath): the derived columns (`simple_name`, `package_name`, `symbol`) are computed inline in the merge `INSERT...SELECT` instead of a post-merge UPDATE pass that rewrote every row of the two largest tables, and `ANALYZE` samples row statistics (`analysis_limit`) instead of scanning the full session. Session content is unchanged (verified table-by-table); the file also shrinks a few percent from less rewrite fragmentation.
+
+### Added
+
+- Stale sessions are now reclaimed automatically: every `research4jar index` run removes session databases unused for more than 30 days (override with `RESEARCH4JAR_SESSION_MAX_AGE`, e.g. `7d`, `12h`, or `off`). Previously each classpath change stranded a multi-hundred-MB session that only a manual `cache gc --max-age` would delete. A session's mtime now tracks last use — the index reuse path and query engine refresh it (at most once a day on the query side) — so actively used sessions never age out, and a swept session rebuilds from cached shards in seconds.
+
 ## [0.1.0] - 2026-07-05
 
 ### Changed (M6 pure-Java consolidation)

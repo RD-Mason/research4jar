@@ -201,6 +201,8 @@ research4jar cache gc --dry-run               # report without deleting
 
 Sessions are always rebuilt from shards by the next `research4jar index`, so session GC is safe; evicted shards re-download or re-extract on demand.
 
+Session cleanup also runs automatically: every `research4jar index` removes sessions unused for more than 30 days (a session's mtime tracks last use). Tune or disable with `RESEARCH4JAR_SESSION_MAX_AGE` (`7d`, `12h`, `off`). Shard cleanup stays manual.
+
 ## Coverage
 
 Every JSON response includes:

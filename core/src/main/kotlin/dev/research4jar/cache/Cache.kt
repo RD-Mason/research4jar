@@ -230,6 +230,35 @@ fun gc(dataPaths: DataPaths, currentExtractorVersion: Int, options: GCOptions): 
     )
 }
 
+/**
+ * Removes sessions unused for longer than [maxAge]. Sessions are
+ * content-addressed caches, always rebuildable by the next index run; mtime
+ * approximates last use because both the index reuse path and the query
+ * engine touch a session when they open it. This is the safe subset of [gc]
+ * that the indexer runs automatically: an in-flight session build can never
+ * be older than the cutoff, so there is no race with concurrent runs.
+ */
+fun collectStaleSessions(dataPaths: DataPaths, maxAge: Duration): SessionSweepResult {
+    val cutoff = Instant.now().minus(maxAge)
+    var removed = 0
+    var reclaimedBytes = 0L
+    for (file in listFiles(dataPaths.sessions, ".db")) {
+        if (!file.modTime.toInstant().isBefore(cutoff)) {
+            continue
+        }
+        try {
+            Files.deleteIfExists(file.path)
+        } catch (_: Exception) {
+            continue
+        }
+        removed++
+        reclaimedBytes += file.size
+    }
+    return SessionSweepResult(removed, reclaimedBytes)
+}
+
+data class SessionSweepResult(val removed: Int, val reclaimedBytes: Long)
+
 /** Parses human-friendly byte sizes: 500M, 2G, 1024K, 123 (bytes). */
 fun parseSize(value: String): Long {
     var text = value.trim().uppercase()

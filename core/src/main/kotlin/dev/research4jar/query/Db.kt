@@ -1,9 +1,14 @@
 package dev.research4jar.query
 
+import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.attribute.FileTime
 import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
+import java.time.Duration
+import java.time.Instant
 import org.sqlite.SQLiteConfig
 
 /**
@@ -12,8 +17,20 @@ import org.sqlite.SQLiteConfig
  * rewritten by a concurrent indexer run, so it opens with a busy timeout.
  */
 object Db {
+    /**
+     * Session mtime doubles as the last-use marker for the indexer's
+     * automatic stale-session sweep. Refreshing it at most once a day keeps
+     * an actively queried session alive without a metadata write per query.
+     */
+    private val TOUCH_AFTER: Duration = Duration.ofHours(24)
+
     fun openReadOnly(path: String, immutable: Boolean): Connection {
         val absolute = Paths.get(path).toAbsolutePath().normalize()
+        // Only sessions open as immutable; the manifest's mtime is not a
+        // last-use marker and must stay untouched.
+        if (immutable) {
+            touchIfStale(absolute)
+        }
         val config = SQLiteConfig()
         // setReadOnly clears the default READWRITE|CREATE open flags before
         // adding READONLY; setOpenMode(READONLY) alone ORs onto the defaults,
@@ -23,6 +40,17 @@ object Db {
             config.busyTimeout = 5000
         }
         return config.createConnection("jdbc:sqlite:$absolute")
+    }
+
+    private fun touchIfStale(path: Path) {
+        try {
+            val lastUsed = Files.getLastModifiedTime(path).toInstant()
+            if (Duration.between(lastUsed, Instant.now()) > TOUCH_AFTER) {
+                Files.setLastModifiedTime(path, FileTime.from(Instant.now()))
+            }
+        } catch (_: Exception) {
+            // best-effort: a read-only cache directory must not fail the query
+        }
     }
 }
 
