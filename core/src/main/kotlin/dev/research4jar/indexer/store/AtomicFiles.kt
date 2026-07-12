@@ -7,9 +7,18 @@ import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 
 internal object AtomicFiles {
-    fun temporaryTarget(target: Path): Path {
-        Files.createDirectories(target.parent)
-        return Files.createTempFile(target.parent, ".${target.fileName}.", ".tmp")
+    fun temporaryTarget(target: Path): Path =
+        temporaryIn(target.parent, target.fileName.toString())
+
+    /**
+     * For writers that only learn the final name at commit time (the streaming
+     * session build fingerprints the shards it actually merged). The ".tmp"
+     * suffix keeps the file invisible to the "*.db" listings that cache gc and
+     * the stale-session sweep operate on.
+     */
+    fun temporaryIn(directory: Path, label: String): Path {
+        Files.createDirectories(directory)
+        return Files.createTempFile(directory, ".$label.", ".tmp")
     }
 
     fun commit(temporary: Path, target: Path) {
