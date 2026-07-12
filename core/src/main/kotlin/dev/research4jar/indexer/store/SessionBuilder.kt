@@ -38,9 +38,10 @@ internal const val PACKAGE_NAME_EXPR =
  * (no id column) is covered through its shard's classes range. All rows
  * referencing another table's ids (annotations, string_constants, ...) come
  * from the same shard as their referent, so a per-shard delete never leaves
- * dangling references. The string_constants FTS5 shadow is kept in sync at
- * two sites — one statement before the string_constants delete in
- * [SessionBuilder.deleteShards], one after the string_constants INSERT in
+ * dangling references. The external-content FTS5 shadows (string_constants_fts,
+ * classes_fts, methods_fts) are each kept in sync at two sites — one statement
+ * per shadow before its content table's delete in
+ * [SessionBuilder.deleteShards], one after its content table's INSERT in
  * [SessionBuilder.merge].
  */
 internal val ID_TABLES = listOf(
@@ -206,9 +207,15 @@ class SessionBuilder {
         fun commit(target: Path) {
             connection.createStatement().use { statement ->
                 // External-content fts5 tables never see the merge inserts;
-                // one rebuild scans the fully merged string_constants.
+                // one rebuild per shadow scans its fully merged content table.
                 statement.execute(
                     "INSERT INTO string_constants_fts(string_constants_fts) VALUES('rebuild')",
+                )
+                statement.execute(
+                    "INSERT INTO classes_fts(classes_fts) VALUES('rebuild')",
+                )
+                statement.execute(
+                    "INSERT INTO methods_fts(methods_fts) VALUES('rebuild')",
                 )
             }
             createIndexes(connection)
@@ -461,6 +468,26 @@ class SessionBuilder {
                     "value, content='string_constants', content_rowid='id', " +
                     "tokenize='trigram', detail='none', columnsize=0)",
             )
+            // The same trigram pushdown for search-symbol's contains fallback
+            // over classes and methods: fts5 serves each column's own
+            // `LIKE '%...%'` from the doclists (EXPLAIN QUERY PLAN shows
+            // INDEX 0:L0 for the first column, 0:L1 for the second — verified
+            // for all four columns on this SQLite build), so the cascade stops
+            // scanning the two largest session tables. NULL values (methods
+            // orphaned by a corrupt shard have NULL symbol, classes.kind is
+            // nullable) index as absent and round-trip the rebuild and
+            // delta-delete commands — also verified. Like string_constants_fts
+            // these index nothing until commit() runs their 'rebuild'.
+            statement.execute(
+                "CREATE VIRTUAL TABLE classes_fts USING fts5(" +
+                    "fqn, kind, content='classes', content_rowid='id', " +
+                    "tokenize='trigram', detail='none', columnsize=0)",
+            )
+            statement.execute(
+                "CREATE VIRTUAL TABLE methods_fts USING fts5(" +
+                    "symbol, descriptor, content='methods', content_rowid='id', " +
+                    "tokenize='trigram', detail='none', columnsize=0)",
+            )
             // search_symbols is a view, not a copy: the materialized table
             // plus its four indexes were 65% of the session bytes while the
             // broad-search query could not use those indexes anyway
@@ -650,16 +677,25 @@ class SessionBuilder {
                 statement.setString(3, shard.shardId)
                 statement.executeUpdate()
             }
-            // Full builds skip this: Stream.commit rebuilds the whole shadow
+            // Full builds skip this: Stream.commit rebuilds each whole shadow
             // in one pass over the merged content, which costs the same
             // tokenize work once instead of per shard. The delta path has no
             // rebuild, so it mirrors each addition here (deletions are
-            // mirrored in deleteShards).
+            // mirrored in deleteShards). Each shard's rows are exactly the
+            // contiguous id range above the offset captured before its merge.
             if (syncFts) {
                 connection.createStatement().use { statement ->
                     statement.executeUpdate(
                         "INSERT INTO string_constants_fts(rowid, value) " +
                             "SELECT id, value FROM string_constants WHERE id > $stringIdOffset",
+                    )
+                    statement.executeUpdate(
+                        "INSERT INTO classes_fts(rowid, fqn, kind) " +
+                            "SELECT id, fqn, kind FROM classes WHERE id > $classIdOffset",
+                    )
+                    statement.executeUpdate(
+                        "INSERT INTO methods_fts(rowid, symbol, descriptor) " +
+                            "SELECT id, symbol, descriptor FROM methods WHERE id > $methodIdOffset",
                     )
                 }
             }
@@ -727,6 +763,20 @@ class SessionBuilder {
                         statement.executeUpdate(
                             "INSERT INTO string_constants_fts(string_constants_fts, rowid, value) " +
                                 "SELECT 'delete', id, value FROM string_constants " +
+                                "WHERE id BETWEEN ${range.first} AND ${range.last}",
+                        )
+                    }
+                    ranges["classes"]?.let { range ->
+                        statement.executeUpdate(
+                            "INSERT INTO classes_fts(classes_fts, rowid, fqn, kind) " +
+                                "SELECT 'delete', id, fqn, kind FROM classes " +
+                                "WHERE id BETWEEN ${range.first} AND ${range.last}",
+                        )
+                    }
+                    ranges["methods"]?.let { range ->
+                        statement.executeUpdate(
+                            "INSERT INTO methods_fts(methods_fts, rowid, symbol, descriptor) " +
+                                "SELECT 'delete', id, symbol, descriptor FROM methods " +
                                 "WHERE id BETWEEN ${range.first} AND ${range.last}",
                         )
                     }
@@ -799,6 +849,14 @@ class SessionBuilder {
             statement.execute("CREATE INDEX idx_s_methods_class ON methods(class_id)")
             statement.execute("CREATE INDEX idx_s_methods_name ON methods(name)")
             statement.execute("CREATE INDEX idx_s_methods_symbol ON methods(symbol)")
+            // NULL-symbol orphans (method rows whose class row was missing in
+            // a corrupt shard) are invisible to methods_fts, so the query
+            // side's contains fallback unions them back in through this
+            // partial index — ~empty on real data — for exact parity with a
+            // full scan.
+            statement.execute(
+                "CREATE INDEX idx_s_methods_orphan ON methods(id) WHERE symbol IS NULL",
+            )
             statement.execute("CREATE INDEX idx_s_bean_type ON bean_definitions(bean_type_fqn)")
             statement.execute("CREATE INDEX idx_s_bean_cfg ON bean_definitions(config_fqn)")
             statement.execute(
