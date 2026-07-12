@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Warm re-indexing drops to ~0.27 s of pipeline time (from ~0.7 s): shard-cache validation now resolves all classpath jars through one manifest connection instead of one JDBC connection per jar.
 - The installed launcher enables Class Data Sharing opportunistically: it probes the JVM once for `-XX:+AutoCreateSharedArchive` (JDK 19+), caches the result keyed by JVM identity and CLI version, and lets the archive build itself on first use — measured ~30% off one-shot queries; JDK 8 and read-only homes fall back to plain `java` cleanly.
 
+### Fixed
+
+- Indexing a large classpath no longer overflows the default 512 MB heap: several big jars extracting concurrently (the largest-first schedule clusters them at the front) each hold a multi-hundred-MB transient model. Extraction is now gated by an in-flight jar-bytes budget sized to a quarter of the heap — big jars serialize, small jars keep full parallelism. Found by a 1000-jar / 869 MB stress test (previously OOMed; now completes cold in ~26 s at -Xmx512m with ~217 MB steady RSS, and indexed query latency stays flat vs a 222-jar classpath).
+
 ### Added
 
 - Stale sessions are now reclaimed automatically: every `research4jar index` run removes session databases unused for more than 30 days (override with `RESEARCH4JAR_SESSION_MAX_AGE`, e.g. `7d`, `12h`, or `off`). Previously each classpath change stranded a multi-hundred-MB session that only a manual `cache gc --max-age` would delete. A session's mtime now tracks last use — the index reuse path and query engine refresh it (at most once a day on the query side) — so actively used sessions never age out, and a swept session rebuilds from cached shards in seconds.

@@ -218,10 +218,25 @@ private fun executeIndex(options: Options): IndexStatistics {
         val submissionOrder = pending.sortedBy(HashedJar::sha256)
             .partition { jarSize(it) > fairShare }
             .let { (outsized, rest) -> outsized.sortedByDescending(jarSize) + rest }
+        // A jar's transient extraction model costs a multiple of its file
+        // size on the heap. With enough large jars on the classpath the
+        // largest-first schedule clusters them at the front, and a full
+        // thread pool of concurrent big extractions overflows the default
+        // -Xmx512m (measured: OOM on a 1000-jar classpath with five >50MB
+        // jars). The gate bounds the jar bytes being extracted at once to a
+        // quarter of the heap; a jar larger than the whole budget takes every
+        // permit and runs alone. Fairness keeps the submission order.
+        val extractionBudgetKb = (Runtime.getRuntime().maxMemory() / 4 / 1024)
+            .coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1024)
+        val extractionGate = java.util.concurrent.Semaphore(extractionBudgetKb, true)
+        fun permitsFor(jar: HashedJar): Int =
+            (jarSize(jar) / 1024).coerceIn(1L, extractionBudgetKb.toLong()).toInt()
         val futuresByShardId = submissionOrder.associate { jar ->
             val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
             shardId to executor.submit(Callable {
                 val expectedPath = dataPaths.shards.resolve("$shardId.db").toAbsolutePath().normalize()
+                val permits = permitsFor(jar)
+                extractionGate.acquire(permits)
                 val outcome = try {
                     val extracted = ZipFile(jar.path.toFile()).use {
                         JarExtractor(sharedMapper).extract(it)
@@ -244,6 +259,8 @@ private fun executeIndex(options: Options): IndexStatistics {
                     )
                 } catch (exception: Exception) {
                     ExtractionOutcome(jar = jar, shard = null, error = exception)
+                } finally {
+                    extractionGate.release(permits)
                 }
                 val done = extractedCount.incrementAndGet()
                 if (done == extractTotal || done % progressStep == 0) {
