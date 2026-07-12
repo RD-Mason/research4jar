@@ -256,9 +256,7 @@ fun searchSymbol(
     pageSize: Int,
 ): SearchSymbolResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
     data class Pending(val result: SearchSymbolResult, val shardId: String)
-    var pending = twoStage(
-        session, SEARCH_SYMBOL_FAST_SQL, SEARCH_SYMBOL_SQL, matchArgs(term), page, pageSize,
-    ) {
+    val scan: (java.sql.ResultSet) -> Pending = {
         Pending(
             SearchSymbolResult(
                 kind = it.getString(1),
@@ -272,6 +270,25 @@ fun searchSymbol(
             it.getString(5),
         )
     }
+    // Underfilled fast pages cascade through the per-kind contains tiers
+    // instead of scanning the whole search_symbols view (the view expands to
+    // millions of joined rows; the cascade usually stops after the classes
+    // scan). Ordering stays identical to SEARCH_SYMBOL_SQL because every
+    // fast-tier score outranks every contains score and the contains scores
+    // are strictly ordered by kind — see SearchSymbolParityTest.
+    val limit = pageSize + 1
+    val offset = (page - 1) * pageSize
+    val needed = offset + limit
+    var rows = session.query(SEARCH_SYMBOL_FAST_SQL, matchArgs(term) + listOf(needed, 0)) {
+        it.mapRows(scan)
+    }
+    for (tier in SEARCH_SYMBOL_CONTAINS_TIERS) {
+        if (rows.size >= needed) break
+        rows = rows + session.query(tier, matchArgs(term) + listOf(needed - rows.size)) {
+            it.mapRows(scan)
+        }
+    }
+    var pending = rows.drop(offset)
     val hasMore = pending.size > pageSize
     if (hasMore) pending = pending.subList(0, pageSize)
 
@@ -436,6 +453,9 @@ private const val SEARCH_SYMBOL_SCORE_SQL = """
            ELSE s.kind || '_contains'
          END AS match_reason"""
 
+// No longer executed in production: searchSymbol serves underfilled pages via
+// SEARCH_SYMBOL_CONTAINS_TIERS below. Kept verbatim as the ordering oracle —
+// SearchSymbolParityTest proves the cascade returns exactly these pages.
 internal const val SEARCH_SYMBOL_SQL = """
 WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?)),
 matches AS (
@@ -543,3 +563,139 @@ SELECT kind, name, owner, detail, source_shard_id, score, match_reason FROM (
 )
 ORDER BY score DESC, kind, name, source_shard_id
 LIMIT ? OFFSET ?"""
+
+// The contains tier of SEARCH_SYMBOL_SQL, split per kind and consumed in
+// descending score order (55 class, 50 method, 45 annotation, 44 spi,
+// 43 config-property, 30 string — strictly ordered, so appending whole tiers
+// preserves the oracle's global ORDER BY). Each query keeps the oracle's
+// WHERE arms mapped to that kind's view columns, minus the rows the fast
+// query already returned: the NOT COALESCE(...) mirrors the >= 60 score
+// conditions, with COALESCE because a NULL column (an orphaned method's
+// symbol, say) must not exclude the row. LIMIT makes the scan stop as soon
+// as the page is assembled; the expensive joined arms usually never run.
+internal val SEARCH_SYMBOL_CONTAINS_TIERS: List<String> = listOf(
+    """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?))
+SELECT 'class' AS kind, c.fqn AS name, NULL AS owner, c.kind AS detail,
+       c.source_shard_id, 55 AS score, 'class_contains' AS match_reason
+FROM classes c, params p
+WHERE (c.fqn = p.term
+    OR c.simple_name = p.simple
+    OR c.kind = p.term
+    OR c.fqn LIKE p.prefix ESCAPE '\'
+    OR c.simple_name LIKE p.prefix ESCAPE '\'
+    OR c.fqn LIKE p.contains ESCAPE '\'
+    OR c.kind LIKE p.contains ESCAPE '\')
+  AND NOT COALESCE(
+       c.fqn = p.term
+    OR c.simple_name = p.simple
+    OR (c.simple_name >= p.simple AND c.simple_name < p.hi)
+    OR (c.fqn >= p.term AND c.fqn < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?""",
+    """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?))
+SELECT 'method' AS kind, m.symbol AS name, c.fqn AS owner, m.descriptor AS detail,
+       m.source_shard_id AS source_shard_id, 50 AS score, 'method_contains' AS match_reason
+FROM methods m JOIN classes c ON c.id = m.class_id, params p
+WHERE (m.symbol = p.term
+    OR m.name = p.simple
+    OR c.fqn = p.term
+    OR m.descriptor = p.term
+    OR m.symbol LIKE p.prefix ESCAPE '\'
+    OR m.name LIKE p.prefix ESCAPE '\'
+    OR m.symbol LIKE p.contains ESCAPE '\'
+    OR c.fqn LIKE p.contains ESCAPE '\'
+    OR m.descriptor LIKE p.contains ESCAPE '\')
+  AND NOT COALESCE(
+       m.symbol = p.term
+    OR m.name = p.simple
+    OR (m.name >= p.simple AND m.name < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?""",
+    """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?))
+SELECT 'annotation' AS kind, a.annotation_fqn AS name,
+       CASE WHEN a.target_kind = 'class' THEN c.fqn
+            WHEN a.target_kind = 'method' THEN m.symbol
+            ELSE NULL END AS owner,
+       a.attributes AS detail, a.source_shard_id AS source_shard_id,
+       45 AS score, 'annotation_contains' AS match_reason
+FROM annotations a
+LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id
+LEFT JOIN methods m ON a.target_kind = 'method' AND m.id = a.target_id
+, params p
+WHERE (a.annotation_fqn = p.term
+    OR CASE WHEN a.target_kind = 'class' THEN c.fqn
+            WHEN a.target_kind = 'method' THEN m.symbol
+            ELSE NULL END = p.term
+    OR a.attributes = p.term
+    OR a.annotation_fqn LIKE p.prefix ESCAPE '\'
+    OR a.annotation_fqn LIKE p.contains ESCAPE '\'
+    OR CASE WHEN a.target_kind = 'class' THEN c.fqn
+            WHEN a.target_kind = 'method' THEN m.symbol
+            ELSE NULL END LIKE p.contains ESCAPE '\'
+    OR a.attributes LIKE p.contains ESCAPE '\')
+  AND NOT COALESCE(
+       a.annotation_fqn = p.term
+    OR (a.annotation_fqn >= p.term AND a.annotation_fqn < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?""",
+    """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?))
+SELECT 'spi' AS kind, s.impl_fqn AS name, s.key AS owner, s.mechanism AS detail,
+       s.source_shard_id, 44 AS score, 'spi_contains' AS match_reason
+FROM spi_registrations s, params p
+WHERE (s.impl_fqn = p.term
+    OR s.key = p.term
+    OR s.mechanism = p.term
+    OR s.impl_fqn LIKE p.prefix ESCAPE '\'
+    OR s.impl_fqn LIKE p.contains ESCAPE '\'
+    OR s.key LIKE p.contains ESCAPE '\'
+    OR s.mechanism LIKE p.contains ESCAPE '\')
+  AND NOT COALESCE(
+       s.impl_fqn = p.term
+    OR s.key = p.term
+    OR (s.impl_fqn >= p.term AND s.impl_fqn < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?""",
+    """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?))
+SELECT 'config-property' AS kind, cp.name AS name, cp.source_fqn AS owner,
+       cp.type_fqn AS detail, cp.source_shard_id,
+       43 AS score, 'config-property_contains' AS match_reason
+FROM config_properties cp, params p
+WHERE (cp.name = p.term
+    OR cp.source_fqn = p.term
+    OR cp.type_fqn = p.term
+    OR cp.name LIKE p.prefix ESCAPE '\'
+    OR cp.name LIKE p.contains ESCAPE '\'
+    OR cp.source_fqn LIKE p.contains ESCAPE '\'
+    OR cp.type_fqn LIKE p.contains ESCAPE '\')
+  AND NOT COALESCE(
+       cp.name = p.term
+    OR (cp.name >= p.term AND cp.name < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?""",
+    """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?))
+SELECT 'string' AS kind, sc.value AS name, c.fqn AS owner,
+       CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END AS detail,
+       sc.source_shard_id AS source_shard_id, 30 AS score, 'string_contains' AS match_reason
+FROM string_constants sc
+JOIN classes c ON c.id = sc.class_id
+LEFT JOIN methods m ON m.id = sc.method_id
+, params p
+WHERE (sc.value = p.term
+    OR c.fqn = p.term
+    OR CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END = p.term
+    OR sc.value LIKE p.prefix ESCAPE '\'
+    OR sc.value LIKE p.contains ESCAPE '\'
+    OR c.fqn LIKE p.contains ESCAPE '\'
+    OR CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END LIKE p.contains ESCAPE '\')
+  AND NOT COALESCE(
+       sc.value = p.term
+    OR (sc.value >= p.term AND sc.value < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?""",
+)

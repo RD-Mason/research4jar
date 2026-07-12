@@ -16,13 +16,17 @@ import kotlin.system.exitProcess
  */
 fun main(args: Array<String>) {
     if (args.isNotEmpty() && args[0] == "index-raw") {
+        NativeLib.pin(NativeLib.homeArg(args))
         dev.research4jar.indexer.main(args.copyOfRange(1, args.size))
         return
     }
     if (args.isNotEmpty() && args[0] == "daemon") {
+        NativeLib.pin(null)
         exitProcess(Daemon.runServer { argv, out, err -> runCli(argv, out, err) })
     }
+    // The daemon client path never opens sqlite, so pin() runs only after it.
     Daemon.tryServe(args)?.let { exitProcess(it) }
+    NativeLib.pin(NativeLib.homeArg(args))
     val code = runCli(args, System.out, System.err)
     Daemon.spawnAfterColdRun(args)
     exitProcess(code)

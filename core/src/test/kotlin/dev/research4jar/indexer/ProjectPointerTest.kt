@@ -27,5 +27,15 @@ class ProjectPointerTest {
         val claude = Files.readString(project.resolve("CLAUDE.md"))
         assertTrue(claude.startsWith(original))
         assertEquals(1, "## Research4Jar（Java 依赖事实查询）".toRegex().findAll(claude).count())
+        // The same guidance reaches every mainstream agent convention, and
+        // stays idempotent in each file.
+        for (agentFile in listOf("AGENTS.md", "GEMINI.md")) {
+            val content = Files.readString(project.resolve(agentFile))
+            assertEquals(
+                1,
+                "## Research4Jar（Java 依赖事实查询）".toRegex().findAll(content).count(),
+                "guidance in $agentFile",
+            )
+        }
     }
 }

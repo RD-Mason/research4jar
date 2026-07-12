@@ -56,7 +56,14 @@ class Manifest(
         connect().use(::createSchema)
     }
 
-    fun find(shardId: String): ManifestShard? = connect().use { connection ->
+    fun find(shardId: String): ManifestShard? = findAll(listOf(shardId))[shardId]
+
+    /**
+     * Batch lookup over one connection. The index warm path resolves every
+     * classpath jar's shard; a fresh JDBC connection per [find] call costs
+     * ~10x the SELECTs themselves, so callers with a known id set use this.
+     */
+    fun findAll(shardIds: Collection<String>): Map<String, ManifestShard> = connect().use { connection ->
         connection.prepareStatement(
             """
             SELECT shard_id, jar_coordinate, jar_filename, jar_sha256,
@@ -65,21 +72,26 @@ class Manifest(
             WHERE shard_id = ?
             """.trimIndent(),
         ).use { statement ->
-            statement.setString(1, shardId)
-            statement.executeQuery().use { result ->
-                if (!result.next()) return@use null
-                ManifestShard(
-                    shardId = result.getString("shard_id"),
-                    jarCoordinate = result.getString("jar_coordinate"),
-                    jarFilename = result.getString("jar_filename"),
-                    jarSha256 = result.getString("jar_sha256"),
-                    shardPath = Paths.get(result.getString("shard_path")),
-                    shardChecksum = result.getString("shard_checksum"),
-                    sizeBytes = result.getLong("size_bytes").let {
-                        if (result.wasNull()) null else it
-                    },
-                )
+            val found = LinkedHashMap<String, ManifestShard>()
+            for (shardId in shardIds) {
+                statement.setString(1, shardId)
+                statement.executeQuery().use { result ->
+                    if (result.next()) {
+                        found[shardId] = ManifestShard(
+                            shardId = result.getString("shard_id"),
+                            jarCoordinate = result.getString("jar_coordinate"),
+                            jarFilename = result.getString("jar_filename"),
+                            jarSha256 = result.getString("jar_sha256"),
+                            shardPath = Paths.get(result.getString("shard_path")),
+                            shardChecksum = result.getString("shard_checksum"),
+                            sizeBytes = result.getLong("size_bytes").let {
+                                if (result.wasNull()) null else it
+                            },
+                        )
+                    }
+                }
             }
+            found
         }
     }
 

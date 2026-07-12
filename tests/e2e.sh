@@ -313,6 +313,9 @@ test -f "$home1/manifest.db"
 test -f "$project/.research4jar/project.json"
 grep -q '^# Existing project instructions' "$project/CLAUDE.md"
 test "$(grep -c '^## Research4Jar（Java 依赖事实查询）$' "$project/CLAUDE.md")" = "1"
+# The same guidance must reach every mainstream agent convention file.
+test "$(grep -c '^## Research4Jar（Java 依赖事实查询）$' "$project/AGENTS.md")" = "1"
+test "$(grep -c '^## Research4Jar（Java 依赖事实查询）$' "$project/GEMINI.md")" = "1"
 
 query_json="$work/query.json"
 (cd "$project/nested/work" && \

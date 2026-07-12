@@ -9,10 +9,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Session build is ~40% faster (3.4-3.6 s vs 4.2-7.1 s for a 222-jar, 184 MB classpath): the derived columns (`simple_name`, `package_name`, `symbol`) are computed inline in the merge `INSERT...SELECT` instead of a post-merge UPDATE pass that rewrote every row of the two largest tables, and `ANALYZE` samples row statistics (`analysis_limit`) instead of scanning the full session. Session content is unchanged (verified table-by-table); the file also shrinks a few percent from less rewrite fragmentation.
+- Every sqlite-touching invocation is ~220 ms faster on macOS: the CLI pins the sqlite-jdbc native library to a stable file under the data home (`<home>/lib/`) instead of letting the stock loader extract it to a fresh random temp path per process — each new path re-paid Gatekeeper validation. Falls back to the stock loader on any failure.
+- `search-symbol` no longer pays a whole-view scan when the indexed tiers underfill a page (its worst case, ~1.35 s of pure query time on a 222-jar session): underfilled pages now cascade through per-kind contains scans that stop as soon as the page is assembled. Pages are provably identical to the previous single-query ordering (the old SQL is kept as the test oracle and a randomized parity test compares every page).
+- Cold indexing streams the session merge while extraction is still running (extraction is submitted in sorted-shardId order, largest jars first, and the merge consumes shards as they land): 222-jar cold index ~7.4-7.8 s -> ~6.2 s end to end together with the other fixes. Sessions stay byte-identical to the non-streamed path (same sha256).
+- Warm re-indexing drops to ~0.27 s of pipeline time (from ~0.7 s): shard-cache validation now resolves all classpath jars through one manifest connection instead of one JDBC connection per jar.
+- The installed launcher enables Class Data Sharing opportunistically: it probes the JVM once for `-XX:+AutoCreateSharedArchive` (JDK 19+), caches the result keyed by JVM identity and CLI version, and lets the archive build itself on first use — measured ~30% off one-shot queries; JDK 8 and read-only homes fall back to plain `java` cleanly.
 
 ### Added
 
 - Stale sessions are now reclaimed automatically: every `research4jar index` run removes session databases unused for more than 30 days (override with `RESEARCH4JAR_SESSION_MAX_AGE`, e.g. `7d`, `12h`, or `off`). Previously each classpath change stranded a multi-hundred-MB session that only a manual `cache gc --max-age` would delete. A session's mtime now tracks last use — the index reuse path and query engine refresh it (at most once a day on the query side) — so actively used sessions never age out, and a swept session rebuilds from cached shards in seconds.
+- Indexing now writes the agent usage guidance to `AGENTS.md` and `GEMINI.md` alongside `CLAUDE.md` (idempotent in each file), so Codex, Cursor, Copilot, Gemini CLI, and other agents that follow those conventions discover the tool with zero configuration, not just Claude Code.
 
 ## [0.1.0] - 2026-07-05
 

@@ -16,7 +16,7 @@ Research4Jar is a single Kotlin/JVM codebase behind one CLI, following a four-la
 1. **Jar facts**: the indexer reads metadata and bytecode with ASM without loading classes or executing jar code.
 2. **Immutable shards**: each jar becomes one content-addressed SQLite shard identified by `<jar_sha256>@<extractor_version>`.
 3. **Project session**: shards selected by a project's classpath are merged into a compact session database. Symbol references remain unresolved until query time, so relationships can cross jar boundaries.
-4. **Query and host integration**: the same CLI opens the session read-only (C SQLite via sqlite-jdbc) and returns JSON with provenance and coverage. A project pointer and `CLAUDE.md` guidance let coding agents call it directly; a background daemon keeps warm CLI queries at ~90 ms.
+4. **Query and host integration**: the same CLI opens the session read-only (C SQLite via sqlite-jdbc) and returns JSON with provenance and coverage. A project pointer and agent guidance files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) let coding agents call it directly; a background daemon keeps warm CLI queries at ~130 ms.
 
 ## Requirements
 
@@ -70,10 +70,11 @@ exec java -jar /path/to/research4jar-cli.jar "$@"' > ~/.local/bin/research4jar &
 
 ### CLI daemon
 
-One-shot JVM startup is real: a cold query pays ~0.7 s. The first query command
+One-shot JVM startup is real: a cold query pays ~0.5 s. The first query command
 therefore starts a background daemon (TCP loopback, token-authenticated,
-30-minute idle exit) and subsequent queries round-trip in ~90 ms with
-byte-identical output. `RESEARCH4JAR_NO_DAEMON=1` opts out; any
+30-minute idle exit) and subsequent queries round-trip in ~130 ms with
+byte-identical output. The installed launcher additionally enables Class Data
+Sharing on JDK 19+ (probed once, cached, plain-java fallback everywhere else). `RESEARCH4JAR_NO_DAEMON=1` opts out; any
 `RESEARCH4JAR_*` environment override also bypasses the daemon so custom homes
 and registries always see exact semantics. Long-lived hosts (MCP) never need
 it — the server process itself stays warm.
@@ -150,7 +151,7 @@ Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath
 
 Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`. `index_project` also accepts `registry` and `registry_pubkey`; when the registry covers the classpath, MCP indexing skips extraction entirely and only merges downloaded shards.
 
-For CLI-driven agents without MCP, `research4jar index` also appends usage guidance to the project's `CLAUDE.md`, so Claude Code picks the tool up with zero configuration.
+For CLI-driven agents without MCP, `research4jar index` also appends usage guidance to the project's `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` — one file per agent convention, so Claude Code, Codex, Cursor, Copilot, Gemini CLI, and anything else that reads those files picks the tool up with zero configuration.
 
 ## Shard registry: index without extracting
 

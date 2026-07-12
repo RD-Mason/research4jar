@@ -171,10 +171,13 @@ private fun executeIndex(options: Options): IndexStatistics {
             uniqueByHash.putIfAbsent(sha, HashedJar(path, sha))
         }
 
+        val knownShards = manifest.findAll(
+            uniqueByHash.values.map { "${it.sha256}@$EXTRACTOR_VERSION" },
+        )
         uniqueByHash.values
             .forEach { jar ->
                 val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
-                val existing = manifest.find(shardId)
+                val existing = knownShards[shardId]
                 if (existing != null && validShard(existing)) {
                     selectedShards += SessionShard(shardId, existing.shardPath)
                     skipped++

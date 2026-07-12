@@ -81,11 +81,23 @@ object ProjectPointer {
         }
     }
 
+    /**
+     * The per-agent instruction files this guidance is appended to. One
+     * convention per ecosystem: CLAUDE.md (Claude Code and its compatibles),
+     * AGENTS.md (the cross-vendor standard read by Codex, Cursor, Copilot,
+     * Jules, Zed, and most newer tools), GEMINI.md (Gemini CLI). Together
+     * they make the index self-announcing to any mainstream coding agent.
+     */
+    private val AGENT_FILES = listOf("CLAUDE.md", "AGENTS.md", "GEMINI.md")
+
     fun ensureClaudeInstructions(projectDir: Path) {
         Files.createDirectories(projectDir)
-        val claudeFile = projectDir.resolve("CLAUDE.md")
-        val existing = if (Files.exists(claudeFile)) {
-            String(Files.readAllBytes(claudeFile), StandardCharsets.UTF_8)
+        AGENT_FILES.forEach { appendGuidance(projectDir.resolve(it)) }
+    }
+
+    private fun appendGuidance(file: Path) {
+        val existing = if (Files.exists(file)) {
+            String(Files.readAllBytes(file), StandardCharsets.UTF_8)
         } else {
             ""
         }
@@ -97,7 +109,7 @@ object ProjectPointer {
             else -> "\n\n"
         }
         Files.write(
-            claudeFile,
+            file,
             (existing + separator + snippet + "\n").toByteArray(StandardCharsets.UTF_8),
         )
     }
