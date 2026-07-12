@@ -32,20 +32,21 @@ internal const val PACKAGE_NAME_EXPR =
         "ELSE substr(fqn, 1, length(rtrim(fqn, replace(fqn, '.', ''))) - 1) END"
 
 /**
- * Every session table carrying per-shard rows, i.e. the targets of the delta
- * deletion pass in [SessionBuilder.buildDelta]. All rows referencing another
- * table's ids (annotations, string_constants, ...) come from the same shard
- * as their referent, so a per-shard delete never leaves dangling references.
- * FTS hook: the string_constants FTS5 shadow (parallel work stream) is kept
- * in sync at two sites — one statement before the string_constants DELETE in
+ * Every session table with its own id primary key. [SessionBuilder.merge]
+ * records each shard's contiguous id range per table in session_shard_ranges,
+ * and the delta deletion pass removes exactly those ranges — class_interfaces
+ * (no id column) is covered through its shard's classes range. All rows
+ * referencing another table's ids (annotations, string_constants, ...) come
+ * from the same shard as their referent, so a per-shard delete never leaves
+ * dangling references. The string_constants FTS5 shadow is kept in sync at
+ * two sites — one statement before the string_constants delete in
  * [SessionBuilder.deleteShards], one after the string_constants INSERT in
  * [SessionBuilder.merge].
  */
-internal val DELTA_TABLES = listOf(
+internal val ID_TABLES = listOf(
     "config_properties",
     "spi_registrations",
     "classes",
-    "class_interfaces",
     "annotations",
     "methods",
     "bean_definitions",
@@ -109,15 +110,13 @@ class SessionBuilder {
     ) {
         val temporary = AtomicFiles.temporaryIn(target.parent, "session")
         try {
-            // Plain copy: the dominant cost at multi-GB sessions is sequential
-            // IO (~1-2s), still far below a full re-merge.
-            Files.copy(previous, temporary, StandardCopyOption.REPLACE_EXISTING)
+            cloneOrCopy(previous, temporary)
             DriverManager.getConnection("jdbc:sqlite:${temporary.toAbsolutePath()}")
                 .use { connection ->
                     configure(connection)
                     deleteShards(connection, removedShardIds)
                     addedShards.sortedBy(SessionShard::shardId)
-                        .forEach { shard -> merge(connection, shard) }
+                        .forEach { shard -> merge(connection, shard, syncFts = true) }
                     connection.createStatement().use { statement ->
                         statement.execute("PRAGMA analysis_limit=400")
                         statement.execute("ANALYZE")
@@ -128,6 +127,42 @@ class SessionBuilder {
             // No-op after a successful commit (the rename moved the file).
             Files.deleteIfExists(temporary)
         }
+    }
+
+    /**
+     * Seeds the delta temp file from the previous session. Copy-on-write
+     * cloning matters twice at multi-GB sessions: a 20GB session takes ~10s
+     * to copy byte-by-byte but clones in milliseconds, and a clone shares
+     * every unmodified block with its base instead of doubling disk use.
+     * NIO exposes no reflink, so this shells out to cp (`-c` = APFS
+     * clonefile on macOS, `--reflink=auto` on GNU coreutils) and falls back
+     * to a plain copy anywhere that fails — Windows, exotic filesystems, or
+     * a missing cp.
+     */
+    private fun cloneOrCopy(source: Path, destination: Path) {
+        val os = System.getProperty("os.name").lowercase()
+        val command = when {
+            os.contains("mac") || os.contains("darwin") ->
+                listOf("cp", "-c", source.toString(), destination.toString())
+            os.contains("linux") ->
+                listOf("cp", "--reflink=auto", source.toString(), destination.toString())
+            else -> null
+        }
+        if (command != null) {
+            try {
+                Files.deleteIfExists(destination)
+                val process = ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.to(java.io.File("/dev/null")))
+                    .start()
+                if (process.waitFor() == 0 && Files.isRegularFile(destination)) {
+                    return
+                }
+            } catch (_: Exception) {
+                // fall through to the byte copy
+            }
+        }
+        Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING)
     }
 
     /**
@@ -280,6 +315,25 @@ class SessionBuilder {
                 """
                 CREATE TABLE session_shards (
                   shard_id TEXT PRIMARY KEY
+                )
+                """.trimIndent(),
+            )
+            // A shard's rows occupy a contiguous id range per table (the
+            // single writer inserts each shard in one transaction, and SQLite
+            // assigns max(rowid)+1). Recording the ranges at merge time turns
+            // the delta deletion pass into indexed range deletes — the
+            // alternative, DELETE ... WHERE source_shard_id IN (...), full-
+            // scans every table and cost ~13s on a 20GB session. Ranges are
+            // internal bookkeeping: they legitimately differ between a full
+            // build and a delta build of the same shard set.
+            statement.execute(
+                """
+                CREATE TABLE session_shard_ranges (
+                  shard_id TEXT NOT NULL,
+                  table_name TEXT NOT NULL,
+                  min_id INTEGER NOT NULL,
+                  max_id INTEGER NOT NULL,
+                  PRIMARY KEY (shard_id, table_name)
                 )
                 """.trimIndent(),
             )
@@ -451,15 +505,17 @@ class SessionBuilder {
         }
     }
 
-    private fun merge(connection: Connection, shard: SessionShard) {
+    private fun merge(connection: Connection, shard: SessionShard, syncFts: Boolean = false) {
         connection.prepareStatement("ATTACH DATABASE ? AS shard").use { statement ->
             statement.setString(1, shard.path.toAbsolutePath().normalize().toString())
             statement.execute()
         }
         try {
             connection.autoCommit = false
-            val classIdOffset = maxId(connection, "classes")
-            val methodIdOffset = maxId(connection, "methods")
+            val idOffsets = ID_TABLES.associateWith { table -> maxId(connection, table) }
+            val classIdOffset = idOffsets.getValue("classes")
+            val methodIdOffset = idOffsets.getValue("methods")
+            val stringIdOffset = idOffsets.getValue("string_constants")
             // PRIMARY KEY doubles as the guard: merging a shard already in
             // the session aborts the transaction instead of duplicating rows.
             connection.prepareStatement(
@@ -594,9 +650,35 @@ class SessionBuilder {
                 statement.setString(3, shard.shardId)
                 statement.executeUpdate()
             }
-            // FTS hook (post-insert): the string_constants FTS5 shadow syncs
-            // the rows just inserted here; its delete-side counterpart runs in
-            // deleteShards before the string_constants DELETE.
+            // Full builds skip this: Stream.commit rebuilds the whole shadow
+            // in one pass over the merged content, which costs the same
+            // tokenize work once instead of per shard. The delta path has no
+            // rebuild, so it mirrors each addition here (deletions are
+            // mirrored in deleteShards).
+            if (syncFts) {
+                connection.createStatement().use { statement ->
+                    statement.executeUpdate(
+                        "INSERT INTO string_constants_fts(rowid, value) " +
+                            "SELECT id, value FROM string_constants WHERE id > $stringIdOffset",
+                    )
+                }
+            }
+            connection.prepareStatement(
+                "INSERT INTO session_shard_ranges(shard_id, table_name, min_id, max_id) " +
+                    "VALUES (?, ?, ?, ?)",
+            ).use { statement ->
+                for (table in ID_TABLES) {
+                    val newMax = maxId(connection, table)
+                    val offset = idOffsets.getValue(table)
+                    if (newMax > offset) {
+                        statement.setString(1, shard.shardId)
+                        statement.setString(2, table)
+                        statement.setInt(3, offset + 1)
+                        statement.setInt(4, newMax)
+                        statement.executeUpdate()
+                    }
+                }
+            }
             connection.commit()
         } catch (exception: Exception) {
             connection.rollback()
@@ -608,44 +690,77 @@ class SessionBuilder {
     }
 
     /**
-     * Set-based deletion for the delta path: stage the removed ids in a temp
-     * table, then one DELETE per [DELTA_TABLES] entry. Rows referencing other
-     * tables' ids always share their referent's shard, so per-shard deletes
-     * cannot dangle; the id holes they leave are why delta sessions are
-     * logically — not byte — equivalent to full builds.
+     * Range-based deletion for the delta path: each removed shard's rows are
+     * deleted through the contiguous id ranges recorded at merge time —
+     * indexed range deletes instead of DELETE...WHERE source_shard_id IN,
+     * which full-scanned every table (~13s on a 20GB session for a 3-shard
+     * removal). A shard absent from session_shard_ranges contributed no rows
+     * (session_shards records it regardless). The id holes deletions leave
+     * are why delta sessions are logically — not byte — equivalent to full
+     * builds.
      */
     private fun deleteShards(connection: Connection, shardIds: Collection<String>) {
         if (shardIds.isEmpty()) return
         try {
             connection.autoCommit = false
-            connection.createStatement().use { statement ->
-                statement.execute("CREATE TEMP TABLE removed_shards (shard_id TEXT PRIMARY KEY)")
+            val rangesByShard = HashMap<String, MutableMap<String, IntRange>>()
+            connection.prepareStatement(
+                "SELECT table_name, min_id, max_id FROM session_shard_ranges WHERE shard_id = ?",
+            ).use { statement ->
+                for (shardId in shardIds) {
+                    statement.setString(1, shardId)
+                    statement.executeQuery().use { rows ->
+                        while (rows.next()) {
+                            rangesByShard.getOrPut(shardId) { HashMap() }[rows.getString(1)] =
+                                rows.getInt(2)..rows.getInt(3)
+                        }
+                    }
+                }
             }
-            connection.prepareStatement("INSERT INTO removed_shards(shard_id) VALUES (?)")
+            connection.createStatement().use { statement ->
+                for (shardId in shardIds) {
+                    val ranges = rangesByShard[shardId] ?: continue
+                    // External-content FTS5 rows must be removed while the
+                    // doomed content rows are still readable — the 'delete'
+                    // command needs the exact indexed values.
+                    ranges["string_constants"]?.let { range ->
+                        statement.executeUpdate(
+                            "INSERT INTO string_constants_fts(string_constants_fts, rowid, value) " +
+                                "SELECT 'delete', id, value FROM string_constants " +
+                                "WHERE id BETWEEN ${range.first} AND ${range.last}",
+                        )
+                    }
+                    // class_interfaces has no id of its own; its rows follow
+                    // the shard's classes range via the class_id index.
+                    ranges["classes"]?.let { range ->
+                        statement.executeUpdate(
+                            "DELETE FROM class_interfaces " +
+                                "WHERE class_id BETWEEN ${range.first} AND ${range.last}",
+                        )
+                    }
+                    for (table in ID_TABLES) {
+                        ranges[table]?.let { range ->
+                            statement.executeUpdate(
+                                "DELETE FROM $table WHERE id BETWEEN ${range.first} AND ${range.last}",
+                            )
+                        }
+                    }
+                }
+            }
+            connection.prepareStatement("DELETE FROM session_shards WHERE shard_id = ?")
                 .use { statement ->
                     shardIds.forEach { shardId ->
                         statement.setString(1, shardId)
                         statement.executeUpdate()
                     }
                 }
-            connection.createStatement().use { statement ->
-                fun deleteFrom(table: String) {
-                    statement.executeUpdate(
-                        "DELETE FROM $table WHERE source_shard_id IN " +
-                            "(SELECT shard_id FROM removed_shards)",
-                    )
+            connection.prepareStatement("DELETE FROM session_shard_ranges WHERE shard_id = ?")
+                .use { statement ->
+                    shardIds.forEach { shardId ->
+                        statement.setString(1, shardId)
+                        statement.executeUpdate()
+                    }
                 }
-                DELTA_TABLES.filter { it != "string_constants" }.forEach(::deleteFrom)
-                // FTS hook (pre-delete): the string_constants FTS5 shadow
-                // drops the doomed rows here, while they are still readable
-                // for the shadow's join.
-                deleteFrom("string_constants")
-                statement.executeUpdate(
-                    "DELETE FROM session_shards WHERE shard_id IN " +
-                        "(SELECT shard_id FROM removed_shards)",
-                )
-                statement.execute("DROP TABLE removed_shards")
-            }
             connection.commit()
         } catch (exception: Exception) {
             connection.rollback()

@@ -61,6 +61,34 @@ class SessionDeltaTest {
         SessionBuilder().build(viaFull, listOf(bravo, charlie, delta))
 
         assertEquals(canonicalDump(viaFull), canonicalDump(viaDelta))
+        // The FTS5 shadow is maintained incrementally on the delta path
+        // (mirrored deletes + per-shard inserts) while full builds rebuild it
+        // once at commit: integrity-check throws on any divergence from the
+        // content table, and a trigram-served LIKE must return the same rows
+        // either way.
+        DriverManager.getConnection("jdbc:sqlite:${viaDelta.toAbsolutePath()}").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute(
+                    "INSERT INTO string_constants_fts(string_constants_fts) VALUES('integrity-check')",
+                )
+            }
+        }
+        fun ftsMatches(session: Path): List<String> =
+            DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery(
+                        "SELECT s.value, s.source_shard_id FROM string_constants_fts f " +
+                            "JOIN string_constants s ON s.id = f.rowid " +
+                            "WHERE f.value LIKE '%from%' ORDER BY s.value, s.source_shard_id",
+                    ).use { rows ->
+                        val results = mutableListOf<String>()
+                        while (rows.next()) results += "${rows.getString(1)}|${rows.getString(2)}"
+                        results
+                    }
+                }
+            }
+        assertEquals(ftsMatches(viaFull), ftsMatches(viaDelta))
+        assertTrue(ftsMatches(viaDelta).isNotEmpty(), "battery must exercise the trigram path")
         assertTrue(SessionBuilder().isReusable(viaDelta))
         assertEquals(
             setOf(bravo.shardId, charlie.shardId, delta.shardId),

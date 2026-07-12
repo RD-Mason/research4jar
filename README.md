@@ -118,7 +118,7 @@ If you are not sure which command to use, start with the task:
 | Search broadly when you only have a word or symbol fragment | `research4jar search-symbol '<text>'`, then `research4jar open-symbol '<fqn|Class#method>'` |
 | Inspect Spring Boot behavior | `find-config-properties`, `get-bean-definitions`, `explain-conditional`, `find-implementations`, or `find-by-annotation` |
 
-`research4jar index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache and unchanged classpaths reuse the session database.
+`research4jar index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache, unchanged classpaths reuse the session database, and small classpath changes update the previous session in place (seconds even on thousand-jar classpaths).
 
 `find-implementations` is transitive by default (subinterface and superclass chains across jars); `find-by-annotation` expands meta-annotations by default (querying `@Component` finds `@Service` classes). Pass `--direct` for declared-only matching.
 

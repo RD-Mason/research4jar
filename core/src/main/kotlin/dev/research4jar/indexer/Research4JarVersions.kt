@@ -24,5 +24,5 @@ object Research4JarVersions {
      * materialized copy and its four indexes were 65% of the session bytes)
      * and derived columns are computed set-based in SQL.
      */
-    const val SESSION = 4
+    const val SESSION = 5
 }
