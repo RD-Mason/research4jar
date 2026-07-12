@@ -47,6 +47,11 @@ class SessionDeltaTest {
         val bravo = shard("bravo")
         val charlie = shard("charlie")
         val delta = shard("delta")
+        // Corrupt-shard orphans (a method whose class row is gone) merge with
+        // a NULL symbol. alpha's rides the delta DELETE mirror and delta's
+        // the delta INSERT mirror; both must leave methods_fts sound.
+        injectOrphanMethod(alpha.path)
+        injectOrphanMethod(delta.path)
 
         val previous = root.resolve("previous-session.db")
         SessionBuilder().build(previous, listOf(alpha, bravo, charlie))
@@ -61,34 +66,41 @@ class SessionDeltaTest {
         SessionBuilder().build(viaFull, listOf(bravo, charlie, delta))
 
         assertEquals(canonicalDump(viaFull), canonicalDump(viaDelta))
-        // The FTS5 shadow is maintained incrementally on the delta path
-        // (mirrored deletes + per-shard inserts) while full builds rebuild it
-        // once at commit: integrity-check throws on any divergence from the
-        // content table, and a trigram-served LIKE must return the same rows
-        // either way.
-        DriverManager.getConnection("jdbc:sqlite:${viaDelta.toAbsolutePath()}").use { connection ->
-            connection.createStatement().use { statement ->
-                statement.execute(
-                    "INSERT INTO string_constants_fts(string_constants_fts) VALUES('integrity-check')",
-                )
-            }
+        // The FTS5 shadows are maintained incrementally on the delta path
+        // (mirrored deletes + per-shard inserts) while full builds rebuild
+        // them once at commit: integrity-check throws on any divergence from
+        // the content table, and a trigram-served LIKE must return the same
+        // rows either way.
+        assertFtsIntegrity(viaDelta)
+        val probes = listOf(
+            "SELECT s.value, s.source_shard_id FROM string_constants_fts f " +
+                "JOIN string_constants s ON s.id = f.rowid WHERE f.value LIKE '%from%'",
+            "SELECT c.fqn, c.kind, c.source_shard_id FROM classes_fts f " +
+                "JOIN classes c ON c.id = f.rowid WHERE f.fqn LIKE '%Helper%'",
+            "SELECT m.symbol, m.source_shard_id FROM methods_fts f " +
+                "JOIN methods m ON m.id = f.rowid WHERE f.symbol LIKE '%#bean%'",
+            "SELECT m.symbol, m.descriptor, m.source_shard_id FROM methods_fts f " +
+                "JOIN methods m ON m.id = f.rowid WHERE f.descriptor LIKE '%Helper;%'",
+        )
+        for (probe in probes) {
+            assertEquals(ftsMatches(viaFull, probe), ftsMatches(viaDelta, probe), probe)
+            assertTrue(
+                ftsMatches(viaDelta, probe).isNotEmpty(),
+                "battery must exercise the trigram path: $probe",
+            )
         }
-        fun ftsMatches(session: Path): List<String> =
-            DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
-                connection.createStatement().use { statement ->
-                    statement.executeQuery(
-                        "SELECT s.value, s.source_shard_id FROM string_constants_fts f " +
-                            "JOIN string_constants s ON s.id = f.rowid " +
-                            "WHERE f.value LIKE '%from%' ORDER BY s.value, s.source_shard_id",
-                    ).use { rows ->
-                        val results = mutableListOf<String>()
-                        while (rows.next()) results += "${rows.getString(1)}|${rows.getString(2)}"
-                        results
-                    }
-                }
-            }
-        assertEquals(ftsMatches(viaFull), ftsMatches(viaDelta))
-        assertTrue(ftsMatches(viaDelta).isNotEmpty(), "battery must exercise the trigram path")
+        // Both build paths must carry exactly delta's orphan (alpha's was
+        // removed), and the partial orphan index the query side unions over
+        // must exist in the session either path produced.
+        assertEquals(1, scalar(viaDelta, "SELECT COUNT(*) FROM methods WHERE symbol IS NULL"))
+        assertEquals(1, scalar(viaFull, "SELECT COUNT(*) FROM methods WHERE symbol IS NULL"))
+        assertEquals(
+            1,
+            scalar(
+                viaDelta,
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_s_methods_orphan'",
+            ),
+        )
         assertTrue(SessionBuilder().isReusable(viaDelta))
         assertEquals(
             setOf(bravo.shardId, charlie.shardId, delta.shardId),
@@ -138,6 +150,7 @@ class SessionDeltaTest {
         val sessionPath = sessionOf(project)
         val deltaCopy = root.resolve("delta-copy.db")
         Files.copy(sessionPath, deltaCopy)
+        assertFtsIntegrity(deltaCopy)
         // Deleting the session forces the next identical run through the full
         // rebuild (the pointer's session is gone, so no delta base exists).
         Files.delete(sessionPath)
@@ -238,6 +251,49 @@ class SessionDeltaTest {
             ),
         )
     }
+
+    /**
+     * Hand-crafts the corrupt-shard case: a method row whose class row is
+     * missing, which [SessionBuilder.merge]'s LEFT JOIN turns into a NULL
+     * session symbol. ShardWriter can never emit one, so the row is spliced
+     * into the finished shard file.
+     */
+    private fun injectOrphanMethod(shard: Path) {
+        DriverManager.getConnection("jdbc:sqlite:${shard.toAbsolutePath()}").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeUpdate(
+                    "INSERT INTO methods(class_id, name, descriptor, return_fqn, modifiers) " +
+                        "VALUES (4242, 'orphaned', '()V', NULL, 1)",
+                )
+            }
+        }
+    }
+
+    /** integrity-check throws on any shadow/content divergence. */
+    private fun assertFtsIntegrity(session: Path) {
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+            connection.createStatement().use { statement ->
+                for (fts in listOf("string_constants_fts", "classes_fts", "methods_fts")) {
+                    statement.execute("INSERT INTO $fts($fts) VALUES('integrity-check')")
+                }
+            }
+        }
+    }
+
+    private fun ftsMatches(session: Path, probe: String): List<String> =
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+            sortedRows(connection, probe)
+        }
+
+    private fun scalar(session: Path, sql: String): Int =
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery(sql).use { rows ->
+                    rows.next()
+                    rows.getInt(1)
+                }
+            }
+        }
 
     /** A minimal but real jar: one META-INF/services registration. */
     private fun writeServiceJar(target: Path, implFqn: String) {
