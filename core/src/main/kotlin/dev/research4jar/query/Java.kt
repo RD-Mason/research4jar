@@ -100,23 +100,65 @@ internal fun methodMatchArgs(term: String): List<Any?> {
     return matchArgs(term) + listOf(cls, mname)
 }
 
+// Raw '%term%' for the fts arms. No escapeLike and no ESCAPE clause: LIKE
+// with an ESCAPE argument never reaches fts5's xBestIndex (see Strings.kt),
+// so only terms whose pattern is literal-safe route to the fts queries —
+// trigramSearchable guarantees escaped == raw.
+private fun containsPattern(term: String): String = "%$term%"
+
 // Two-stage search shared by find-class/find-method/search-symbol: the fast
 // query probes only equality and range predicates (index-backed); its every
 // match outscores every contains-tier match, so a full fast page equals the
-// legacy page. Underfilled pages fall back to the legacy contains scan.
+// legacy page. Underfilled pages fall back to the contains scan: [legacies]
+// is tried in order, with every candidate but the last allowed to fail —
+// the trigram-served rewrite runs first and a session built before
+// classes_fts/methods_fts existed falls through to the original scan, the
+// same fallback pattern as find-string.
 private fun <T> twoStage(
     session: java.sql.Connection,
     fastSql: String,
-    legacySql: String,
-    args: List<Any?>,
+    fastArgs: List<Any?>,
+    legacies: List<Pair<String, List<Any?>>>,
     page: Int,
     pageSize: Int,
     scan: (java.sql.ResultSet) -> T,
 ): List<T> {
-    val limitArgs = args + listOf(pageSize + 1, (page - 1) * pageSize)
-    val fast = session.query(fastSql, limitArgs) { it.mapRows(scan) }
+    val limits = listOf(pageSize + 1, (page - 1) * pageSize)
+    val fast = session.query(fastSql, fastArgs + limits) { it.mapRows(scan) }
     if (fast.size > pageSize) return fast
-    return session.query(legacySql, limitArgs) { it.mapRows(scan) }
+    for ((sql, args) in legacies.dropLast(1)) {
+        try {
+            return session.query(sql, args + limits) { it.mapRows(scan) }
+        } catch (_: java.sql.SQLException) {
+            // Session predates the trigram tables; the next candidate answers.
+        }
+    }
+    val (sql, args) = legacies.last()
+    return session.query(sql, args + limits) { it.mapRows(scan) }
+}
+
+// The contains-scan candidates for find-class, ordered by preference: the
+// classes_fts rewrite for trigram-eligible terms, then the original scan.
+internal fun classContainsQueries(term: String): List<Pair<String, List<Any?>>> {
+    val legacy = CLASS_SEARCH_SQL to matchArgs(term)
+    if (!trigramSearchable(term)) return listOf(legacy)
+    return listOf(
+        CLASS_SEARCH_FTS_SQL to matchArgs(term) + listOf(containsPattern(term)),
+        legacy,
+    )
+}
+
+// Likewise for find-method. No '(' restriction: unlike the search-symbol
+// string tier there is no name||descriptor concatenation to straddle — every
+// arm reads a single stored column.
+internal fun methodContainsQueries(term: String): List<Pair<String, List<Any?>>> {
+    val legacy = METHOD_SEARCH_SQL to methodMatchArgs(term)
+    if (!trigramSearchable(term)) return listOf(legacy)
+    val pattern = containsPattern(term)
+    return listOf(
+        METHOD_SEARCH_FTS_SQL to methodMatchArgs(term) + listOf(pattern, pattern),
+        legacy,
+    )
 }
 
 fun findClass(
@@ -127,7 +169,9 @@ fun findClass(
     pageSize: Int,
 ): ClassSearchResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
     data class Pending(val result: ClassSearchResult, val shardId: String)
-    var pending = twoStage(session, CLASS_SEARCH_FAST_SQL, CLASS_SEARCH_SQL, matchArgs(term), page, pageSize) {
+    var pending = twoStage(
+        session, CLASS_SEARCH_FAST_SQL, matchArgs(term), classContainsQueries(term), page, pageSize,
+    ) {
         val fqn = it.getString(1)
         val split = splitFqn(fqn)
         Pending(
@@ -169,7 +213,7 @@ fun findMethod(
 ): MethodSearchResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
     data class Pending(val result: MethodSearchResult, val shardId: String)
     var pending = twoStage(
-        session, METHOD_SEARCH_FAST_SQL, METHOD_SEARCH_SQL, methodMatchArgs(term), page, pageSize,
+        session, METHOD_SEARCH_FAST_SQL, methodMatchArgs(term), methodContainsQueries(term), page, pageSize,
     ) {
         Pending(
             MethodSearchResult(
@@ -248,6 +292,125 @@ fun listPackages(
     )
 }
 
+// One raw cascade row. The name is nullable because an orphaned method (NULL
+// symbol) surfaces with a NULL name; searchSymbol's response mapping rejects
+// such rows exactly as it always has (real merges never produce them), while
+// SearchSymbolParityTest compares them oracle-vs-cascade at this level.
+internal data class SymbolRow(
+    val kind: String,
+    val name: String?,
+    val owner: String?,
+    val detail: String?,
+    val shardId: String,
+    val score: Int,
+    val matchReason: String,
+)
+
+// One contains tier of the cascade: the trigram-served rewrite when the term
+// routes to it (null otherwise), and the original scan it falls back to when
+// the session predates classes_fts/methods_fts — the find-string pattern.
+internal class ContainsTier(
+    val legacySql: String,
+    val ftsSql: String?,
+    val ftsArgs: List<Any?>?,
+)
+
+// Per-term tier selection. Class/method/string tiers serve trigram-eligible
+// terms (>= 3 codepoints, no LIKE metacharacters — same routing rule as
+// find-string) through the fts rewrites; the string tier additionally sends
+// '('-containing terms to the legacy scan, because its detail column is the
+// computed m.name || m.descriptor and an occurrence spanning that boundary
+// always covers the descriptor's leading '(' — such terms cannot be
+// decomposed into per-column matches. Annotation, spi and config-property
+// tiers always run the original scans (measured negligible).
+internal fun symbolContainsTiers(term: String): List<ContainsTier> {
+    if (!trigramSearchable(term)) {
+        return SEARCH_SYMBOL_CONTAINS_TIERS.map { ContainsTier(it, null, null) }
+    }
+    val pattern = containsPattern(term)
+    val args = matchArgs(term)
+    return listOf(
+        ContainsTier(
+            SEARCH_SYMBOL_CONTAINS_TIERS[0],
+            SEARCH_SYMBOL_CLASS_FTS_SQL,
+            args + listOf(pattern, pattern),
+        ),
+        ContainsTier(
+            SEARCH_SYMBOL_CONTAINS_TIERS[1],
+            SEARCH_SYMBOL_METHOD_FTS_SQL,
+            args + listOf(pattern, pattern, pattern),
+        ),
+        ContainsTier(SEARCH_SYMBOL_CONTAINS_TIERS[2], null, null),
+        ContainsTier(SEARCH_SYMBOL_CONTAINS_TIERS[3], null, null),
+        ContainsTier(SEARCH_SYMBOL_CONTAINS_TIERS[4], null, null),
+        if ('(' in term) {
+            ContainsTier(SEARCH_SYMBOL_CONTAINS_TIERS[5], null, null)
+        } else {
+            ContainsTier(
+                SEARCH_SYMBOL_CONTAINS_TIERS[5],
+                SEARCH_SYMBOL_STRING_FTS_SQL,
+                args + listOf(pattern, pattern, pattern, pattern),
+            )
+        },
+    )
+}
+
+private fun runContainsTier(
+    session: java.sql.Connection,
+    tier: ContainsTier,
+    term: String,
+    limit: Int,
+    scan: (java.sql.ResultSet) -> SymbolRow,
+): List<SymbolRow> {
+    if (tier.ftsSql != null) {
+        try {
+            return session.query(tier.ftsSql, tier.ftsArgs!! + listOf(limit)) { it.mapRows(scan) }
+        } catch (_: java.sql.SQLException) {
+            // Session predates classes_fts/methods_fts; the legacy tier answers.
+        }
+    }
+    return session.query(tier.legacySql, matchArgs(term) + listOf(limit)) { it.mapRows(scan) }
+}
+
+// The raw cascade behind searchSymbol, exposed for SearchSymbolParityTest.
+// Underfilled fast pages cascade through the per-kind contains tiers instead
+// of scanning the whole search_symbols view (the view expands to millions of
+// joined rows; the cascade usually stops after the classes tier). Ordering
+// stays identical to SEARCH_SYMBOL_SQL because every fast-tier score outranks
+// every contains score and the contains scores are strictly ordered by kind.
+internal fun searchSymbolRows(
+    session: java.sql.Connection,
+    term: String,
+    page: Int,
+    pageSize: Int,
+): Pair<List<SymbolRow>, Boolean> {
+    val scan: (java.sql.ResultSet) -> SymbolRow = {
+        SymbolRow(
+            kind = it.getString(1),
+            name = it.getString(2),
+            owner = it.getString(3),
+            detail = it.getString(4),
+            shardId = it.getString(5),
+            score = it.getInt(6),
+            matchReason = it.getString(7),
+        )
+    }
+    val limit = pageSize + 1
+    val offset = (page - 1) * pageSize
+    val needed = offset + limit
+    var rows = session.query(SEARCH_SYMBOL_FAST_SQL, matchArgs(term) + listOf(needed, 0)) {
+        it.mapRows(scan)
+    }
+    for (tier in symbolContainsTiers(term)) {
+        if (rows.size >= needed) break
+        rows = rows + runContainsTier(session, tier, term, needed - rows.size, scan)
+    }
+    var pending = rows.drop(offset)
+    val hasMore = pending.size > pageSize
+    if (hasMore) pending = pending.subList(0, pageSize)
+    return pending to hasMore
+}
+
 fun searchSymbol(
     pointer: ProjectPointerData,
     manifestPath: String,
@@ -255,45 +418,20 @@ fun searchSymbol(
     page: Int,
     pageSize: Int,
 ): SearchSymbolResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
-    data class Pending(val result: SearchSymbolResult, val shardId: String)
-    val scan: (java.sql.ResultSet) -> Pending = {
-        Pending(
-            SearchSymbolResult(
-                kind = it.getString(1),
-                name = it.getString(2),
-                owner = it.getString(3),
-                detail = it.getString(4),
-                sourceJar = "",
-                score = it.getInt(6),
-                matchReason = it.getString(7),
-            ),
-            it.getString(5),
-        )
-    }
-    // Underfilled fast pages cascade through the per-kind contains tiers
-    // instead of scanning the whole search_symbols view (the view expands to
-    // millions of joined rows; the cascade usually stops after the classes
-    // scan). Ordering stays identical to SEARCH_SYMBOL_SQL because every
-    // fast-tier score outranks every contains score and the contains scores
-    // are strictly ordered by kind — see SearchSymbolParityTest.
-    val limit = pageSize + 1
-    val offset = (page - 1) * pageSize
-    val needed = offset + limit
-    var rows = session.query(SEARCH_SYMBOL_FAST_SQL, matchArgs(term) + listOf(needed, 0)) {
-        it.mapRows(scan)
-    }
-    for (tier in SEARCH_SYMBOL_CONTAINS_TIERS) {
-        if (rows.size >= needed) break
-        rows = rows + session.query(tier, matchArgs(term) + listOf(needed - rows.size)) {
-            it.mapRows(scan)
-        }
-    }
-    var pending = rows.drop(offset)
-    val hasMore = pending.size > pageSize
-    if (hasMore) pending = pending.subList(0, pageSize)
+    val (pending, hasMore) = searchSymbolRows(session, term, page, pageSize)
 
     val sources = if (pending.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
-    val results = pending.map { it.result.copy(sourceJar = sourceJarName(sources, it.shardId)) }
+    val results = pending.map { row ->
+        SearchSymbolResult(
+            kind = row.kind,
+            name = row.name!!,
+            owner = row.owner,
+            detail = row.detail,
+            sourceJar = sourceJarName(sources, row.shardId),
+            score = row.score,
+            matchReason = row.matchReason,
+        )
+    }
     SearchSymbolResponse(
         query = SymbolRequest(command = "search-symbol", arg = term),
         results = results,
@@ -699,3 +837,189 @@ WHERE (sc.value = p.term
 ORDER BY name, source_shard_id
 LIMIT ?""",
 )
+
+// ---------------------------------------------------------------------------
+// Trigram-served rewrites of the contains scans, used for trigramSearchable
+// terms (escaped == raw, so the raw '%term%' bound to each fts LIKE is the
+// same pattern the legacy arms evaluate). Each rewrite computes the identical
+// match SET as its legacy query — proven row-for-row, page-for-page by
+// SearchSymbolParityTest — by folding every WHERE arm into an index-served
+// branch of a UNION over rowids (UNION, not UNION ALL: a row matching several
+// arms appears once, as in the single-scan original):
+//
+//  - same-column folding (always true): col = t and col LIKE 't%' are subsets
+//    of col LIKE '%t%', which default-collation trigram LIKE serves with core
+//    LIKE semantics (ASCII case folding included).
+//  - simple_name is a substring of fqn (derived at merge time), so
+//    simple-name equality/prefix arms fold into the classes_fts fqn arm.
+//  - m.name is a trailing substring of m.symbol whenever symbol is NOT NULL
+//    (the merge writes symbol = fqn || '#' || name), so name arms fold into
+//    the methods_fts symbol arm; NULL-symbol orphans are re-served by their
+//    ORIGINAL legacy arms over the ~empty idx_s_methods_orphan partial index.
+//    c.fqn is NOT folded into symbol (the parity fixture deliberately breaks
+//    that containment): owner arms run through classes_fts joined on
+//    class_id instead, which is exact on any data.
+//  - the string tier's detail column is m.name || m.descriptor. For terms
+//    without '(' a match cannot straddle the boundary (descriptors start
+//    with '(', so a straddling occurrence would contain '('), hence
+//    detail-contains ≡ name-contains OR descriptor-contains, and
+//    detail = t is unsatisfiable. Strings reach their method's rows through
+//    idx_s_strconst_class plus sc.method_id = m.id, exact because extraction
+//    only attaches a method of the string's own class.
+// ---------------------------------------------------------------------------
+
+// find-class contains scan over classes_fts. Every legacy arm (fqn equality/
+// prefix/contains, simple_name equality/prefix) folds into fqn LIKE '%t%'.
+// CROSS JOIN (here and in the other rewrites) pins the hits union as the
+// outer loop: left free, the planner sometimes walks a whole base-table
+// index in ORDER BY order probing hits per row — measured seconds on a
+// multi-GB session for rare terms, versus milliseconds hits-driven.
+internal const val CLASS_SEARCH_FTS_SQL = """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?)),
+hits(id) AS (
+  SELECT rowid FROM classes_fts WHERE fqn LIKE ?
+),
+matches AS (
+  SELECT c.fqn, c.simple_name, c.package_name, c.kind, c.super_fqn, c.source_shard_id,$CLASS_SEARCH_SCORE_SQL
+  FROM hits h CROSS JOIN classes c ON c.id = h.id, params p
+)$CLASS_SEARCH_SELECT_SQL"""
+
+// find-method contains scan. Branches: exact symbol probe (a full 'fqn#name'
+// term is not a substring of anything the name arms see), the dotted
+// (cls, mname) probe (its '#'-free form never occurs in symbol), the name
+// arms (equality/prefix/contains ≡ name-contains, folded into symbol via the
+// merge invariant and verified back on m.name), the owner arm via
+// classes_fts, and the NULL-symbol orphans re-running their original arms.
+internal const val METHOD_SEARCH_FTS_SQL = """
+WITH params(term, simple, prefix, contains, hi, cls, mname) AS (VALUES (?, ?, ?, ?, ?, ?, ?)),
+hits(id) AS (
+  SELECT m.id FROM methods m, params p WHERE m.symbol = p.term
+  UNION
+  SELECT m.id FROM methods m JOIN classes c ON c.id = m.class_id, params p
+  WHERE c.fqn = p.cls AND m.name = p.mname
+  UNION
+  SELECT m.id FROM methods_fts f JOIN methods m ON m.id = f.rowid, params p
+  WHERE f.symbol LIKE ? AND m.name LIKE p.contains ESCAPE '\'
+  UNION
+  SELECT m.id FROM classes_fts f JOIN methods m ON m.class_id = f.rowid
+  WHERE f.fqn LIKE ?
+  UNION
+  SELECT m.id FROM methods m, params p
+  WHERE m.symbol IS NULL
+    AND (m.name = p.term
+      OR m.name LIKE p.prefix ESCAPE '\'
+      OR m.name LIKE p.contains ESCAPE '\')
+),
+matches AS (
+  SELECT c.fqn AS class_fqn, m.name, m.descriptor, m.return_fqn, m.modifiers,
+         m.source_shard_id,$METHOD_SEARCH_SCORE_SQL
+  FROM hits h
+  CROSS JOIN methods m ON m.id = h.id
+  JOIN classes c ON c.id = m.class_id
+  , params p
+)$METHOD_SEARCH_SELECT_SQL"""
+
+// search-symbol class tier (score 55): fqn arms and simple-name arms fold
+// into the classes_fts fqn column, the kind arms into its kind column. The
+// exclusion predicate and ORDER BY/LIMIT are the legacy tier's, verbatim.
+internal const val SEARCH_SYMBOL_CLASS_FTS_SQL = """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?)),
+hits(id) AS (
+  SELECT rowid FROM classes_fts WHERE fqn LIKE ?
+  UNION
+  SELECT rowid FROM classes_fts WHERE kind LIKE ?
+)
+SELECT 'class' AS kind, c.fqn AS name, NULL AS owner, c.kind AS detail,
+       c.source_shard_id, 55 AS score, 'class_contains' AS match_reason
+FROM hits h CROSS JOIN classes c ON c.id = h.id, params p
+WHERE NOT COALESCE(
+       c.fqn = p.term
+    OR c.simple_name = p.simple
+    OR (c.simple_name >= p.simple AND c.simple_name < p.hi)
+    OR (c.fqn >= p.term AND c.fqn < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?"""
+
+// search-symbol method tier (score 50): symbol arms (equality/prefix/contains
+// plus the name arms via the merge invariant) through the symbol column,
+// descriptor arms through the descriptor column (a NULL symbol indexes as ''
+// but the descriptor still indexes, so orphans surface here too), owner arms
+// through classes_fts, orphan name/descriptor/owner arms re-run verbatim.
+internal const val SEARCH_SYMBOL_METHOD_FTS_SQL = """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?)),
+hits(id) AS (
+  SELECT rowid FROM methods_fts WHERE symbol LIKE ?
+  UNION
+  SELECT rowid FROM methods_fts WHERE descriptor LIKE ?
+  UNION
+  SELECT m.id FROM classes_fts f JOIN methods m ON m.class_id = f.rowid
+  WHERE f.fqn LIKE ?
+  UNION
+  SELECT m.id FROM methods m JOIN classes c ON c.id = m.class_id, params p
+  WHERE m.symbol IS NULL
+    AND (m.name = p.simple
+      OR c.fqn = p.term
+      OR m.descriptor = p.term
+      OR m.name LIKE p.prefix ESCAPE '\'
+      OR c.fqn LIKE p.contains ESCAPE '\'
+      OR m.descriptor LIKE p.contains ESCAPE '\')
+)
+SELECT 'method' AS kind, m.symbol AS name, c.fqn AS owner, m.descriptor AS detail,
+       m.source_shard_id AS source_shard_id, 50 AS score, 'method_contains' AS match_reason
+FROM hits h
+CROSS JOIN methods m ON m.id = h.id
+JOIN classes c ON c.id = m.class_id
+, params p
+WHERE NOT COALESCE(
+       m.symbol = p.term
+    OR m.name = p.simple
+    OR (m.name >= p.simple AND m.name < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?"""
+
+// search-symbol string tier (score 30), for terms without '(' only (see
+// symbolContainsTiers): value arms through string_constants_fts, owner arms
+// through an exact-fqn probe plus classes_fts (each joined to the strings of
+// the class via idx_s_strconst_class), and the detail arms decomposed into
+// the method's name (methods_fts symbol candidates verified on m.name, plus
+// the orphan re-run) and descriptor (methods_fts descriptor column).
+internal const val SEARCH_SYMBOL_STRING_FTS_SQL = """
+WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?)),
+hits(id) AS (
+  SELECT rowid FROM string_constants_fts WHERE value LIKE ?
+  UNION
+  SELECT sc.id FROM classes c JOIN string_constants sc ON sc.class_id = c.id, params p
+  WHERE c.fqn = p.term
+  UNION
+  SELECT sc.id FROM classes_fts f JOIN string_constants sc ON sc.class_id = f.rowid
+  WHERE f.fqn LIKE ?
+  UNION
+  SELECT sc.id FROM methods_fts f
+  JOIN methods m ON m.id = f.rowid
+  JOIN string_constants sc ON sc.class_id = m.class_id AND sc.method_id = m.id
+  , params p
+  WHERE f.symbol LIKE ? AND m.name LIKE p.contains ESCAPE '\'
+  UNION
+  SELECT sc.id FROM methods m
+  JOIN string_constants sc ON sc.class_id = m.class_id AND sc.method_id = m.id
+  , params p
+  WHERE m.symbol IS NULL AND m.name LIKE p.contains ESCAPE '\'
+  UNION
+  SELECT sc.id FROM methods_fts f
+  JOIN methods m ON m.id = f.rowid
+  JOIN string_constants sc ON sc.class_id = m.class_id AND sc.method_id = m.id
+  WHERE f.descriptor LIKE ?
+)
+SELECT 'string' AS kind, sc.value AS name, c.fqn AS owner,
+       CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END AS detail,
+       sc.source_shard_id AS source_shard_id, 30 AS score, 'string_contains' AS match_reason
+FROM hits h
+CROSS JOIN string_constants sc ON sc.id = h.id
+JOIN classes c ON c.id = sc.class_id
+LEFT JOIN methods m ON m.id = sc.method_id
+, params p
+WHERE NOT COALESCE(
+       sc.value = p.term
+    OR (sc.value >= p.term AND sc.value < p.hi), 0)
+ORDER BY name, source_shard_id
+LIMIT ?"""

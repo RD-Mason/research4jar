@@ -46,6 +46,13 @@ class TwoStagePaginationTest {
                 add("com.acme.AntiWidgetFactory")
                 add("com.acme.NonWidgetish")
             }
+            // Rows were inserted directly (not through the shard merge), so
+            // re-run the external-content rebuild the merge commit performs —
+            // the trigram-served contains fallback reads these tables.
+            connection.createStatement().use { statement ->
+                statement.execute("INSERT INTO classes_fts(classes_fts) VALUES('rebuild')")
+                statement.execute("INSERT INTO methods_fts(methods_fts) VALUES('rebuild')")
+            }
         }
         return session
     }
