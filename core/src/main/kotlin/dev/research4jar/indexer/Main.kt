@@ -105,7 +105,7 @@ private fun executeIndex(options: Options): IndexStatistics {
     var newlyIndexed = 0
     val pending = mutableListOf<HashedJar>()
     val cacheHits = mutableListOf<String>()
-    var sessionStreamed = false
+    var sessionBuilt = false
 
     val threadCount = inputPaths.size
         .coerceAtMost(Runtime.getRuntime().availableProcessors())
@@ -297,7 +297,21 @@ private fun executeIndex(options: Options): IndexStatistics {
         val expectedShardIds = (cachedShardsById.keys + futuresByShardId.keys).sorted()
         val sessionBuilder = SessionBuilder()
         val optimisticSession = sessionPathFor(dataPaths, sessionFingerprint(expectedShardIds))
-        if (futuresByShardId.isNotEmpty() && !sessionBuilder.isReusable(optimisticSession)) {
+        val sessionMissing = !sessionBuilder.isReusable(optimisticSession)
+        val deltaPlan = if (sessionMissing) {
+            planSessionDelta(options.projectDir, expectedShardIds, sessionBuilder)
+        } else {
+            null
+        }
+        if (deltaPlan != null) {
+            // Delta path: a small shard-set change derives the new session
+            // from the project's previous one instead of re-merging every
+            // shard. Only a few shards merge, so unlike the streaming path
+            // below there is nothing worth overlapping with extraction; any
+            // delta failure falls through to the full buildIfAbsent rebuild.
+            futuresByShardId.values.forEach { future -> collectOutcome(future.get()) }
+            sessionBuilt = applySessionDelta(deltaPlan, selectedShards, dataPaths, sessionBuilder)
+        } else if (futuresByShardId.isNotEmpty() && sessionMissing) {
             sessionBuilder.openStream(dataPaths.sessions).use { stream ->
                 for (shardId in expectedShardIds) {
                     val shard = cachedShardsById[shardId]
@@ -312,7 +326,7 @@ private fun executeIndex(options: Options): IndexStatistics {
                     ),
                 )
             }
-            sessionStreamed = true
+            sessionBuilt = true
         } else {
             // Nothing to extract, or the expected session is already on disk:
             // collect outcomes for the shard cache only and let buildIfAbsent
@@ -328,7 +342,7 @@ private fun executeIndex(options: Options): IndexStatistics {
 
     val fingerprint = sessionFingerprint(selectedShards.map(SessionShard::shardId))
     val sessionPath = sessionPathFor(dataPaths, fingerprint)
-    if (!sessionStreamed) {
+    if (!sessionBuilt) {
         SessionBuilder().buildIfAbsent(sessionPath, selectedShards)
     }
 
@@ -369,6 +383,84 @@ private fun sessionFingerprint(shardIds: List<String>): String =
 
 private fun sessionPathFor(dataPaths: DataPaths, fingerprint: String): Path =
     dataPaths.sessions.resolve("$fingerprint.db").toAbsolutePath().normalize()
+
+// Delta eligibility bound: derive the new session from the previous one only
+// while |removed| + |added| stays within this fraction of the new shard set —
+// past it, the copy plus per-table deletes plus into-indexed-tables merges
+// approach a full rebuild's cost.
+private const val DELTA_MAX_CHANGED_FRACTION = 0.25
+
+private fun withinDeltaThreshold(changed: Int, newSetSize: Int): Boolean =
+    changed <= newSetSize * DELTA_MAX_CHANGED_FRACTION
+
+private data class SessionDeltaPlan(
+    val previousSession: Path,
+    val previousFingerprint: String,
+    val previousShardIds: Set<String>,
+)
+
+/**
+ * Delta eligibility, decided once the expected shard set is known and no
+ * reusable session exists for its fingerprint: the project pointer names a
+ * previous session that exists, carries the current schema version, records
+ * its shard set (session_shards), and differs from the expected set by at
+ * most [DELTA_MAX_CHANGED_FRACTION]. Null on any miss — the caller then
+ * rebuilds fully.
+ */
+private fun planSessionDelta(
+    projectDir: Path,
+    expectedShardIds: List<String>,
+    sessionBuilder: SessionBuilder,
+): SessionDeltaPlan? {
+    val pointerFile = projectDir.resolve(".research4jar").resolve("project.json")
+    if (!Files.isRegularFile(pointerFile)) return null
+    val pointer = try {
+        dev.research4jar.query.ProjectIndex.load(pointerFile)
+    } catch (_: Exception) {
+        return null
+    }
+    val previousSession = Paths.get(pointer.sessionDbPath).toAbsolutePath().normalize()
+    val previousShardIds = sessionBuilder.reusableShardSet(previousSession) ?: return null
+    val expected = expectedShardIds.toSet()
+    val changed = (previousShardIds - expected).size + (expected - previousShardIds).size
+    if (changed == 0 || !withinDeltaThreshold(changed, expected.size)) return null
+    return SessionDeltaPlan(previousSession, pointer.classpathFingerprint, previousShardIds)
+}
+
+/**
+ * Runs the planned delta against the shards that actually merged — extraction
+ * failures can shrink the expected set, so the diff and threshold are redone
+ * on the actual one. Returns false (after a stderr warning if the delta
+ * itself failed) to send the caller to the full rebuild; buildDelta discards
+ * its temporary file on every failure path.
+ */
+private fun applySessionDelta(
+    plan: SessionDeltaPlan,
+    selectedShards: List<SessionShard>,
+    dataPaths: DataPaths,
+    sessionBuilder: SessionBuilder,
+): Boolean {
+    val actualIds = selectedShards.map(SessionShard::shardId).toSet()
+    val removed = plan.previousShardIds - actualIds
+    val added = selectedShards.filter { it.shardId !in plan.previousShardIds }
+    if (removed.isEmpty() && added.isEmpty()) return false
+    if (!withinDeltaThreshold(removed.size + added.size, actualIds.size)) return false
+    val target = sessionPathFor(dataPaths, sessionFingerprint(actualIds.toList()))
+    progress(
+        "delta-updating session: +${added.size} -${removed.size} shards " +
+            "(base ${plan.previousFingerprint})",
+    )
+    return try {
+        sessionBuilder.buildDelta(plan.previousSession, target, removed, added)
+        true
+    } catch (exception: Exception) {
+        warn(
+            "session delta failed: ${exception.message ?: exception.javaClass.name}; " +
+                "rebuilding from all shards",
+        )
+        false
+    }
+}
 
 // A cached shard is reused when its file still exists and its on-disk size
 // matches the size recorded at registration. The shard was checksum-verified
