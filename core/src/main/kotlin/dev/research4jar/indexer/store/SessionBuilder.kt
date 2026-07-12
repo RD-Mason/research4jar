@@ -100,6 +100,13 @@ class SessionBuilder {
         }
 
         fun commit(target: Path) {
+            connection.createStatement().use { statement ->
+                // External-content fts5 tables never see the merge inserts;
+                // one rebuild scans the fully merged string_constants.
+                statement.execute(
+                    "INSERT INTO string_constants_fts(string_constants_fts) VALUES('rebuild')",
+                )
+            }
             createIndexes(connection)
             connection.createStatement().use { statement ->
                 // Sampled ANALYZE: sqlite_stat1 selectivity estimates from a
@@ -273,6 +280,19 @@ class SessionBuilder {
                   source_shard_id TEXT NOT NULL
                 )
                 """.trimIndent(),
+            )
+            // Trigram index for find-string's substring LIKE: fts5 pushes a
+            // plain `value LIKE ?` down to the trigram doclists. External
+            // content avoids duplicating the values; detail='none' plus
+            // columnsize=0 drop positions and the docsize shadow table, and
+            // both are verified to keep the LIKE pushdown on this SQLite
+            // build (EXPLAIN QUERY PLAN shows INDEX 0:L0). The table indexes
+            // nothing by itself — commit() runs the 'rebuild' command once
+            // every shard has merged.
+            statement.execute(
+                "CREATE VIRTUAL TABLE string_constants_fts USING fts5(" +
+                    "value, content='string_constants', content_rowid='id', " +
+                    "tokenize='trigram', detail='none', columnsize=0)",
             )
             // search_symbols is a view, not a copy: the materialized table
             // plus its four indexes were 65% of the session bytes while the
