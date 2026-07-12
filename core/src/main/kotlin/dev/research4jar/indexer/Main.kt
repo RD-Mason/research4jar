@@ -105,6 +105,7 @@ private fun executeIndex(options: Options): IndexStatistics {
     var newlyIndexed = 0
     val pending = mutableListOf<HashedJar>()
     val cacheHits = mutableListOf<String>()
+    var sessionStreamed = false
 
     val threadCount = inputPaths.size
         .coerceAtMost(Runtime.getRuntime().availableProcessors())
@@ -199,9 +200,24 @@ private fun executeIndex(options: Options): IndexStatistics {
         }
         val extractedCount = AtomicInteger(0)
         val progressStep = maxOf(1, extractTotal / 10)
-        val futures = pending.map { jar ->
-            executor.submit(Callable {
-                val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
+        // The streaming merge below consumes futures in sorted shardId order,
+        // so submit extraction in that same order: the pool then completes
+        // shards roughly as the merge needs them, instead of the merge frontier
+        // head-of-line blocking on a shard the pool has not even started.
+        // (shardId sorts identically to sha256; the "@version" suffix is
+        // constant within a run.) Exception: a jar big enough to dominate the
+        // extraction makespan (more than a full thread's fair share of the
+        // pending bytes; think kotlin-compiler-embeddable) starts immediately —
+        // the merge cannot pass its position until it lands wherever it sits in
+        // the schedule, so every submission slot it waits is pure wall time.
+        val jarSize = { jar: HashedJar -> statByPath[jar.path]?.size ?: 0L }
+        val fairShare = pending.sumOf(jarSize) / threadCount
+        val submissionOrder = pending.sortedBy(HashedJar::sha256)
+            .partition { jarSize(it) > fairShare }
+            .let { (outsized, rest) -> outsized.sortedByDescending(jarSize) + rest }
+        val futuresByShardId = submissionOrder.associate { jar ->
+            val shardId = "${jar.sha256}@$EXTRACTOR_VERSION"
+            shardId to executor.submit(Callable {
                 val expectedPath = dataPaths.shards.resolve("$shardId.db").toAbsolutePath().normalize()
                 val outcome = try {
                     val extracted = ZipFile(jar.path.toFile()).use {
@@ -233,29 +249,68 @@ private fun executeIndex(options: Options): IndexStatistics {
                 outcome
             })
         }
-        futures.forEach { future ->
-            val outcome = future.get()
+        fun collectOutcome(outcome: ExtractionOutcome): SessionShard? {
             outcome.warnings.forEach { warning -> warn("${outcome.jar.path.name}: $warning") }
             if (outcome.shard != null) {
                 selectedShards += outcome.shard
                 newlyIndexed++
-            } else {
-                warn(
-                    "${outcome.jar.path}: invalid or unreadable jar: " +
-                        (outcome.error?.message ?: outcome.error?.javaClass?.name),
-                )
-                missing += outcome.jar.path.fileName?.toString() ?: outcome.jar.path.toString()
+                return outcome.shard
             }
+            warn(
+                "${outcome.jar.path}: invalid or unreadable jar: " +
+                    (outcome.error?.message ?: outcome.error?.javaClass?.name),
+            )
+            missing += outcome.jar.path.fileName?.toString() ?: outcome.jar.path.toString()
+            return null
+        }
+
+        // Shard ids derive from jar hashes, so the full expected shard set —
+        // and the sorted merge order the session needs — is known before any
+        // extraction finishes. Unless a reusable session already exists for
+        // that optimistic fingerprint, merge shards on this thread as their
+        // futures complete while the extraction pool runs ahead: the session
+        // build overlaps extraction instead of starting after it. A failed
+        // extraction only shrinks the merged set, and a sorted-order merge of
+        // any subset is byte-equivalent to a plain rebuild of that subset, so
+        // the committed name comes from the shards that actually merged.
+        val cachedShardsById = selectedShards.associateBy(SessionShard::shardId)
+        val expectedShardIds = (cachedShardsById.keys + futuresByShardId.keys).sorted()
+        val sessionBuilder = SessionBuilder()
+        val optimisticSession = sessionPathFor(dataPaths, sessionFingerprint(expectedShardIds))
+        if (futuresByShardId.isNotEmpty() && !sessionBuilder.isReusable(optimisticSession)) {
+            sessionBuilder.openStream(dataPaths.sessions).use { stream ->
+                for (shardId in expectedShardIds) {
+                    val shard = cachedShardsById[shardId]
+                        ?: collectOutcome(futuresByShardId.getValue(shardId).get())
+                        ?: continue
+                    stream.merge(shard)
+                }
+                stream.commit(
+                    sessionPathFor(
+                        dataPaths,
+                        sessionFingerprint(selectedShards.map(SessionShard::shardId)),
+                    ),
+                )
+            }
+            sessionStreamed = true
+        } else {
+            // Nothing to extract, or the expected session is already on disk:
+            // collect outcomes for the shard cache only and let buildIfAbsent
+            // below reuse the session (or rebuild it for the smaller actual
+            // fingerprint when an extraction failed — rare, correctness over
+            // speed).
+            futuresByShardId.values.forEach { future -> collectOutcome(future.get()) }
         }
     } finally {
         executor.shutdown()
     }
     manifest.touch(cacheHits)
 
-    val sortedShardIds = selectedShards.map(SessionShard::shardId).sorted()
-    val fingerprint = Hashing.sha256(sortedShardIds.joinToString("\n")).take(16)
-    val sessionPath = dataPaths.sessions.resolve("$fingerprint.db").toAbsolutePath().normalize()
-    SessionBuilder().buildIfAbsent(sessionPath, selectedShards)
+    val fingerprint = sessionFingerprint(selectedShards.map(SessionShard::shardId))
+    val sessionPath = sessionPathFor(dataPaths, fingerprint)
+    if (!sessionStreamed) {
+        SessionBuilder().buildIfAbsent(sessionPath, selectedShards)
+    }
 
     val jarsIndexed = selectedShards.size
     val jarsTotal = jarsIndexed + missing.size
@@ -285,6 +340,15 @@ private fun executeIndex(options: Options): IndexStatistics {
         duration_ms = Duration.between(startedAt, Instant.now()).toMillis(),
     )
 }
+
+// The session fingerprint depends only on the set of merged shard ids, never
+// on merge timing, so the streaming and plain build paths name identical
+// sessions identically.
+private fun sessionFingerprint(shardIds: List<String>): String =
+    Hashing.sha256(shardIds.sorted().joinToString("\n")).take(16)
+
+private fun sessionPathFor(dataPaths: DataPaths, fingerprint: String): Path =
+    dataPaths.sessions.resolve("$fingerprint.db").toAbsolutePath().normalize()
 
 // A cached shard is reused when its file still exists and its on-disk size
 // matches the size recorded at registration. The shard was checksum-verified

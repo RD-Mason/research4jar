@@ -57,29 +57,72 @@ class SessionBuilder {
     }
 
     fun build(target: Path, shards: List<SessionShard>) {
-        val temporary = AtomicFiles.temporaryTarget(target)
-        try {
-            Files.deleteIfExists(temporary)
-            DriverManager.getConnection("jdbc:sqlite:${temporary.toAbsolutePath()}").use { connection ->
-                configure(connection)
-                createTables(connection)
-                shards.sortedBy(SessionShard::shardId).forEach { merge(connection, it) }
-                createIndexes(connection)
-                connection.createStatement().use { statement ->
-                    // Sampled ANALYZE: sqlite_stat1 selectivity estimates from a
-                    // few hundred rows per index steer the planner just as well
-                    // as a full scan of a multi-hundred-MB session.
-                    statement.execute("PRAGMA analysis_limit=400")
-                    statement.execute("ANALYZE")
-                }
-            }
-            AtomicFiles.commit(temporary, target)
-        } finally {
-            Files.deleteIfExists(temporary)
+        openStream(target.parent).use { stream ->
+            shards.sortedBy(SessionShard::shardId).forEach(stream::merge)
+            stream.commit(target)
         }
     }
 
-    private fun isReusable(target: Path): Boolean {
+    /**
+     * Starts an incremental session build whose final name is not yet known:
+     * the streaming index path merges shards as extraction completes and only
+     * derives the fingerprint — hence the target file — from the shards that
+     * actually merged. Callers must merge in sorted shardId order; that
+     * ordering is what makes a session for a given shard set byte-equivalent
+     * however it was produced. Always close the stream (close() discards the
+     * temporary file unless commit() already renamed it into place).
+     */
+    fun openStream(sessionsDir: Path): Stream {
+        val temporary = AtomicFiles.temporaryIn(sessionsDir, "session")
+        try {
+            Files.deleteIfExists(temporary)
+            val connection = DriverManager.getConnection("jdbc:sqlite:${temporary.toAbsolutePath()}")
+            try {
+                configure(connection)
+                createTables(connection)
+                return Stream(temporary, connection)
+            } catch (exception: Exception) {
+                connection.close()
+                throw exception
+            }
+        } catch (exception: Exception) {
+            Files.deleteIfExists(temporary)
+            throw exception
+        }
+    }
+
+    inner class Stream internal constructor(
+        private val temporary: Path,
+        private val connection: Connection,
+    ) : AutoCloseable {
+        fun merge(shard: SessionShard) {
+            this@SessionBuilder.merge(connection, shard)
+        }
+
+        fun commit(target: Path) {
+            createIndexes(connection)
+            connection.createStatement().use { statement ->
+                // Sampled ANALYZE: sqlite_stat1 selectivity estimates from a
+                // few hundred rows per index steer the planner just as well
+                // as a full scan of a multi-hundred-MB session.
+                statement.execute("PRAGMA analysis_limit=400")
+                statement.execute("ANALYZE")
+            }
+            connection.close()
+            AtomicFiles.commit(temporary, target)
+        }
+
+        override fun close() {
+            try {
+                connection.close()
+            } finally {
+                // No-op after a successful commit (the rename moved the file).
+                Files.deleteIfExists(temporary)
+            }
+        }
+    }
+
+    internal fun isReusable(target: Path): Boolean {
         if (!Files.isRegularFile(target)) return false
         return try {
             DriverManager.getConnection("jdbc:sqlite:${target.toAbsolutePath()}")
