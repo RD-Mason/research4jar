@@ -210,6 +210,12 @@ class SessionBuilder {
                 statement.execute(
                     "INSERT INTO string_constants_fts(string_constants_fts) VALUES('rebuild')",
                 )
+                statement.execute(
+                    "INSERT INTO classes_fts(classes_fts) VALUES('rebuild')",
+                )
+                statement.execute(
+                    "INSERT INTO methods_fts(methods_fts) VALUES('rebuild')",
+                )
             }
             createIndexes(connection)
             connection.createStatement().use { statement ->
@@ -459,6 +465,20 @@ class SessionBuilder {
             statement.execute(
                 "CREATE VIRTUAL TABLE string_constants_fts USING fts5(" +
                     "value, content='string_constants', content_rowid='id', " +
+                    "tokenize='trigram', detail='none', columnsize=0)",
+            )
+            // Trigram indexes for the symbol-search contains fallbacks
+            // (find-class/find-method/search-symbol), same mechanics as
+            // string_constants_fts above. DDL is the frozen contract shared
+            // with the build-side work; keep it verbatim.
+            statement.execute(
+                "CREATE VIRTUAL TABLE classes_fts USING fts5(fqn, kind, " +
+                    "content='classes', content_rowid='id', " +
+                    "tokenize='trigram', detail='none', columnsize=0)",
+            )
+            statement.execute(
+                "CREATE VIRTUAL TABLE methods_fts USING fts5(symbol, descriptor, " +
+                    "content='methods', content_rowid='id', " +
                     "tokenize='trigram', detail='none', columnsize=0)",
             )
             // search_symbols is a view, not a copy: the materialized table
@@ -799,6 +819,12 @@ class SessionBuilder {
             statement.execute("CREATE INDEX idx_s_methods_class ON methods(class_id)")
             statement.execute("CREATE INDEX idx_s_methods_name ON methods(name)")
             statement.execute("CREATE INDEX idx_s_methods_symbol ON methods(symbol)")
+            // ~Empty partial index: real merges never leave symbol NULL, but
+            // the FTS-served fallbacks re-run their legacy arms over exactly
+            // these rows (methods_fts indexes a NULL symbol as '').
+            statement.execute(
+                "CREATE INDEX idx_s_methods_orphan ON methods(id) WHERE symbol IS NULL",
+            )
             statement.execute("CREATE INDEX idx_s_bean_type ON bean_definitions(bean_type_fqn)")
             statement.execute("CREATE INDEX idx_s_bean_cfg ON bean_definitions(config_fqn)")
             statement.execute(
