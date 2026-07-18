@@ -40,6 +40,10 @@ object Research4JarVersions {
      * idx_s_methods_descriptor as the descriptor reverse lookup. The per-row
      * shadows re-tokenized every merged row (~25s of a 33s 1000-jar session
      * build) while the distinct value sets saturate near 350k entries.
+     * Still 9: the class/method accelerators are size-gated at build time
+     * (SessionBuilder.ftsMinMethods) — a session carries either all of them
+     * or none, and BOTH shapes are valid v9 layouts (queries fall back
+     * per-tier below the gate). No bump: v9 was never released.
      */
     const val SESSION = 9
 }

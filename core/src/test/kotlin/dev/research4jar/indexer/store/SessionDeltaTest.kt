@@ -21,6 +21,8 @@ import java.sql.Connection
 import java.sql.DriverManager
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -36,6 +38,23 @@ import kotlin.test.assertTrue
  * sorted multiset.
  */
 class SessionDeltaTest {
+    // The fixtures (including the real-pipeline runs) are far below the
+    // accelerator size gate but assert accelerator maintenance across the
+    // delta paths; force the accelerated shape and restore after. The
+    // below-gate delta behaviour is covered by SessionSizeGateTest.
+    private var savedFtsGate = SessionBuilder.ftsMinMethods
+
+    @BeforeTest
+    fun forceAcceleratedSessions() {
+        savedFtsGate = SessionBuilder.ftsMinMethods
+        SessionBuilder.ftsMinMethods = 0
+    }
+
+    @AfterTest
+    fun restoreSizeGate() {
+        SessionBuilder.ftsMinMethods = savedFtsGate
+    }
+
     @Test
     fun `delta session is logically equivalent to a full rebuild`() {
         val root = Files.createTempDirectory("research4jar-delta-equiv")

@@ -6,6 +6,8 @@ import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
 import kotlin.random.Random
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -34,6 +36,21 @@ import kotlin.test.assertTrue
  * FTS tiers.
  */
 class SearchSymbolParityTest {
+    // The fixtures are far below the accelerator size gate but exercise the
+    // trigram-served tiers; force the accelerated shape and restore after.
+    private var savedFtsGate = SessionBuilder.ftsMinMethods
+
+    @BeforeTest
+    fun forceAcceleratedSessions() {
+        savedFtsGate = SessionBuilder.ftsMinMethods
+        SessionBuilder.ftsMinMethods = 0
+    }
+
+    @AfterTest
+    fun restoreSizeGate() {
+        SessionBuilder.ftsMinMethods = savedFtsGate
+    }
+
     private data class Row(
         val kind: String,
         val name: String?,
