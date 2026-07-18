@@ -97,6 +97,10 @@ internal data class ResolvedJar(
     val jarFilename: String,
     val jarSha256: String,
     val classJarPath: Path?,
+    /** Every indexed jar shipping this fqn (conflict signal when > 1). */
+    val owners: List<CachedManifestRow> = emptyList(),
+    /** How the served jar was picked: "pinned" | "resolved-dependency" | "". */
+    val ownerChoice: String = "",
 )
 
 private class ObtainedSource(
@@ -115,6 +119,7 @@ fun getSource(
     home: String,
     arg: String,
     fetch: Boolean,
+    inTarget: String = "",
 ): SourceResponse {
     val trimmed = arg.trim()
     val hash = trimmed.indexOf('#')
@@ -122,7 +127,7 @@ fun getSource(
     val methodPart = (if (hash >= 0) trimmed.substring(hash + 1) else "").trim()
     require(classPart.isNotEmpty()) { "get-source requires a class FQN or Class#method" }
 
-    val resolved = resolveOwningClass(pointer, manifestPath, classPart)
+    val resolved = resolveOwningClass(pointer, manifestPath, classPart, inTarget.trim(), projectDir)
         ?: throw IllegalArgumentException(
             "class not found in the index: $classPart " +
                 "(try research4jar find-class ${splitFqn(classPart).second} to locate it)",
@@ -131,12 +136,12 @@ fun getSource(
     val sourcesDir = sourcesCacheDir(manifestPath, home)
     val obtained = obtainSource(resolved, outerFqn, sourcesDir, projectDir, fetch)
 
-    var note = obtained.note
+    var note = joinNotes(conflictNote(resolved), obtained.note)
     var slices: List<SourceSlice> = emptyList()
     var wholeFile = obtained.text
     if (methodPart.isNotEmpty()) {
         if (obtained.language == "java") {
-            val sliced = SourceSlicer.slice(obtained.text, resolved.fqn, methodPart)
+            val sliced = cachedSlice(sourcesDir, obtained.text, resolved.fqn, methodPart)
             if (sliced.slices.isNotEmpty()) {
                 slices = sliced.slices
                 wholeFile = ""
@@ -194,7 +199,7 @@ fun searchSource(
         "search-source requires --in <coordinate|jar-filename|class-fqn> to pick one jar"
     }
 
-    val resolved = resolveSearchTarget(pointer, manifestPath, inTarget.trim())
+    val resolved = resolveSearchTarget(pointer, manifestPath, inTarget.trim(), projectDir)
     val sourcesDir = sourcesCacheDir(manifestPath, home)
     val sourcesJar = locateSourcesJar(resolved, sourcesDir, projectDir, fetch)
 
@@ -223,7 +228,7 @@ fun searchSource(
         hasMore = scan.hasMore,
         page = page,
         pageSize = pageSize,
-        note = scan.skipNote(),
+        note = joinNotes(conflictNote(resolved), scan.skipNote()),
         coverage = coverageFrom(pointer),
     )
 }
@@ -251,42 +256,117 @@ internal fun resolveOwningClass(
     pointer: ProjectPointerData,
     manifestPath: String,
     classArg: String,
+    pin: String = "",
+    projectDir: String = "",
 ): ResolvedJar? = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
     data class Row(val fqn: String, val shardKey: String)
 
     val candidates = binaryNameCandidates(classArg)
     val placeholders = List(candidates.size) { "?" }.joinToString(",")
-    var row = session.query(
+    var rows = session.query(
         """
         SELECT fqn, source_shard_id FROM classes
         WHERE fqn IN ($placeholders)
         ORDER BY length(fqn), fqn, source_shard_id
-        LIMIT 1
         """.trimIndent(),
         candidates,
-    ) { rows -> rows.mapRows { Row(it.getString(1), it.getString(2)) } }.firstOrNull()
-    if (row == null && !classArg.contains('.')) {
-        row = session.query(
+    ) { r -> r.mapRows { Row(it.getString(1), it.getString(2)) } }
+    if (rows.isEmpty() && !classArg.contains('.')) {
+        // Simple-name fallback: pick the first matching fqn, then collect
+        // every jar shipping THAT fqn so conflicts are still visible.
+        rows = session.query(
             """
             SELECT fqn, source_shard_id FROM classes
-            WHERE simple_name = ?
-            ORDER BY fqn, source_shard_id
-            LIMIT 1
+            WHERE fqn = (
+                SELECT fqn FROM classes WHERE simple_name = ?
+                ORDER BY fqn, source_shard_id LIMIT 1
+            )
+            ORDER BY source_shard_id
             """.trimIndent(),
             listOf(classArg),
-        ) { rows -> rows.mapRows { Row(it.getString(1), it.getString(2)) } }.firstOrNull()
+        ) { r -> r.mapRows { Row(it.getString(1), it.getString(2)) } }
     }
-    if (row == null) return null
+    val chosenFqn = rows.firstOrNull()?.fqn ?: return null
+    val ownerKeys = rows.filter { it.fqn == chosenFqn }.map { it.shardKey }.distinct()
 
     val manifestRows = ManifestCache.loadRows(manifestPath)
-    val source = ManifestCache.mapSessionRows(session, manifestRows, listOf(row.shardKey))[row.shardKey]
+    val mapped = ManifestCache.mapSessionRows(session, manifestRows, ownerKeys)
+    val owners = ownerKeys.map { key ->
+        mapped[key] ?: CachedManifestRow(shardId = key, coordinate = "", filename = "", source = key)
+    }
+    val (served, choice) = chooseOwner(owners, pin, projectDir)
     resolveJarOnDisk(
         manifestPath,
-        fqn = row.fqn,
-        shardId = source?.shardId ?: row.shardKey,
-        coordinate = source?.coordinate ?: "",
-        jarFilename = source?.filename ?: "",
-    )
+        fqn = chosenFqn,
+        shardId = served.shardId,
+        coordinate = served.coordinate,
+        jarFilename = served.filename,
+    ).copy(owners = owners, ownerChoice = choice)
+}
+
+/**
+ * Serving priority among several jars shipping one fqn: an explicit --in pin,
+ * else the single owner the project's captured Maven resolution names (that
+ * is the version the runtime classpath actually gets), else the stable
+ * first-by-shard order — always accompanied by a conflict note upstream.
+ */
+private fun chooseOwner(
+    owners: List<CachedManifestRow>,
+    pin: String,
+    projectDir: String,
+): Pair<CachedManifestRow, String> {
+    if (pin.isNotEmpty()) {
+        // Validated even for a single owner: pinning a jar that does not ship
+        // the class must fail loudly, never silently serve another jar.
+        val matched = owners.filter { sourceMatchesArtifact(it, pin) }
+        require(matched.isNotEmpty()) {
+            "--in matches none of the ${owners.size} jar(s) containing this class: " +
+                ownerNames(owners).joinToString(", ")
+        }
+        require(matched.size == 1) {
+            "--in matches ${matched.size} of the jars containing this class: " +
+                ownerNames(matched).joinToString(", ") + "; use a full coordinate or jar filename"
+        }
+        return matched.single() to "pinned"
+    }
+    if (owners.size == 1) return owners.single() to ""
+    buildResolvedOwner(owners, projectDir)?.let { return it to "resolved-dependency" }
+    return owners.first() to ""
+}
+
+private fun ownerNames(owners: List<CachedManifestRow>): List<String> =
+    owners.map { it.source.ifEmpty { it.shardId } }
+
+/** The single owner present in .research4jar/dependencies.json, if any. */
+private fun buildResolvedOwner(
+    owners: List<CachedManifestRow>,
+    projectDir: String,
+): CachedManifestRow? {
+    if (projectDir.isEmpty()) return null
+    return try {
+        val resolved = DepGraphFile.load(projectDir).artifacts
+            .map { it.coordinate }
+            .filter { it.isNotEmpty() }
+            .toSet()
+        owners.filter { it.coordinate.isNotEmpty() && it.coordinate in resolved }.singleOrNull()
+    } catch (_: Exception) {
+        null // no captured graph (Gradle without the plugin, --jars runs)
+    }
+}
+
+/** The conflict warning attached to responses when a class has several owners. */
+private fun conflictNote(resolved: ResolvedJar): String {
+    if (resolved.owners.size <= 1) return ""
+    val served = resolved.coordinate.ifEmpty { resolved.jarFilename.ifEmpty { resolved.shardId } }
+    val how = when (resolved.ownerChoice) {
+        "pinned" -> "pinned via --in"
+        "resolved-dependency" -> "the version the project's Maven resolution selects"
+        else -> "first in stable index order; pin with --in <coordinate|jar>"
+    }
+    return "MULTI-VERSION WARNING: ${resolved.fqn} exists in ${resolved.owners.size} indexed jars (" +
+        ownerNames(resolved.owners).joinToString(", ") + "); serving $served ($how). " +
+        "Multiple versions of one artifact on the classpath cause the JVM to load whichever " +
+        "comes first — a hidden production-bug risk worth resolving in the build."
 }
 
 /**
@@ -309,10 +389,11 @@ private fun resolveSearchTarget(
     pointer: ProjectPointerData,
     manifestPath: String,
     target: String,
+    projectDir: String = "",
 ): ResolvedJar {
     val looksLikeClass = !target.contains(':') && !target.endsWith(".jar") && target.contains('.')
     if (looksLikeClass) {
-        resolveOwningClass(pointer, manifestPath, target)?.let { return it }
+        resolveOwningClass(pointer, manifestPath, target, projectDir = projectDir)?.let { return it }
     }
     val shardIds = sessionShardIds(pointer)
     val matches = ManifestCache.loadRows(manifestPath)
@@ -339,7 +420,7 @@ private fun resolveSearchTarget(
         )
     }
     if (!looksLikeClass) {
-        resolveOwningClass(pointer, manifestPath, target)?.let { return it }
+        resolveOwningClass(pointer, manifestPath, target, projectDir = projectDir)?.let { return it }
     }
     throw IllegalArgumentException(
         "--in matches no indexed jar or class: $target " +
@@ -560,6 +641,77 @@ private fun fetchSourcesJar(projectDir: String, coordinate: String) {
             "mvn dependency:get failed for $group:$artifact:$version:jar:sources " +
                 "(exit ${result.exitCode})\n" + Classpath.tail(result.output),
         )
+    }
+}
+
+// -------------------------------------------------------------- slice cache
+
+/**
+ * Bump whenever SourceSlicer semantics change: cached slices must never
+ * outlive the slicer that produced them.
+ */
+private const val SLICE_CACHE_VERSION = 1
+
+private val sliceMapper by lazy { com.fasterxml.jackson.databind.ObjectMapper() }
+
+/**
+ * Method slices keyed by (source text hash, fqn, method): re-slicing a big
+ * file re-parses ~200 KB of Java per call (~150-400 ms), while the slice
+ * itself is a few KB of stable output. The key is the text's own hash, so a
+ * changed source (new jar version, re-decompile) misses cleanly; a corrupted
+ * entry is recomputed and rewritten.
+ */
+private fun cachedSlice(sourcesDir: Path, text: String, fqn: String, method: String): MethodSlices {
+    val file = sourcesDir.resolve("slices").resolve("v$SLICE_CACHE_VERSION")
+        .resolve(dev.research4jar.indexer.Hashing.sha256(text))
+        .resolve(dev.research4jar.indexer.Hashing.sha256("$fqn#$method").substring(0, 32) + ".json")
+    readSliceCache(file)?.let { return it }
+    val sliced = SourceSlicer.slice(text, fqn, method)
+    writeSliceCache(file, sliced)
+    return sliced
+}
+
+private fun readSliceCache(file: Path): MethodSlices? = try {
+    if (!Files.isRegularFile(file)) {
+        null
+    } else {
+        val root = sliceMapper.readTree(Files.readAllBytes(file))
+        val slices = root.path("slices").map { node ->
+            SourceSlice(
+                signature = node.path("signature").asText(),
+                startLine = node.path("start_line").asInt(),
+                endLine = node.path("end_line").asInt(),
+                source = node.path("source").asText(),
+            )
+        }
+        MethodSlices(slices, root.path("note").asText(""))
+    }
+} catch (_: Exception) {
+    null
+}
+
+private fun writeSliceCache(file: Path, sliced: MethodSlices) {
+    try {
+        Files.createDirectories(file.parent)
+        val root = sliceMapper.createObjectNode()
+        root.put("note", sliced.note)
+        val array = root.putArray("slices")
+        for (slice in sliced.slices) {
+            val node = array.addObject()
+            node.put("signature", slice.signature)
+            node.put("start_line", slice.startLine)
+            node.put("end_line", slice.endLine)
+            node.put("source", slice.source)
+        }
+        val target = dev.research4jar.indexer.store.AtomicFiles.temporaryTarget(file)
+        try {
+            Files.write(target, sliceMapper.writeValueAsBytes(root))
+            dev.research4jar.indexer.store.AtomicFiles.commit(target, file)
+        } finally {
+            Files.deleteIfExists(target)
+        }
+    } catch (_: Exception) {
+        // The cache is an optimization; slicing recomputes on the next call.
     }
 }
 

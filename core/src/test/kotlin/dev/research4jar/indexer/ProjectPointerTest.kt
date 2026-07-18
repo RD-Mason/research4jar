@@ -41,6 +41,22 @@ class ProjectPointerTest {
 
 
     @Test
+    fun `every prior published snippet upgrades to the current text`() {
+        for ((index, legacy) in ProjectPointer.legacySnippetsForTest().withIndex()) {
+            val dir = Files.createTempDirectory("research4jar-guidance-v$index")
+            Files.writeString(dir.resolve("CLAUDE.md"), legacy + "\n")
+            ProjectPointer.ensureClaudeInstructions(dir)
+            val upgraded = Files.readString(dir.resolve("CLAUDE.md"))
+            assertTrue(upgraded.contains("钉住具体版本"), "legacy entry $index must upgrade")
+            assertEquals(
+                1,
+                "## Research4Jar（Java 依赖事实查询）".toRegex().findAll(upgraded).count(),
+                "legacy entry $index",
+            )
+        }
+    }
+
+    @Test
     fun `legacy guidance section upgrades in place, edited sections stay untouched`() {
         val project = Files.createTempDirectory("research4jar-guidance-upgrade")
         // Simulate a project guided by the previous release: heading present,

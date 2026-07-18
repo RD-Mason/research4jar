@@ -30,6 +30,10 @@ data class IndexStatistics(
     val jars_skipped: Int,
     val jars_missing: List<String>,
     val duration_ms: Long,
+    @field:com.fasterxml.jackson.annotation.JsonInclude(
+        com.fasterxml.jackson.annotation.JsonInclude.Include.NON_EMPTY,
+    )
+    val class_conflicts: List<ClassConflict> = emptyList(),
 )
 
 private data class Options(
@@ -365,6 +369,17 @@ private fun executeIndex(options: Options): IndexStatistics {
     ProjectPointer.ensureClaudeInstructions(options.projectDir)
     sweepStaleSessions(dataPaths)
 
+    // Duplicate-class audit: computed once per session fingerprint (cached
+    // beside the session file), re-warned on every run so the conflict stays
+    // visible. Detection failure must never fail an otherwise good index.
+    val conflicts = try {
+        ClassConflicts.detect(sessionPath, dataPaths.manifest)
+    } catch (exception: Exception) {
+        warn("class-conflict audit failed: ${exception.message}")
+        emptyList()
+    }
+    ClassConflicts.warningLines(conflicts).forEach { progress(it) }
+
     return IndexStatistics(
         jars_total = jarsTotal,
         jars_indexed = jarsIndexed,
@@ -372,6 +387,7 @@ private fun executeIndex(options: Options): IndexStatistics {
         jars_skipped = skipped,
         jars_missing = missing.sorted(),
         duration_ms = Duration.between(startedAt, Instant.now()).toMillis(),
+        class_conflicts = conflicts,
     )
 }
 

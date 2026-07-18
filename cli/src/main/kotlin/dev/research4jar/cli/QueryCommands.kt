@@ -84,7 +84,7 @@ internal fun runQueryCommand(command: String, args: Array<String>, io: CliIO) {
                 getSource(
                     pointer, manifestPath,
                     ProjectIndex.root(opts.projectDir).toString(), opts.home,
-                    opts.arg, opts.fetch,
+                    opts.arg, opts.fetch, opts.inTarget,
                 )
 
             "search-source" ->

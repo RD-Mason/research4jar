@@ -352,7 +352,7 @@ object McpServer {
                 val projectRoot = ProjectIndex.root(arguments.projectDir.ifEmpty { null }).toString()
                 getSource(
                     pointer, manifestPath, projectRoot, arguments.home,
-                    arguments.fqn, arguments.fetch,
+                    arguments.fqn, arguments.fetch, arguments.inTarget,
                 )
             }
 
@@ -697,6 +697,12 @@ object McpServer {
                         "fqn" to mapOf(
                             "type" to "string",
                             "description" to "Class FQN (inner classes as Outer\$Inner) or Class#method for one method's body.",
+                        ),
+                        "in" to mapOf(
+                            "type" to "string",
+                            "description" to "Optional: pin one jar (coordinate or jar filename) when the class " +
+                                "ships in several classpath jars (multi-version conflict); the response's note " +
+                                "lists every owner.",
                         ),
                         "fetch" to mapOf(
                             "type" to "boolean",

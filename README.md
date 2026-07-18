@@ -59,6 +59,7 @@ Start from the task, not the command:
 | I only have a word or name fragment | `search-symbol '<text>'`, then `open-symbol '<fqn\|Class#method>'` |
 | Read a dependency class's actual source | `get-source <fqn>` (local sources jar, else built-in decompiler) |
 | Read just one method's implementation | `get-source 'Class#method'` — exact body slices, all overloads |
+| Is this class shipped by several jars (version conflict)? | `index` warns on stderr; `get-source` notes every owner, `--in <coordinate\|jar>` pins one |
 | Grep inside one dependency's sources | `search-source '<text>' --in <coordinate\|jar>` |
 | Who implements this interface / extends this class? | `find-implementations <fqn>` (transitive by default) |
 | What classes carry this annotation? | `find-by-annotation <fqn>` (meta-annotations expanded: `@Component` finds `@Service`) |
@@ -141,7 +142,8 @@ Downloads verify against a checksum sidecar, the shard's embedded jar identity, 
 
 - Deep Spring facts: configuration metadata, `spring.factories`/auto-configuration imports, `@Bean` definitions, conditions, meta-annotation expansion
 - General Java retrieval: classes, methods, packages, annotations, class hierarchies, SPI registrations, bytecode string constants
-- Dependency source reading: `get-source` serves real sources from local Maven/Gradle caches (opt-in `--fetch` through your own Maven), falls back to bundled CFR decompilation with per-class caching, and slices exact method bodies; `search-source` greps inside one dependency's sources — responses declare `source_kind` so agents know fidelity
+- Dependency source reading: `get-source` serves real sources from local Maven/Gradle caches (opt-in `--fetch` through your own Maven), falls back to bundled CFR decompilation with per-class caching, and slices exact method bodies (slice results cached by content hash); `search-source` greps inside one dependency's sources — responses declare `source_kind` so agents know fidelity
+- Multi-version conflict alerting: `index` audits the classpath for classes shipped by more than one jar (hidden multi-version and shaded-bundle overlaps) and warns with the offending jar pairs; source reads on a conflicted class list every owning jar and support pinning one with `--in`
 - Dependency provenance: which jar owns a symbol, which Maven dependency introduced it, and where the project's own sources consume it (`dep precise`, `dep why`; Maven captured by the CLI, Gradle natively by the build plugin)
 - Deterministic content-addressed shards, incremental re-indexing, copy-on-write session deltas, automatic cache hygiene
 - CLI + MCP stdio server + Maven/Gradle build plugins (`research4jar:index` goal, `research4jarIndex` task) from one Java 8+ fat jar, on Linux/macOS/Windows

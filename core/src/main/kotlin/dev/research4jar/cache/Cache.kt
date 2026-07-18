@@ -324,7 +324,15 @@ internal fun deleteIfStillStaleSession(path: Path, cutoff: Instant): Boolean {
                 return@withExclusiveReclamation false
             }
             try {
-                Files.deleteIfExists(path)
+                val deleted = Files.deleteIfExists(path)
+                if (deleted) {
+                    // The class-conflict audit cached beside the session goes
+                    // with it; a leftover sidecar would be an orphan forever.
+                    Files.deleteIfExists(
+                        path.resolveSibling(path.fileName.toString() + ".conflicts.json"),
+                    )
+                }
+                deleted
             } catch (_: Exception) {
                 false
             }

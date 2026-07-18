@@ -128,7 +128,9 @@ class CliHelpTest {
         assertTrue("unknown option: --direct" in reject("open-symbol", "example.Widget", "--direct"))
         assertTrue("unknown option: --no-source-grep" in reject("dep", "why", "g:a", "--no-source-grep"))
         assertTrue("unknown option: --dry-run" in reject("cache", "stats", "--dry-run"))
-        assertTrue("unknown option: --in" in reject("get-source", "example.Widget", "--in", "widget.jar"))
+        // get-source accepts --in (multi-version pin); commands without a jar
+        // selector still reject it.
+        assertTrue("unknown option: --in" in reject("open-symbol", "example.Widget", "--in", "widget.jar"))
         assertTrue("unknown option: --fetch" in reject("find-class", "Widget", "--fetch"))
     }
 

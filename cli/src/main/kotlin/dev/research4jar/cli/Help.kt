@@ -346,6 +346,9 @@ internal fun printQueryHelp(command: String, out: PrintStream) {
         if (command == "search-source") {
             add("  --in <TARGET>         Required: coordinate, jar filename, or class FQN selecting one jar.")
         }
+        if (command == "get-source") {
+            add("  --in <TARGET>         Pin one jar (coordinate or filename) when the class ships in several.")
+        }
         if (command == "get-source" || command == "search-source") {
             add("  --fetch               Download the sources jar via mvn dependency:get (opt-in).")
         }

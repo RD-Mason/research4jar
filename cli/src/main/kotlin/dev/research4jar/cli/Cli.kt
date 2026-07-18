@@ -68,7 +68,8 @@ internal fun optionsForQuery(command: String): Set<String> = buildSet {
     if (command in PAGINATED_QUERY_COMMANDS) addAll(PAGING_OPTIONS)
     if (command == "find-implementations" || command == "find-by-annotation") add("--direct")
     if (command == "get-source" || command == "search-source") add("--fetch")
-    if (command == "search-source") add("--in")
+    // get-source: --in pins one jar when a class ships in several (multi-version).
+    if (command == "get-source" || command == "search-source") add("--in")
 }
 
 internal fun preciseLookupOptions(): Set<String> = setOf(

@@ -48,6 +48,16 @@ class SourceRetrievalTest {
         fun helperValue(): Int = 42
     """.trimIndent()
 
+    private fun dupSource(tag: String) = """
+        package com.example.dup;
+
+        public class Thing {
+            public String tag() {
+                return "$tag";
+            }
+        }
+    """.trimIndent()
+
     private val utilSource = """
         package com.example.fixture;
 
@@ -129,6 +139,26 @@ class SourceRetrievalTest {
             ),
         )
 
+        // Two versions of one artifact shipping the same class: the
+        // multi-version conflict fixture. package-info is registered in both
+        // to prove the conflict audit ignores it.
+        val dupV1 = compileToJar(
+            "dup-1.0.jar",
+            mapOf("com/example/dup/Thing.java" to dupSource("v1")),
+        )
+        writeSourcesJar(
+            repo.resolve("dup-1.0-sources.jar"),
+            mapOf("com/example/dup/Thing.java" to dupSource("v1")),
+        )
+        val dupV2 = compileToJar(
+            "dup-2.0.jar",
+            mapOf("com/example/dup/Thing.java" to dupSource("v2")),
+        )
+        writeSourcesJar(
+            repo.resolve("dup-2.0-sources.jar"),
+            mapOf("com/example/dup/Thing.java" to dupSource("v2")),
+        )
+
         val manifest = Manifest(manifestPath)
         val session = root.resolve("session.db")
         val shards = listOf(
@@ -140,6 +170,12 @@ class SourceRetrievalTest {
             )),
             registerShard(manifest, mixedLanguageJar, "com.example:mixed:1.0", listOf(
                 "com.example.sc.Widget", "com.example.kt.HelpersKt",
+            )),
+            registerShard(manifest, dupV1, "com.example:dup:1.0", listOf(
+                "com.example.dup.Thing", "com.example.dup.package-info",
+            )),
+            registerShard(manifest, dupV2, "com.example:dup:2.0", listOf(
+                "com.example.dup.Thing", "com.example.dup.package-info",
             )),
         )
         SessionBuilder().build(session, shards)
@@ -236,8 +272,8 @@ class SourceRetrievalTest {
         }
     }
 
-    private fun getSource(arg: String) =
-        getSource(pointer, manifestPath.toString(), root.toString(), "", arg, fetch = false)
+    private fun getSource(arg: String, inTarget: String = "") =
+        getSource(pointer, manifestPath.toString(), root.toString(), "", arg, false, inTarget)
 
     private fun searchSource(text: String, target: String, page: Int = 1, pageSize: Int = 20) =
         searchSource(
@@ -365,11 +401,11 @@ class SourceRetrievalTest {
 
     @Test
     fun `search-source rejects ambiguous and unknown targets`() {
-        // "1.0" substring-matches every fixture jar's filename stem.
+        // "1.0" substring-matches every -1.0 fixture jar's filename stem.
         val ambiguous = assertFailsWith<IllegalArgumentException> {
             searchSource("x", "1.0")
         }
-        assertTrue(ambiguous.message!!.contains("matches 3 jars"), ambiguous.message)
+        assertTrue(ambiguous.message!!.contains("matches 4 jars"), ambiguous.message)
 
         val unknown = assertFailsWith<IllegalArgumentException> {
             searchSource("x", "no.such:artifact:9")
@@ -430,5 +466,101 @@ class SourceRetrievalTest {
             searchSource("compute\nint", "com.example:fixture:1.0")
         }
         assertTrue(failure.message!!.contains("single source lines"), failure.message)
+    }
+
+    @Test
+    fun `multi-version classes are warned about and pinnable via --in`() {
+        val unpinned = getSource("com.example.dup.Thing")
+        assertTrue(unpinned.note.contains("MULTI-VERSION WARNING"), unpinned.note)
+        assertTrue(unpinned.note.contains("com.example:dup:1.0"), unpinned.note)
+        assertTrue(unpinned.note.contains("com.example:dup:2.0"), unpinned.note)
+
+        val v1 = getSource("com.example.dup.Thing", inTarget = "com.example:dup:1.0")
+        assertEquals("com.example:dup:1.0", v1.coordinate)
+        assertTrue(v1.source.contains("\"v1\""), v1.source.take(200))
+        assertTrue(v1.note.contains("pinned"), v1.note)
+
+        val v2 = getSource("com.example.dup.Thing", inTarget = "dup-2.0.jar")
+        assertEquals("com.example:dup:2.0", v2.coordinate)
+        assertTrue(v2.source.contains("\"v2\""), v2.source.take(200))
+
+        val badPin = assertFailsWith<IllegalArgumentException> {
+            getSource("com.example.dup.Thing", inTarget = "com.example:nope:9")
+        }
+        assertTrue(badPin.message!!.contains("matches none"), badPin.message)
+
+        // Single-owner classes carry no conflict note.
+        assertTrue(!getSource("com.example.fixture.Util").note.contains("MULTI-VERSION"))
+
+        // search-source resolving a conflicted class warns the same way.
+        val search = searchSource("tag", "com.example.dup.Thing")
+        assertTrue(search.note.contains("MULTI-VERSION WARNING"), search.note)
+    }
+
+    @Test
+    fun `the build-resolved version is served by default when captured`() {
+        val research4jarDir = Files.createDirectories(root.resolve(".research4jar"))
+        Files.write(
+            research4jarDir.resolve("dependencies.json"),
+            """
+            {"schema_version":1,"build_tool":"maven","generated_at":0,
+             "artifacts":[{"coordinate":"com.example:dup:2.0","artifact":"dup",
+                           "group":"com.example","name":"dup","version":"2.0"}]}
+            """.trimIndent().toByteArray(Charsets.UTF_8),
+        )
+        val response = getSource("com.example.dup.Thing")
+        assertEquals("com.example:dup:2.0", response.coordinate)
+        assertTrue(response.source.contains("\"v2\""), response.source.take(200))
+        assertTrue(response.note.contains("Maven resolution"), response.note)
+        assertTrue(response.note.contains("MULTI-VERSION WARNING"), response.note)
+    }
+
+    @Test
+    fun `method slices are cached by source hash and invalidate with the text`() {
+        val first = getSource("com.example.fixture.Util#compute")
+        assertEquals(2, first.slices.size)
+        val cacheFile = root.resolve("sources").resolve("slices").resolve("v1")
+            .resolve(Hashing.sha256(utilSource))
+            .resolve(
+                Hashing.sha256("com.example.fixture.Util#compute").substring(0, 32) + ".json",
+            )
+        assertTrue(Files.isRegularFile(cacheFile), "expected slice cache at $cacheFile")
+
+        // A tampered entry coming back proves the second call is a cache hit.
+        Files.write(
+            cacheFile,
+            Files.readString(cacheFile).replace("return 41", "return TAMPERED")
+                .toByteArray(Charsets.UTF_8),
+        )
+        val hit = getSource("com.example.fixture.Util#compute")
+        assertTrue(hit.slices.any { it.source.contains("TAMPERED") })
+
+        // A corrupted entry is recomputed and rewritten, never served.
+        Files.write(cacheFile, byteArrayOf(0x7b, 0x00, 0x01))
+        val recomputed = getSource("com.example.fixture.Util#compute")
+        assertEquals(2, recomputed.slices.size)
+        assertTrue(recomputed.slices.any { it.source.contains("return 41") })
+    }
+
+    @Test
+    fun `duplicate classes across jars are detected and package-info is ignored`() {
+        val conflicts = dev.research4jar.indexer.ClassConflicts.detect(
+            root.resolve("session.db"),
+            manifestPath,
+        )
+        assertEquals(1, conflicts.size, conflicts.toString())
+        val pair = conflicts.single()
+        assertEquals(1, pair.shared_classes, "package-info must not count")
+        assertEquals(
+            setOf("com.example:dup:1.0", "com.example:dup:2.0"),
+            setOf(pair.jar_a, pair.jar_b),
+        )
+        // The audit result is cached beside the session for warm re-runs.
+        assertTrue(
+            Files.isRegularFile(
+                dev.research4jar.indexer.ClassConflicts.cachePath(root.resolve("session.db")),
+            ),
+        )
+        assertTrue(dev.research4jar.indexer.ClassConflicts.warningLines(conflicts).size >= 3)
     }
 }
