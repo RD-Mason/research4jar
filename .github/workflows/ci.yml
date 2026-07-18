@@ -65,7 +65,11 @@ jobs:
         run: ./gradlew :core:publishToMavenLocal :maven-plugin:publishToMavenLocal
       - name: Run research4jar:index in the fixture project
         working-directory: tests/fixtures/maven-plugin-smoke
-        run: mvn -q -B dev.research4jar:research4jar-maven-plugin:0.2.0:index
+        # The plugin version is single-sourced from gradle.properties; a
+        # hardcoded copy here went stale on the 0.3.0 bump.
+        run: |
+          VERSION=$(sed -n 's/^VERSION_NAME=//p' "$GITHUB_WORKSPACE/gradle.properties")
+          mvn -q -B "dev.research4jar:research4jar-maven-plugin:$VERSION:index"
       - name: Assert index artifacts
         working-directory: tests/fixtures/maven-plugin-smoke
         run: |
