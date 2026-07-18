@@ -47,12 +47,13 @@ class TwoStagePaginationTest {
                 add("com.acme.NonWidgetish")
             }
             // Rows were inserted directly (not through the shard merge), so
-            // re-run the external-content rebuild the merge commit performs —
-            // the trigram-served contains fallback reads these tables.
+            // re-run the classes_fts rebuild and the search-domain fill the
+            // merge commit performs — the trigram-served contains fallback
+            // reads these structures.
             connection.createStatement().use { statement ->
                 statement.execute("INSERT INTO classes_fts(classes_fts) VALUES('rebuild')")
-                statement.execute("INSERT INTO methods_fts(methods_fts) VALUES('rebuild')")
             }
+            SessionBuilder().syncSearchDomains(connection, methodIdOffset = 0, stringIdOffset = 0)
         }
         return session
     }

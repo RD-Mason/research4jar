@@ -21,8 +21,8 @@ data class StringSearchResponse(
 )
 
 // The legacy scan, kept verbatim: it serves terms the trigram index cannot,
-// covers sessions built before string_constants_fts existed, and is the
-// oracle FindStringParityTest holds the FTS path to.
+// covers sessions built before the string-value trigram structures existed,
+// and is the oracle FindStringParityTest holds the FTS path to.
 internal const val FIND_STRING_COUNT_SQL =
     """SELECT COUNT(*) FROM string_constants WHERE value LIKE ? ESCAPE '\'"""
 
@@ -38,17 +38,23 @@ LIMIT ? OFFSET ?"""
 // No ESCAPE clause: LIKE ... ESCAPE is a three-argument function that never
 // reaches fts5's xBestIndex, so the escaped form would force a linear scan
 // of the fts table. Only terms whose unescaped pattern is literal-safe route
-// here (trigramSearchable).
-internal const val FIND_STRING_FTS_COUNT_SQL =
-    "SELECT COUNT(*) FROM string_constants_fts WHERE value LIKE ?"
+// here (trigramSearchable). Since session v9 the trigram index covers the
+// deduplicated string-VALUE domain (values repeat ~4x across jars and the
+// per-row shadow's rebuild dominated the session build); candidate packs
+// explode into member values, each re-verified with the same pattern, and
+// idx_s_strconst_value fans a matching value back out to its rows — proven
+// row-exact against the legacy scan by FindStringParityTest.
+internal const val FIND_STRING_FTS_COUNT_SQL = """
+SELECT COUNT(*)
+$STRING_VALUE_DOMAIN_JOIN_SQL
+WHERE f.vals LIKE ? AND v.value LIKE ?"""
 
 internal const val FIND_STRING_FTS_SQL = """
 SELECT s.value, c.fqn, m.name, m.descriptor, s.source_shard_id
-FROM string_constants_fts f
-JOIN string_constants s ON s.id = f.rowid
+$STRING_VALUE_DOMAIN_JOIN_SQL
 JOIN classes c ON c.id = s.class_id
 LEFT JOIN methods m ON m.id = s.method_id
-WHERE f.value LIKE ?
+WHERE f.vals LIKE ? AND v.value LIKE ?
 ORDER BY s.value, c.fqn, s.source_shard_id, COALESCE(m.name, ''), COALESCE(m.descriptor, '')
 LIMIT ? OFFSET ?"""
 
@@ -58,7 +64,7 @@ internal fun findStringFtsDensityPlan(term: String): FtsDensityPlan =
         populationTable = "string_constants",
         populationIndex = "idx_s_strconst_value",
         probes = listOf(
-            FtsDensityProbe(STRING_FTS_VALUE_PROBE_SQL, listOf("%$term%")),
+            FtsDensityProbe(STRING_FTS_VALUE_PROBE_SQL, listOf("%$term%", "%$term%")),
         ),
     )
 
@@ -92,9 +98,12 @@ fun findString(
         !preferLegacyForDenseFts(session, findStringFtsDensityPlan(text))
     ) {
         try {
-            fetchPage(session, FIND_STRING_FTS_COUNT_SQL, FIND_STRING_FTS_SQL, "%$text%", page, pageSize)
+            fetchPage(
+                session, FIND_STRING_FTS_COUNT_SQL, FIND_STRING_FTS_SQL,
+                listOf("%$text%", "%$text%"), page, pageSize,
+            )
         } catch (_: SQLException) {
-            // Session predates string_constants_fts; the legacy scan still answers.
+            // Session predates the string-value domain; the legacy scan still answers.
             fetchLegacyPage(session, text, page, pageSize)
         }
     } else {
@@ -124,19 +133,22 @@ private fun fetchLegacyPage(
     page: Int,
     pageSize: Int,
 ): Pair<Int, List<PendingString>> =
-    fetchPage(session, FIND_STRING_COUNT_SQL, FIND_STRING_SQL, "%${escapeLike(text)}%", page, pageSize)
+    fetchPage(
+        session, FIND_STRING_COUNT_SQL, FIND_STRING_SQL,
+        listOf("%${escapeLike(text)}%"), page, pageSize,
+    )
 
 private fun fetchPage(
     session: Connection,
     countSql: String,
     pageSql: String,
-    pattern: String,
+    patterns: List<String>,
     page: Int,
     pageSize: Int,
 ): Pair<Int, List<PendingString>> {
     val window = pageWindow(page, pageSize)
-    val total = session.queryInt(countSql, listOf(pattern))
-    val pending = session.query(pageSql, listOf(pattern, window.limit, window.offset)) { rows ->
+    val total = session.queryInt(countSql, patterns)
+    val pending = session.query(pageSql, patterns + listOf(window.limit, window.offset)) { rows ->
         rows.mapRows {
             val methodName = it.getString(3)
             val methodDescriptor = it.getString(4)

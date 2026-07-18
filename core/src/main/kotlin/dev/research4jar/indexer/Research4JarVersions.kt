@@ -34,6 +34,12 @@ object Research4JarVersions {
      * M6 == 8: removes the repeated owner#name method symbol. Queries derive
      * it from the owning class and compact method name; owner_resolved keeps
      * the legacy NULL-symbol semantics for malformed/orphan shard rows.
+     * M6 == 9: replaces the per-row methods_fts and string_constants_fts
+     * shadows with deduplicated, packed value domains (method_names,
+     * method_descriptors, string_values plus pack/FTS structures) and adds
+     * idx_s_methods_descriptor as the descriptor reverse lookup. The per-row
+     * shadows re-tokenized every merged row (~25s of a 33s 1000-jar session
+     * build) while the distinct value sets saturate near 350k entries.
      */
-    const val SESSION = 8
+    const val SESSION = 9
 }

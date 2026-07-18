@@ -216,8 +216,8 @@ internal fun preferLegacyForDenseFts(
 // match outscores every contains-tier match, so a full fast page equals the
 // legacy page. Underfilled pages fall back to the contains scan: [legacies]
 // is tried in order, with every candidate but the last allowed to fail —
-// the trigram-served rewrite runs first and a session built before
-// classes_fts/methods_fts existed falls through to the original scan, the
+// the trigram-served rewrite runs first and a session built before the
+// trigram structures existed falls through to the original scan, the
 // same fallback pattern as find-string.
 private fun <T> twoStage(
     session: java.sql.Connection,
@@ -264,7 +264,7 @@ internal fun methodFtsDensityPlan(term: String): FtsDensityPlan {
         populationTable = "methods",
         populationIndex = "idx_s_methods_name",
         probes = listOf(
-            FtsDensityProbe(METHOD_FTS_NAME_PROBE_SQL, listOf(pattern)),
+            FtsDensityProbe(METHOD_FTS_NAME_PROBE_SQL, listOf(pattern, pattern)),
             FtsDensityProbe(METHOD_FTS_OWNER_PROBE_SQL, listOf(pattern)),
         ),
     )
@@ -465,7 +465,7 @@ internal data class SymbolRow(
 
 // One contains tier of the cascade: the trigram-served rewrite when the term
 // routes to it (null otherwise), and the original scan it falls back to when
-// the session predates classes_fts/methods_fts — the find-string pattern.
+// the session predates the trigram structures — the find-string pattern.
 internal class ContainsTier(
     val legacySql: String,
     val ftsSql: String?,
@@ -488,8 +488,8 @@ internal fun symbolClassFtsDensityPlan(term: String): FtsDensityPlan {
 internal fun symbolMethodFtsDensityPlan(term: String): FtsDensityPlan {
     val pattern = containsPattern(term)
     val probes = mutableListOf(
-        FtsDensityProbe(METHOD_FTS_NAME_PROBE_SQL, listOf(pattern)),
-        FtsDensityProbe(METHOD_FTS_DESCRIPTOR_PROBE_SQL, listOf(pattern)),
+        FtsDensityProbe(METHOD_FTS_NAME_PROBE_SQL, listOf(pattern, pattern)),
+        FtsDensityProbe(METHOD_FTS_DESCRIPTOR_PROBE_SQL, listOf(pattern, pattern)),
         FtsDensityProbe(METHOD_FTS_OWNER_PROBE_SQL, listOf(pattern)),
     )
     methodSymbolBoundary(term)?.let { boundary ->
@@ -498,9 +498,16 @@ internal fun symbolMethodFtsDensityPlan(term: String): FtsDensityPlan {
                 METHOD_FTS_OWNER_BOUNDARY_PROBE_SQL,
                 listOf("%${boundary.ownerSuffix}", "${boundary.methodPrefix}%"),
             )
+            // Pack-level LIKE cannot anchor a prefix (the pack concatenates
+            // many values), so the pack filter takes the contains form and
+            // the member check keeps the exact prefix.
             BoundaryAnchor.METHOD -> FtsDensityProbe(
                 METHOD_FTS_NAME_BOUNDARY_PROBE_SQL,
-                listOf("${boundary.methodPrefix}%", "%${boundary.ownerSuffix}"),
+                listOf(
+                    "%${boundary.methodPrefix}%",
+                    "${boundary.methodPrefix}%",
+                    "%${boundary.ownerSuffix}",
+                ),
             )
         }
     }
@@ -517,10 +524,10 @@ internal fun symbolStringFtsDensityPlan(term: String): FtsDensityPlan {
         populationTable = "string_constants",
         populationIndex = "idx_s_strconst_value",
         probes = listOf(
-            FtsDensityProbe(STRING_FTS_VALUE_PROBE_SQL, listOf(pattern)),
+            FtsDensityProbe(STRING_FTS_VALUE_PROBE_SQL, listOf(pattern, pattern)),
             FtsDensityProbe(STRING_FTS_OWNER_PROBE_SQL, listOf(pattern)),
             FtsDensityProbe(STRING_FTS_METHOD_NAME_PROBE_SQL, listOf(pattern, pattern)),
-            FtsDensityProbe(STRING_FTS_METHOD_DESCRIPTOR_PROBE_SQL, listOf(pattern)),
+            FtsDensityProbe(STRING_FTS_METHOD_DESCRIPTOR_PROBE_SQL, listOf(pattern, pattern)),
         ),
     )
 }
@@ -560,7 +567,11 @@ internal fun symbolContainsTiers(term: String): List<ContainsTier> {
                 BoundaryAnchor.OWNER -> SEARCH_SYMBOL_METHOD_OWNER_BOUNDARY_FTS_SQL to
                     listOf("%${boundary.ownerSuffix}", "${boundary.methodPrefix}%")
                 BoundaryAnchor.METHOD -> SEARCH_SYMBOL_METHOD_NAME_BOUNDARY_FTS_SQL to
-                    listOf("${boundary.methodPrefix}%", "%${boundary.ownerSuffix}")
+                    listOf(
+                        "%${boundary.methodPrefix}%",
+                        "${boundary.methodPrefix}%",
+                        "%${boundary.ownerSuffix}",
+                    )
             }
             ContainsTier(
                 routeMethodExactMatch(SEARCH_SYMBOL_CONTAINS_TIERS[1], term),
@@ -611,7 +622,7 @@ private fun runContainsTier(
         try {
             return session.query(tier.ftsSql, tier.ftsArgs!! + listOf(limit)) { it.mapRows(scan) }
         } catch (_: java.sql.SQLException) {
-            // Session predates classes_fts/methods_fts; the legacy tier answers.
+            // Session predates the trigram structures; the legacy tier answers.
         }
     }
     return session.query(tier.legacySql, matchArgs(term) + listOf(limit)) { it.mapRows(scan) }
@@ -1464,30 +1475,75 @@ LIMIT ?""",
 //  - simple_name is a substring of fqn (derived at merge time), so
 //    simple-name equality/prefix arms fold into the classes_fts fqn arm.
 //  - a resolved method projects as fqn || '#' || name. For terms without '#',
-//    an occurrence lies wholly in owner or name, so compact methods_fts
-//    name postings plus classes_fts owner postings are exact. Safe single-#
-//    terms add an indexed owner-suffix/name-prefix boundary intersection;
-//    ambiguous or non-indexable boundaries retain the legacy scan.
+//    an occurrence lies wholly in owner or name, so the deduplicated
+//    method-name domain plus classes_fts owner postings are exact. Safe
+//    single-# terms add an indexed owner-suffix/name-prefix boundary
+//    intersection; ambiguous or non-indexable boundaries retain the legacy
+//    scan.
+//  - method names/descriptors and string values are served by packed value
+//    domains (see SessionBuilder.SEARCH_DOMAINS): the FTS matches candidate
+//    PACKS, the pack's [min_id, max_id] range enumerates member values, a
+//    member-level LIKE re-verifies the pattern (complete: a member's match
+//    appears verbatim in the pack text; the member check also restores
+//    prefix anchoring that a concatenated pack cannot express), and value
+//    equality through idx_s_methods_name / idx_s_methods_descriptor /
+//    idx_s_strconst_value fans back out to the actual rows. Every distinct
+//    value is in its domain (merge-time invariant), so the decomposition
+//    changes no result set.
 //  - the string tier's detail column is m.name || m.descriptor. For terms
 //    without '(' a match cannot straddle the boundary (descriptors start
 //    with '(', so a straddling occurrence would contain '('), hence
 //    detail-contains ≡ name-contains OR descriptor-contains, and
 //    detail = t is unsatisfiable. Strings reach their method's rows through
-//    idx_s_strconst_class plus sc.method_id = m.id, exact because extraction
+//    idx_s_strconst_method plus sc.method_id = m.id, exact because extraction
 //    only attaches a method of the string's own class.
 // ---------------------------------------------------------------------------
+
+// Deduplicated-domain walk shared by every method-name, method-descriptor
+// and string-value arm below: the packed trigram FTS yields candidate packs,
+// the pack's contiguous [min_id, max_id] domain id range enumerates member
+// values, each member is re-verified with the SAME pattern (packing is a pure
+// pre-filter — a value's occurrence of the pattern appears verbatim in its
+// pack's text, so no member can be missed), and value equality through the
+// matching methods/string_constants index fans out to the actual rows.
+private const val METHOD_NAME_DOMAIN_JOIN_SQL = """
+FROM method_names_fts f
+CROSS JOIN method_name_packs k ON k.pack_id = f.rowid
+CROSS JOIN method_names n ON n.id BETWEEN k.min_id AND k.max_id
+CROSS JOIN methods m INDEXED BY idx_s_methods_name ON m.name = n.name"""
+private const val METHOD_DESCRIPTOR_DOMAIN_JOIN_SQL = """
+FROM method_descriptors_fts f
+CROSS JOIN method_descriptor_packs k ON k.pack_id = f.rowid
+CROSS JOIN method_descriptors d ON d.id BETWEEN k.min_id AND k.max_id
+CROSS JOIN methods m INDEXED BY idx_s_methods_descriptor ON m.descriptor = d.descriptor"""
+internal const val STRING_VALUE_DOMAIN_JOIN_SQL = """
+FROM string_values_fts f
+CROSS JOIN string_value_packs k ON k.pack_id = f.rowid
+CROSS JOIN string_values v ON v.id BETWEEN k.min_id AND k.max_id
+CROSS JOIN string_constants s INDEXED BY idx_s_strconst_value ON s.value = v.value"""
 
 // Cheap, order-free cardinality probes for the adaptive routing above. Every
 // query is hits-driven and capped by its final bind, so a dense posting list is
 // detected without paying either rewrite's UNION/ORDER BY materialization.
+// The domain probes deliberately count METHOD/STRING ROWS (through the
+// reverse-lookup join), not domain values: a probe over deduplicated values
+// alone would measure domain density, while the cap protects against the
+// rewrite materializing too many base-table rows — the join factors the
+// rows-per-value fan-out back in.
 internal const val CLASS_FTS_FQN_PROBE_SQL =
     "SELECT rowid FROM classes_fts WHERE fqn LIKE ? LIMIT ?"
 internal const val CLASS_FTS_KIND_PROBE_SQL =
     "SELECT rowid FROM classes_fts WHERE kind LIKE ? LIMIT ?"
-internal const val METHOD_FTS_NAME_PROBE_SQL =
-    "SELECT rowid FROM methods_fts WHERE name LIKE ? LIMIT ?"
-internal const val METHOD_FTS_DESCRIPTOR_PROBE_SQL =
-    "SELECT rowid FROM methods_fts WHERE descriptor LIKE ? LIMIT ?"
+internal const val METHOD_FTS_NAME_PROBE_SQL = """
+SELECT m.id
+$METHOD_NAME_DOMAIN_JOIN_SQL
+WHERE f.names LIKE ? AND n.name LIKE ?
+LIMIT ?"""
+internal const val METHOD_FTS_DESCRIPTOR_PROBE_SQL = """
+SELECT m.id
+$METHOD_DESCRIPTOR_DOMAIN_JOIN_SQL
+WHERE f.descriptors LIKE ? AND d.descriptor LIKE ?
+LIMIT ?"""
 internal const val METHOD_FTS_OWNER_PROBE_SQL = """
 SELECT m.id
 FROM classes_fts f CROSS JOIN methods m ON m.class_id = f.rowid
@@ -1502,14 +1558,16 @@ WHERE f.fqn LIKE ? AND m.name LIKE ? AND m.owner_resolved <> 0
 LIMIT ?"""
 internal const val METHOD_FTS_NAME_BOUNDARY_PROBE_SQL = """
 SELECT m.id
-FROM methods_fts f
-CROSS JOIN methods m ON m.id = f.rowid
+$METHOD_NAME_DOMAIN_JOIN_SQL
 JOIN classes c ON c.id = m.class_id
-WHERE f.name LIKE ? AND c.fqn LIKE ? AND m.owner_resolved <> 0
+WHERE f.names LIKE ? AND n.name LIKE ? AND c.fqn LIKE ? AND m.owner_resolved <> 0
   AND instr(c.fqn, char(0)) = 0
 LIMIT ?"""
-internal const val STRING_FTS_VALUE_PROBE_SQL =
-    "SELECT rowid FROM string_constants_fts WHERE value LIKE ? LIMIT ?"
+internal const val STRING_FTS_VALUE_PROBE_SQL = """
+SELECT s.id
+$STRING_VALUE_DOMAIN_JOIN_SQL
+WHERE f.vals LIKE ? AND v.value LIKE ?
+LIMIT ?"""
 internal const val STRING_FTS_OWNER_PROBE_SQL = """
 SELECT sc.id
 FROM classes_fts f CROSS JOIN string_constants sc ON sc.class_id = f.rowid
@@ -1517,17 +1575,15 @@ WHERE f.fqn LIKE ?
 LIMIT ?"""
 internal const val STRING_FTS_METHOD_NAME_PROBE_SQL = """
 SELECT sc.id
-FROM methods_fts f
-CROSS JOIN methods m ON m.id = f.rowid
+$METHOD_NAME_DOMAIN_JOIN_SQL
 JOIN string_constants sc ON sc.method_id = m.id AND sc.class_id = m.class_id
-WHERE f.name LIKE ? AND m.name LIKE ?
+WHERE f.names LIKE ? AND n.name LIKE ?
 LIMIT ?"""
 internal const val STRING_FTS_METHOD_DESCRIPTOR_PROBE_SQL = """
 SELECT sc.id
-FROM methods_fts f
-CROSS JOIN methods m ON m.id = f.rowid
+$METHOD_DESCRIPTOR_DOMAIN_JOIN_SQL
 JOIN string_constants sc ON sc.method_id = m.id AND sc.class_id = m.class_id
-WHERE f.descriptor LIKE ? AND instr(m.name, char(0)) = 0
+WHERE f.descriptors LIKE ? AND d.descriptor LIKE ? AND instr(m.name, char(0)) = 0
 LIMIT ?"""
 
 // find-class contains scan over classes_fts. Every legacy arm (fqn equality/
@@ -1547,9 +1603,9 @@ matches AS (
 )$CLASS_SEARCH_SELECT_SQL"""
 
 // find-method contains scan. Branches: exact symbol probe, the dotted
-// (cls, mname) probe, name equality/prefix/contains through methods_fts.name,
-// and owner contains through classes_fts. '#' terms never route here because
-// they may straddle the owner/name boundary.
+// (cls, mname) probe, name equality/prefix/contains through the packed
+// method-name domain, and owner contains through classes_fts. '#' terms
+// never route here because they may straddle the owner/name boundary.
 internal const val METHOD_SEARCH_FTS_SQL = """
 WITH params(term, simple, prefix, contains, hi, cls, mname) AS (VALUES (?, ?, ?, ?, ?, ?, ?)),
 hits(id) AS (
@@ -1565,8 +1621,10 @@ hits(id) AS (
   CROSS JOIN methods m INDEXED BY idx_s_methods_class ON m.class_id = c.id
   WHERE c.fqn = p.cls AND m.name = p.mname
   UNION
-  SELECT m.id FROM methods_fts f JOIN methods m ON m.id = f.rowid, params p
-  WHERE f.name LIKE ? AND m.name LIKE p.contains ESCAPE '\'
+  SELECT m.id
+  $METHOD_NAME_DOMAIN_JOIN_SQL
+  , params p
+  WHERE f.names LIKE ? AND n.name LIKE p.contains ESCAPE '\'
   UNION
   SELECT m.id FROM classes_fts f JOIN methods m ON m.class_id = f.rowid
   WHERE f.fqn LIKE ?
@@ -1601,23 +1659,26 @@ WHERE NOT COALESCE(
 ORDER BY name, source_shard_id, owner, detail
 LIMIT ?"""
 
-// search-symbol method tier (score 50): name arms through methods_fts.name,
-// descriptor arms through its descriptor column, and owner arms through
-// classes_fts. Safe single-# terms inject one additional FTS-anchored
-// boundary intersection; other hash shapes retain the legacy tier.
+// search-symbol method tier (score 50): name arms through the packed
+// method-name domain, descriptor arms through the packed descriptor domain,
+// and owner arms through classes_fts. Safe single-# terms inject one
+// additional FTS-anchored boundary intersection; other hash shapes retain
+// the legacy tier.
 internal const val SEARCH_SYMBOL_METHOD_FTS_SQL = """
 WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?)),
 hits(id) AS (
   SELECT m.id
-  FROM methods_fts f
-  JOIN methods m ON m.id = f.rowid
+  $METHOD_NAME_DOMAIN_JOIN_SQL
   JOIN classes c ON c.id = m.class_id
   , params p
-  WHERE f.name LIKE ?
+  WHERE f.names LIKE ? AND n.name LIKE p.contains ESCAPE '\'
     AND ((m.owner_resolved <> 0 AND instr(c.fqn, char(0)) = 0)
          OR m.name LIKE p.prefix ESCAPE '\')
   UNION
-  SELECT rowid FROM methods_fts WHERE descriptor LIKE ?
+  SELECT m.id
+  $METHOD_DESCRIPTOR_DOMAIN_JOIN_SQL
+  , params p
+  WHERE f.descriptors LIKE ? AND d.descriptor LIKE p.contains ESCAPE '\'
   UNION
   SELECT m.id FROM classes_fts f JOIN methods m ON m.class_id = f.rowid
   WHERE f.fqn LIKE ?
@@ -1649,10 +1710,9 @@ private const val SEARCH_SYMBOL_METHOD_OWNER_BOUNDARY_HIT_SQL = """
 private const val SEARCH_SYMBOL_METHOD_NAME_BOUNDARY_HIT_SQL = """
   UNION
   SELECT m.id
-  FROM methods_fts f
-  CROSS JOIN methods m ON m.id = f.rowid
+  $METHOD_NAME_DOMAIN_JOIN_SQL
   JOIN classes c ON c.id = m.class_id
-  WHERE f.name LIKE ? AND c.fqn LIKE ? AND m.owner_resolved <> 0
+  WHERE f.names LIKE ? AND n.name LIKE ? AND c.fqn LIKE ? AND m.owner_resolved <> 0
     AND instr(c.fqn, char(0)) = 0
 """
 
@@ -1670,15 +1730,18 @@ private val SEARCH_SYMBOL_METHOD_NAME_BOUNDARY_FTS_SQL =
     searchSymbolMethodBoundaryFtsSql(SEARCH_SYMBOL_METHOD_NAME_BOUNDARY_HIT_SQL)
 
 // search-symbol string tier (score 30), for terms without '(' only (see
-// symbolContainsTiers): value arms through string_constants_fts, owner arms
-// through an exact-fqn probe plus classes_fts (each joined to the strings of
-// the class via idx_s_strconst_class), and the detail arms decomposed into
-// the method's name (methods_fts name candidates) and descriptor
-// (methods_fts descriptor column).
+// symbolContainsTiers): value arms through the packed string-value domain
+// (reverse lookup via idx_s_strconst_value), owner arms through an exact-fqn
+// probe plus classes_fts (each joined to the strings of the class via
+// idx_s_strconst_class), and the detail arms decomposed into the method's
+// name and descriptor domains.
 internal const val SEARCH_SYMBOL_STRING_FTS_SQL = """
 WITH params(term, simple, prefix, contains, hi) AS (VALUES (?, ?, ?, ?, ?)),
 hits(id) AS (
-  SELECT rowid FROM string_constants_fts WHERE value LIKE ?
+  SELECT s.id
+  $STRING_VALUE_DOMAIN_JOIN_SQL
+  , params p
+  WHERE f.vals LIKE ? AND v.value LIKE p.contains ESCAPE '\'
   UNION
   SELECT sc.id FROM classes c JOIN string_constants sc ON sc.class_id = c.id, params p
   WHERE c.fqn = p.term
@@ -1686,16 +1749,18 @@ hits(id) AS (
   SELECT sc.id FROM classes_fts f JOIN string_constants sc ON sc.class_id = f.rowid
   WHERE f.fqn LIKE ?
   UNION
-  SELECT sc.id FROM methods_fts f
-  JOIN methods m ON m.id = f.rowid
+  SELECT sc.id
+  $METHOD_NAME_DOMAIN_JOIN_SQL
   JOIN string_constants sc ON sc.class_id = m.class_id AND sc.method_id = m.id
   , params p
-  WHERE f.name LIKE ? AND m.name LIKE p.contains ESCAPE '\'
+  WHERE f.names LIKE ? AND n.name LIKE p.contains ESCAPE '\'
   UNION
-  SELECT sc.id FROM methods_fts f
-  JOIN methods m ON m.id = f.rowid
+  SELECT sc.id
+  $METHOD_DESCRIPTOR_DOMAIN_JOIN_SQL
   JOIN string_constants sc ON sc.class_id = m.class_id AND sc.method_id = m.id
-  WHERE f.descriptor LIKE ? AND instr(m.name, char(0)) = 0
+  , params p
+  WHERE f.descriptors LIKE ? AND d.descriptor LIKE p.contains ESCAPE '\'
+    AND instr(m.name, char(0)) = 0
 )
 SELECT 'string' AS kind, sc.value AS name, c.fqn AS owner,
        CASE WHEN m.name IS NULL THEN NULL ELSE m.name || m.descriptor END AS detail,

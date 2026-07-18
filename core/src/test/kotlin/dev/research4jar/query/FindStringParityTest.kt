@@ -198,21 +198,39 @@ class FindStringParityTest {
     fun `fts path pages equal the legacy scan for every term and page`() {
         val session = buildSession()
         DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
-            // The commit-time rebuild must have indexed every merged row.
-            val fts = connection.queryInt("SELECT COUNT(*) FROM string_constants_fts", emptyList())
+            // The commit-time domain fill must cover every distinct merged
+            // value, the packs must partition the domain exactly, and the
+            // pack FTS must carry every pack.
+            val domain = connection.queryInt("SELECT COUNT(*) FROM string_values", emptyList())
+            val distinct = connection.queryInt(
+                "SELECT COUNT(*) FROM (SELECT DISTINCT value FROM string_constants)",
+                emptyList(),
+            )
             val raw = connection.queryInt("SELECT COUNT(*) FROM string_constants", emptyList())
-            assertEquals(raw, fts, "fts rebuild must cover the merged rows")
+            assertEquals(distinct, domain, "string-value domain must cover the merged values")
             assertTrue(raw > 40, "merged $raw string rows")
+            assertTrue(distinct < raw, "the battery must exercise deduplication")
+            val packCoverage = connection.queryInt(
+                "SELECT COALESCE(SUM(max_id - min_id + 1), 0) FROM string_value_packs",
+                emptyList(),
+            )
+            assertEquals(domain, packCoverage, "packs must partition the domain")
+            val ftsRows = connection.queryInt(
+                "SELECT COUNT(*) FROM string_values_fts",
+                emptyList(),
+            )
+            val packs = connection.queryInt("SELECT COUNT(*) FROM string_value_packs", emptyList())
+            assertEquals(packs, ftsRows, "the pack fts must carry every pack")
             // The FTS SQL must execute and hit rows on its own: findString's
             // fallback would otherwise let a broken FTS path pass this whole
             // battery through the legacy scan.
-            val ftsHits = connection.queryInt(FIND_STRING_FTS_COUNT_SQL, listOf("%spring%"))
+            val ftsHits = connection.queryInt(FIND_STRING_FTS_COUNT_SQL, listOf("%spring%", "%spring%"))
             val oracleHits = connection.queryInt(FIND_STRING_COUNT_SQL, listOf("%spring%"))
             assertEquals(oracleHits, ftsHits, "fts count for the spring probe")
             assertTrue(ftsHits > 0, "the spring probe must match rows")
             connection.query(
                 FIND_STRING_FTS_SQL,
-                listOf("%spring%", 100, 0),
+                listOf("%spring%", "%spring%", 100, 0),
             ) { result -> assertTrue(result.mapRows { it.getString(1) }.isNotEmpty()) }
         }
         assertParity(session, terms)
@@ -222,7 +240,7 @@ class FindStringParityTest {
     fun `sessions without the fts table fall back to the legacy scan`() {
         val session = buildSession()
         DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
-            connection.createStatement().use { it.execute("DROP TABLE string_constants_fts") }
+            connection.createStatement().use { it.execute("DROP TABLE string_values_fts") }
         }
         // Trigram-eligible terms only: these are the ones that would hit the
         // missing table.

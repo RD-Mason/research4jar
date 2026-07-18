@@ -117,11 +117,8 @@ class AdaptiveFtsQueryTest {
                     """.trimIndent(),
                 )
                 statement.execute("INSERT INTO classes_fts(classes_fts) VALUES('rebuild')")
-                statement.execute("INSERT INTO methods_fts(methods_fts) VALUES('rebuild')")
-                statement.execute(
-                    "INSERT INTO string_constants_fts(string_constants_fts) VALUES('rebuild')",
-                )
             }
+            SessionBuilder().syncSearchDomains(db, methodIdOffset = 0, stringIdOffset = 0)
             db.commit()
             db.autoCommit = true
             db.createStatement().use { statement ->
