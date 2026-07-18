@@ -24,6 +24,11 @@ data class ProjectIndex(
 )
 
 object ProjectPointer {
+    // The HEADING doubles as the idempotence key in appendGuidance: guidance
+    // is appended only when the heading is absent. Extending the snippet body
+    // (e.g. the M-source get-source/search-source lines) therefore reaches
+    // newly indexed projects only; already-guided projects keep their earlier
+    // text — an accepted trade-off over rewriting user-owned agent files.
     private const val HEADING = "## Research4Jar（Java 依赖事实查询）"
     private val snippet = """
         $HEADING
@@ -43,6 +48,8 @@ object ProjectPointer {
         research4jar method <方法名或 Class#method>         # 显式查方法（find-method 的短入口）
         research4jar search-symbol <关键词>                # 首选宽检索：类/方法/注解/SPI/配置项/字符串
         research4jar open-symbol <类 FQN 或 Class#method>  # 展开 search-symbol 返回的符号
+        research4jar get-source <类 FQN 或 Class#method>   # 读依赖类源码；#method 只取单个方法体（省 token）
+        research4jar search-source <文本> --in <坐标|jar|类> # 在单个依赖 jar 的源码里做子串检索
         research4jar dep why <坐标|jar|类 FQN>              # 解释 Maven 依赖来源与传递链路
         research4jar find-class <类名或包前缀>             # 通用 Java 类查询
         research4jar find-method <方法名或 Class#method>   # 通用 Java 方法查询
@@ -62,6 +69,9 @@ object ProjectPointer {
         `dep why` 依赖 Maven 项目索引时生成的 `.research4jar/dependencies.json`。
         加 `--direct` 可关闭传递闭包/元注解展开；注解查询不合并 @AliasFor 属性别名。
         依赖变更后运行 `research4jar index` 增量更新索引。
+        `get-source`/`search-source` 本地优先：先找本地 Maven/Gradle 缓存里的 sources jar，
+        没有则用 CFR 反编译并缓存；返回的 `source_kind` 标明来源（sources-jar 或 decompiled）。
+        加 `--fetch` 才会通过项目自己的 Maven 配置下载 sources jar（绝不默认联网）。
         如果用户问的内容不在结果里，结合 `coverage` 判断是「确实不存在」还是「所在 jar 未被索引」，并如实说明。
     """.trimIndent()
 

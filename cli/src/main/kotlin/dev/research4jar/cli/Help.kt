@@ -58,6 +58,11 @@ internal fun printHelp(out: PrintStream) {
                                                        SPI, config properties, and strings.
   research4jar open-symbol <FQN|CLASS#METHOD>             Expand a class or method search result.
   research4jar why-dependency <COORD|JAR|CLASS>           Explain why a Maven dependency is present.
+  research4jar get-source <FQN|CLASS#METHOD>              Read a dependency class's source, or one
+                                                       method's body. Local sources jar first,
+                                                       CFR decompilation as fallback.
+  research4jar search-source <TEXT> --in <COORD|JAR|FQN>  Substring-search one dependency jar's
+                                                       sources (sources jar or decompiled).
 
 Common workflows:
   First run:           research4jar doctor && research4jar index && research4jar status
@@ -67,6 +72,7 @@ Common workflows:
   Broad exploration:   research4jar search-symbol DataSourceAutoConfiguration
                        research4jar open-symbol org.example.Type
   Dependency path:     research4jar dep why org.springframework.boot:spring-boot-autoconfigure
+  Read library source: research4jar get-source org.example.Type#method
 
 Options:
   --project-dir <PATH>  Project root. Defaults to searching upward from cwd.
@@ -295,6 +301,8 @@ internal fun printQueryHelp(command: String, out: PrintStream) {
         "find-method" -> "<NAME|CLASS#METHOD>"
         "open-symbol" -> "<FQN|CLASS#METHOD>"
         "why-dependency" -> "<COORD|JAR|CLASS>"
+        "get-source" -> "<FQN|CLASS#METHOD>"
+        "search-source" -> "<TEXT> --in <COORD|JAR|FQN>"
         else -> "<ARG>"
     }
     val description = when (command) {
@@ -312,6 +320,15 @@ internal fun printQueryHelp(command: String, out: PrintStream) {
         "search-symbol" -> "Search all indexed symbol kinds before opening a result."
         "open-symbol" -> "Expand a class or method returned by search-symbol."
         "why-dependency" -> "Explain which direct dependency introduced a jar or class."
+        "get-source" ->
+            "Read a dependency class's source, or one method's body via Class#method.\n" +
+                "Local-first: the local Maven/Gradle sources jar when present, otherwise CFR\n" +
+                "decompilation (the response's source_kind states which). --fetch downloads the\n" +
+                "sources jar through the project's own Maven config; it is never the default."
+        "search-source" ->
+            "Substring-search one dependency jar's sources; --in picks the jar by Maven\n" +
+                "coordinate, jar filename, or a class FQN it contains. Uses the local sources\n" +
+                "jar when present, otherwise a cached one-time CFR decompile of the jar."
         else -> "Query the current Research4Jar project index."
     }
     val paginated = command in PAGINATED_QUERY_COMMANDS
@@ -325,6 +342,12 @@ internal fun printQueryHelp(command: String, out: PrintStream) {
         }
         if (command == "find-implementations" || command == "find-by-annotation") {
             add("  --direct              Restrict the lookup to directly declared matches.")
+        }
+        if (command == "search-source") {
+            add("  --in <TARGET>         Required: coordinate, jar filename, or class FQN selecting one jar.")
+        }
+        if (command == "get-source" || command == "search-source") {
+            add("  --fetch               Download the sources jar via mvn dependency:get (opt-in).")
         }
     }.joinToString("\n")
     out.println(

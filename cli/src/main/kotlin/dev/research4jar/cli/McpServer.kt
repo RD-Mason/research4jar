@@ -21,10 +21,12 @@ import dev.research4jar.query.findMethod
 import dev.research4jar.query.findString
 import dev.research4jar.query.getBeanDefinitions
 import dev.research4jar.query.getClass
+import dev.research4jar.query.getSource
 import dev.research4jar.query.listExtensionPoints
 import dev.research4jar.query.listPackages
 import dev.research4jar.query.openSymbol
 import dev.research4jar.query.projectStatus
+import dev.research4jar.query.searchSource
 import dev.research4jar.query.searchSymbol
 import dev.research4jar.query.whyDependency
 import java.io.BufferedReader
@@ -119,6 +121,8 @@ object McpServer {
         val page: Int = 1,
         val pageSize: Int = 20,
         val sourceBuild: Boolean = false,
+        val fetch: Boolean = false,
+        val inTarget: String = "",
     )
 
     private fun parseArguments(node: JsonNode?): ToolArguments {
@@ -150,6 +154,8 @@ object McpServer {
             page = positiveInt("page", 1),
             pageSize = positiveInt("page_size", 20, MAX_PAGE_SIZE),
             sourceBuild = flag("source_build"),
+            fetch = flag("fetch"),
+            inTarget = text("in"),
         )
     }
 
@@ -339,6 +345,26 @@ object McpServer {
                 require(term.isNotEmpty()) { "text or arg is required" }
                 val projectRoot = ProjectIndex.root(arguments.projectDir.ifEmpty { null }).toString()
                 artifactPrecise(pointer, manifestPath, projectRoot, term, arguments.pageSize, !arguments.noSourceGrep)
+            }
+
+            "get_source" -> {
+                require(arguments.fqn.isNotEmpty()) { "fqn is required" }
+                val projectRoot = ProjectIndex.root(arguments.projectDir.ifEmpty { null }).toString()
+                getSource(
+                    pointer, manifestPath, projectRoot, arguments.home,
+                    arguments.fqn, arguments.fetch,
+                )
+            }
+
+            "search_source" -> {
+                require(arguments.text.isNotEmpty()) { "text is required" }
+                require(arguments.inTarget.isNotEmpty()) { "in is required" }
+                val projectRoot = ProjectIndex.root(arguments.projectDir.ifEmpty { null }).toString()
+                searchSource(
+                    pointer, manifestPath, projectRoot, arguments.home,
+                    arguments.text, arguments.inTarget, arguments.fetch,
+                    arguments.page, arguments.pageSize,
+                )
             }
 
             else -> throw IllegalArgumentException("unknown tool: $name")
@@ -657,6 +683,48 @@ object McpServer {
                         ),
                     ),
                     "fqn",
+                ),
+            ),
+            tool(
+                "get_source",
+                "Read a dependency class's source code, or a single method's body via " +
+                    "Class#method (token-efficient). Local-first: uses the sources jar from the " +
+                    "local Maven/Gradle caches when present, otherwise decompiles with CFR; the " +
+                    "response's source_kind states which. Set fetch=true (never default) to " +
+                    "download the sources jar through the project's own Maven configuration.",
+                schema(
+                    withProject(mapOf(
+                        "fqn" to mapOf(
+                            "type" to "string",
+                            "description" to "Class FQN (inner classes as Outer\$Inner) or Class#method for one method's body.",
+                        ),
+                        "fetch" to mapOf(
+                            "type" to "boolean",
+                            "description" to "Download the sources jar via mvn dependency:get when it is not cached locally.",
+                        ),
+                    )),
+                    "fqn",
+                ),
+            ),
+            tool(
+                "search_source",
+                "Substring-search one dependency jar's sources, returning file/line hits with " +
+                    "a snippet line. The jar is selected by \"in\" (Maven coordinate, jar filename, " +
+                    "or a class FQN it contains); sources come from the local sources jar, or a " +
+                    "cached one-time CFR decompile of the jar.",
+                schema(
+                    withPaging(mapOf(
+                        "text" to mapOf("type" to "string", "description" to "Substring to search for."),
+                        "in" to mapOf(
+                            "type" to "string",
+                            "description" to "Coordinate, jar filename, or class FQN selecting exactly one jar.",
+                        ),
+                        "fetch" to mapOf(
+                            "type" to "boolean",
+                            "description" to "Download the sources jar via mvn dependency:get when it is not cached locally.",
+                        ),
+                    )),
+                    "text", "in",
                 ),
             ),
         )

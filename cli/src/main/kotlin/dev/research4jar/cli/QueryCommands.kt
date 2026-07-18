@@ -13,9 +13,11 @@ import dev.research4jar.query.findMethod
 import dev.research4jar.query.findString
 import dev.research4jar.query.getBeanDefinitions
 import dev.research4jar.query.getClass
+import dev.research4jar.query.getSource
 import dev.research4jar.query.listExtensionPoints
 import dev.research4jar.query.listPackages
 import dev.research4jar.query.openSymbol
+import dev.research4jar.query.searchSource
 import dev.research4jar.query.searchSymbol
 import dev.research4jar.query.whyDependency
 
@@ -35,6 +37,9 @@ internal fun runQueryCommand(command: String, args: Array<String>, io: CliIO) {
         command == "list-extension-points" || command == "list-packages",
         optionsForQuery(command),
     )
+    if (command == "search-source" && opts.inTarget.isEmpty()) {
+        fail("invalid_arguments", "search-source requires --in <coordinate|jar-filename|class-fqn>", 2)
+    }
     val (pointer, manifestPath) = resolveProjectOrFail(opts)
 
     val response: Any = try {
@@ -74,6 +79,20 @@ internal fun runQueryCommand(command: String, args: Array<String>, io: CliIO) {
                 searchSymbol(pointer, manifestPath, opts.arg, opts.page, opts.pageSize)
 
             "open-symbol" -> openSymbol(pointer, manifestPath, opts.arg)
+
+            "get-source" ->
+                getSource(
+                    pointer, manifestPath,
+                    ProjectIndex.root(opts.projectDir).toString(), opts.home,
+                    opts.arg, opts.fetch,
+                )
+
+            "search-source" ->
+                searchSource(
+                    pointer, manifestPath,
+                    ProjectIndex.root(opts.projectDir).toString(), opts.home,
+                    opts.arg, opts.inTarget, opts.fetch, opts.page, opts.pageSize,
+                )
 
             "why-dependency" -> {
                 // Go resolves the project root here and folds a failure into
