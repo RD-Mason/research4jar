@@ -98,7 +98,7 @@ object Daemon {
         "get-class", "get-bean-definitions", "explain-conditional", "find-string",
         "list-extension-points", "find-class", "find-method", "list-packages",
         "search-symbol", "open-symbol", "why-dependency", "dep", "artifact",
-        "class", "method", "status",
+        "class", "method", "status", "get-source", "search-source",
     )
 
     /** Injectable daemon runtime used by the loopback integration tests. */
@@ -362,6 +362,13 @@ object Daemon {
         // this invocation's PATH/JAVA_HOME/GRADLE_USER_HOME/MAVEN_OPTS rather
         // than the daemon process's startup environment.
         if (argv[0] == "status" && argv.drop(1).contains("--check-classpath")) return false
+        // --fetch shells out to the project's Maven; same environment rule.
+        if (
+            (argv[0] == "get-source" || argv[0] == "search-source") &&
+            argv.drop(1).contains("--fetch")
+        ) {
+            return false
+        }
         // A 256 MiB warm host must not materialize the largest legal 1000-row
         // models. Missing/non-numeric values also stay cold so the ordinary CLI
         // parser remains the sole source of their user-facing error messages.

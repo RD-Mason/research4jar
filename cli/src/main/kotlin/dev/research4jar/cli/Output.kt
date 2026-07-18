@@ -342,6 +342,9 @@ private fun printSourceSearchText(response: SourceSearchResponse, out: PrintStre
         writer.row("${hit.file}:${hit.line}", hit.text)
     }
     writer.flush()
+    if (response.note.isNotEmpty()) {
+        out.print("note: ${response.note}\n")
+    }
     printSearchSummary(response.page, response.pageSize, response.total, response.hasMore, response.coverage, out)
 }
 

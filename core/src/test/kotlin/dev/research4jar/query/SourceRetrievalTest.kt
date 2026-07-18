@@ -32,6 +32,21 @@ class SourceRetrievalTest {
     private lateinit var pointer: ProjectPointerData
     private lateinit var withSourcesJar: Path
     private lateinit var decompileOnlyJar: Path
+    private lateinit var mixedLanguageJar: Path
+
+    private val widgetScala = """
+        package com.example.sc
+
+        class Widget {
+          def render(): String = "scala-widget"
+        }
+    """.trimIndent()
+
+    private val helpersKotlin = """
+        package com.example.kt
+
+        fun helperValue(): Int = 42
+    """.trimIndent()
 
     private val utilSource = """
         package com.example.fixture;
@@ -99,6 +114,20 @@ class SourceRetrievalTest {
             "decomp-1.0.jar",
             mapOf("com/example/decomp/Decomp.java" to decompSource),
         )
+        // Scala class and Kotlin file class: the class jar's bytecode is never
+        // read on the sources-jar path, so a placeholder entry suffices.
+        mixedLanguageJar = repo.resolve("mixed-1.0.jar")
+        writeSourcesJar(
+            mixedLanguageJar,
+            mapOf("placeholder.txt" to "not bytecode"),
+        )
+        writeSourcesJar(
+            repo.resolve("mixed-1.0-sources.jar"),
+            mapOf(
+                "com/example/sc/Widget.scala" to widgetScala,
+                "com/example/kt/Helpers.kt" to helpersKotlin,
+            ),
+        )
 
         val manifest = Manifest(manifestPath)
         val session = root.resolve("session.db")
@@ -108,6 +137,9 @@ class SourceRetrievalTest {
             )),
             registerShard(manifest, decompileOnlyJar, "com.example:decomp:1.0", listOf(
                 "com.example.decomp.Decomp", "com.example.decomp.Decomp\$Nested",
+            )),
+            registerShard(manifest, mixedLanguageJar, "com.example:mixed:1.0", listOf(
+                "com.example.sc.Widget", "com.example.kt.HelpersKt",
             )),
         )
         SessionBuilder().build(session, shards)
@@ -333,15 +365,70 @@ class SourceRetrievalTest {
 
     @Test
     fun `search-source rejects ambiguous and unknown targets`() {
-        // "1.0" substring-matches both fixture jars' filename stems.
+        // "1.0" substring-matches every fixture jar's filename stem.
         val ambiguous = assertFailsWith<IllegalArgumentException> {
             searchSource("x", "1.0")
         }
-        assertTrue(ambiguous.message!!.contains("matches 2 jars"), ambiguous.message)
+        assertTrue(ambiguous.message!!.contains("matches 3 jars"), ambiguous.message)
 
         val unknown = assertFailsWith<IllegalArgumentException> {
             searchSource("x", "no.such:artifact:9")
         }
         assertTrue(unknown.message!!.contains("no indexed jar"), unknown.message)
+    }
+
+    @Test
+    fun `scala sources are served from the sources jar instead of decompiling`() {
+        val response = getSource("com.example.sc.Widget")
+        assertEquals("sources-jar", response.sourceKind)
+        assertEquals("scala", response.language)
+        assertEquals("com/example/sc/Widget.scala", response.sourceEntry)
+        assertTrue(response.source.contains("scala-widget"))
+
+        // Method slicing is Java-only; the whole file plus a note comes back.
+        val sliced = getSource("com.example.sc.Widget#render")
+        assertEquals(0, sliced.slices.size)
+        assertTrue(sliced.source.contains("scala-widget"))
+        assertTrue(sliced.note.contains("scala"), sliced.note)
+    }
+
+    @Test
+    fun `kotlin file classes map FooKt to the Foo kt source entry`() {
+        val response = getSource("com.example.kt.HelpersKt")
+        assertEquals("sources-jar", response.sourceKind)
+        assertEquals("kotlin", response.language)
+        assertEquals("com/example/kt/Helpers.kt", response.sourceEntry)
+        assertTrue(response.source.contains("helperValue"))
+    }
+
+    @Test
+    fun `search-source notes skipped oversize and binary files`() {
+        // Rewrite the fixture sources jar with an oversize file and a
+        // NUL-carrying file next to the real source.
+        writeSourcesJar(
+            repo.resolve("fixture-1.0-sources.jar"),
+            mapOf(
+                "com/example/fixture/Util.java" to utilSource,
+                "com/example/fixture/Huge.java" to buildString {
+                    append("// compute\n")
+                    val filler = "// filler compute line\n"
+                    while (length <= 5 * 1024 * 1024) append(filler)
+                },
+                "com/example/fixture/Weird.java" to "class Weird { String s = \"compute\u0000\"; }",
+            ),
+        )
+        val response = searchSource("compute", "com.example:fixture:1.0")
+        assertTrue(response.results.isNotEmpty())
+        assertTrue(response.note.contains("1 source file(s) over 5 MiB skipped"), response.note)
+        assertTrue(response.note.contains("1 binary-looking file(s) skipped"), response.note)
+        assertTrue(response.results.all { it.file == "com/example/fixture/Util.java" })
+    }
+
+    @Test
+    fun `search-source rejects multi-line text instead of silently missing`() {
+        val failure = assertFailsWith<IllegalArgumentException> {
+            searchSource("compute\nint", "com.example:fixture:1.0")
+        }
+        assertTrue(failure.message!!.contains("single source lines"), failure.message)
     }
 }

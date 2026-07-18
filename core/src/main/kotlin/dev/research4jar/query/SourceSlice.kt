@@ -4,9 +4,11 @@ import com.github.javaparser.JavaParser
 import com.github.javaparser.ParserConfiguration
 import com.github.javaparser.ast.CompilationUnit
 import com.github.javaparser.ast.Node
-import com.github.javaparser.ast.body.CallableDeclaration
+import com.github.javaparser.ast.body.CompactConstructorDeclaration
 import com.github.javaparser.ast.body.ConstructorDeclaration
+import com.github.javaparser.ast.body.EnumDeclaration
 import com.github.javaparser.ast.body.MethodDeclaration
+import com.github.javaparser.ast.body.RecordDeclaration
 import com.github.javaparser.ast.body.TypeDeclaration
 
 /**
@@ -44,12 +46,12 @@ internal object SourceSlicer {
 
         val (target, targetNote) = resolveTargetType(unit, binaryName)
         val simpleName = binaryName.substringAfterLast('$').substringAfterLast('.')
-        val matches: List<CallableDeclaration<*>> = if (target != null) {
-            callablesIn(target, methodName, simpleName)
+        val matches: List<Match> = if (target != null) {
+            matchesIn(target, methodName, simpleName)
         } else {
             // Type chain unresolved (anonymous/local segment or renamed
             // decompile): match the method anywhere in the file instead.
-            callablesAnywhere(unit, methodName)
+            matchesAnywhere(unit, methodName)
         }
         if (matches.isEmpty()) {
             return MethodSlices(
@@ -63,7 +65,7 @@ internal object SourceSlicer {
 
         val lines = source.split("\n")
         val slices = matches
-            .mapNotNull { sliceOf(it, lines) }
+            .mapNotNull { sliceOf(it.node, it.signature, lines) }
             .sortedBy(SourceSlice::startLine)
         return MethodSlices(slices, targetNote)
     }
@@ -95,46 +97,91 @@ internal object SourceSlicer {
         return current to ""
     }
 
-    private fun callablesIn(
+    /** One sliceable declaration plus its display signature. */
+    private data class Match(val node: Node, val signature: String)
+
+    private fun methodMatch(method: MethodDeclaration): Match =
+        Match(method, method.getDeclarationAsString(true, true, true))
+
+    private fun compactMatch(compact: CompactConstructorDeclaration): Match {
+        val modifiers = compact.modifiers.joinToString(" ") { it.keyword.asString() }
+        val prefix = if (modifiers.isEmpty()) "" else "$modifiers "
+        return Match(compact, prefix + compact.nameAsString + " (compact constructor)")
+    }
+
+    private fun matchesIn(
         type: TypeDeclaration<*>,
         methodName: String,
         simpleName: String,
-    ): List<CallableDeclaration<*>> {
+    ): List<Match> {
         val methods = type.members
             .filterIsInstance<MethodDeclaration>()
             .filter { it.nameAsString == methodName }
+            .map(::methodMatch)
+            .toMutableList()
+        // Enum constants may carry the real implementations in their class
+        // bodies (an abstract-per-constant enum declares only the abstract
+        // method at type level); omitting them would under-read the source.
+        if (type is EnumDeclaration) {
+            for (entry in type.entries) {
+                entry.classBody
+                    .filterIsInstance<MethodDeclaration>()
+                    .filter { it.nameAsString == methodName }
+                    .forEach { method ->
+                        methods += Match(
+                            method,
+                            entry.nameAsString + "." + method.getDeclarationAsString(true, true, true),
+                        )
+                    }
+            }
+        }
         if (methods.isNotEmpty()) return methods
         if (methodName == simpleName || methodName == "<init>") {
-            return type.members.filterIsInstance<ConstructorDeclaration>()
+            val constructors = type.members
+                .filterIsInstance<ConstructorDeclaration>()
+                .map { Match(it, it.getDeclarationAsString(true, true, true)) }
+                .toMutableList()
+            // A record's compact constructor is not a ConstructorDeclaration;
+            // without it `Record#Record` would miss the validation body.
+            if (type is RecordDeclaration) {
+                constructors += type.compactConstructors.map(::compactMatch)
+            }
+            return constructors
         }
         return emptyList()
     }
 
-    private fun callablesAnywhere(
+    private fun matchesAnywhere(
         unit: CompilationUnit,
         methodName: String,
-    ): List<CallableDeclaration<*>> {
+    ): List<Match> {
         val methods = unit.findAll(MethodDeclaration::class.java)
             .filter { it.nameAsString == methodName }
+            .map(::methodMatch)
         if (methods.isNotEmpty()) return methods
-        return unit.findAll(ConstructorDeclaration::class.java)
+        val constructors = unit.findAll(ConstructorDeclaration::class.java)
             .filter { it.nameAsString == methodName || methodName == "<init>" }
+            .map { Match(it, it.getDeclarationAsString(true, true, true)) }
+        if (constructors.isNotEmpty()) return constructors
+        return unit.findAll(CompactConstructorDeclaration::class.java)
+            .filter { it.nameAsString == methodName || methodName == "<init>" }
+            .map(::compactMatch)
     }
 
     /**
      * The slice is cut from the raw source lines (annotations and formatting
      * intact), extended upward to cover an attached Javadoc/leading comment.
      */
-    private fun sliceOf(callable: CallableDeclaration<*>, lines: List<String>): SourceSlice? {
-        val range = callable.range.orElse(null) ?: return null
+    private fun sliceOf(node: Node, signature: String, lines: List<String>): SourceSlice? {
+        val range = node.range.orElse(null) ?: return null
         var startLine = range.begin.line
-        callable.comment.flatMap(Node::getRange).ifPresent { comment ->
+        node.comment.flatMap(Node::getRange).ifPresent { comment ->
             if (comment.begin.line < startLine) startLine = comment.begin.line
         }
         val endLine = range.end.line
         if (startLine < 1 || endLine > lines.size || startLine > endLine) return null
         return SourceSlice(
-            signature = callable.getDeclarationAsString(true, true, true),
+            signature = signature,
             startLine = startLine,
             endLine = endLine,
             source = lines.subList(startLine - 1, endLine).joinToString("\n"),

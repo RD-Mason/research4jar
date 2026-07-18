@@ -111,6 +111,77 @@ class SourceSliceTest {
     }
 
     @Test
+    fun `enum slicing includes constant-body implementations`() {
+        val enumFixture = """
+            package com.example;
+
+            public enum Op {
+                PLUS {
+                    @Override
+                    public int apply(int a, int b) {
+                        return a + b;
+                    }
+                },
+                MINUS {
+                    @Override
+                    public int apply(int a, int b) {
+                        return a - b;
+                    }
+                };
+
+                /** Declared abstract; the bodies live in the constants. */
+                public abstract int apply(int a, int b);
+            }
+        """.trimIndent()
+        val sliced = SourceSlicer.slice(enumFixture, "com.example.Op", "apply")
+        assertEquals(3, sliced.slices.size, sliced.slices.joinToString { it.signature })
+        val sources = sliced.slices.joinToString("\n") { it.source }
+        assertTrue(sources.contains("a + b"))
+        assertTrue(sources.contains("a - b"))
+        assertTrue(sources.contains("abstract int apply"))
+        // Constant-body slices carry the constant name in the signature.
+        assertTrue(sliced.slices.any { it.signature.startsWith("PLUS.") })
+        assertTrue(sliced.slices.any { it.signature.startsWith("MINUS.") })
+    }
+
+    @Test
+    fun `record constructor slicing covers compact and canonical forms`() {
+        val recordFixture = """
+            package com.example;
+
+            public record Point(int x, int y) {
+                public Point {
+                    if (x < 0) {
+                        throw new IllegalArgumentException("x");
+                    }
+                }
+
+                public Point(int x) {
+                    this(x, 0);
+                }
+
+                public int sum() {
+                    return x + y;
+                }
+            }
+        """.trimIndent()
+        for (name in listOf("Point", "<init>")) {
+            val constructors = SourceSlicer.slice(recordFixture, "com.example.Point", name)
+            assertEquals(2, constructors.slices.size, name)
+            val sources = constructors.slices.joinToString("\n") { it.source }
+            assertTrue(sources.contains("IllegalArgumentException"), name)
+            assertTrue(sources.contains("this(x, 0)"), name)
+            assertTrue(
+                constructors.slices.any { it.signature.contains("compact constructor") },
+                constructors.slices.joinToString { it.signature },
+            )
+        }
+        val method = SourceSlicer.slice(recordFixture, "com.example.Point", "sum")
+        assertEquals(1, method.slices.size)
+        assertTrue(method.slices.single().source.contains("x + y"))
+    }
+
+    @Test
     fun `unparseable source degrades to a whole-file note`() {
         val sliced = SourceSlicer.slice("this is } not { java", "com.example.Broken", "method")
         assertEquals(0, sliced.slices.size)

@@ -84,6 +84,8 @@ data class SourceSearchResponse(
     @JsonProperty("has_more") val hasMore: Boolean,
     @JsonProperty("page") val page: Int,
     @JsonProperty("page_size") val pageSize: Int,
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    @JsonProperty("note") val note: String = "",
     @JsonProperty("coverage") val coverage: Coverage,
 )
 
@@ -183,6 +185,11 @@ fun searchSource(
 ): SourceSearchResponse {
     val window = pageWindow(page, pageSize)
     require(text.isNotEmpty()) { "search-source requires a non-empty search text" }
+    // Matching is per-line; a newline in the text would silently match
+    // nothing, which reads as "not present" — reject it loudly instead.
+    require(!text.contains('\n') && !text.contains('\r')) {
+        "search-source matches within single source lines; the search text must not contain a newline"
+    }
     require(inTarget.isNotEmpty()) {
         "search-source requires --in <coordinate|jar-filename|class-fqn> to pick one jar"
     }
@@ -216,6 +223,7 @@ fun searchSource(
         hasMore = scan.hasMore,
         page = page,
         pageSize = pageSize,
+        note = scan.skipNote(),
         coverage = coverageFrom(pointer),
     )
 }
@@ -573,7 +581,7 @@ private fun obtainSource(
                 kind = "sources-jar",
                 path = sourcesJar,
                 entry = entry.first,
-                language = if (entry.first.endsWith(".kt")) "kotlin" else "java",
+                language = sourceLanguage(entry.first),
                 note = "",
                 text = entry.second,
             )
@@ -591,17 +599,35 @@ private fun obtainSource(
     )
 }
 
-/** `a.b.Outer$Inner` lives in `a/b/Outer.java` (or `.kt`) inside a sources jar. */
+/**
+ * `a.b.Outer$Inner` lives in `a/b/Outer.java` (or `.kt`/`.scala`/`.groovy`)
+ * inside a sources jar; a Kotlin file class `a.b.FooKt` comes from
+ * `a/b/Foo.kt`. Missing all candidates falls back to decompilation, so every
+ * extension a sources jar can realistically carry must be probed here — a
+ * miss silently downgrades fidelity from real source to decompiled output.
+ */
 private fun readSourcesJarEntry(sourcesJar: Path, outerFqn: String): Pair<String, String>? =
     ZipFile(sourcesJar.toFile()).use { zip ->
         val base = outerFqn.replace('.', '/')
-        for (name in listOf("$base.java", "$base.kt")) {
+        val candidates = mutableListOf("$base.java", "$base.kt", "$base.scala", "$base.groovy")
+        val simple = base.substringAfterLast('/')
+        if (simple.length > 2 && simple.endsWith("Kt")) {
+            candidates += base.removeSuffix("Kt") + ".kt"
+        }
+        for (name in candidates) {
             val entry = zip.getEntry(name) ?: continue
             val bytes = zip.getInputStream(entry).use { it.readBytes() }
             return@use name to String(bytes, StandardCharsets.UTF_8)
         }
         null
     }
+
+private fun sourceLanguage(entryName: String): String = when {
+    entryName.endsWith(".kt") -> "kotlin"
+    entryName.endsWith(".scala") -> "scala"
+    entryName.endsWith(".groovy") -> "groovy"
+    else -> "java"
+}
 
 private fun decompileCacheDir(sourcesDir: Path, jarSha256: String): Path =
     sourcesDir.resolve("decompiled").resolve(jarSha256)
@@ -682,6 +708,22 @@ private class SourceScan(val text: String, val offset: Long, val limit: Int) {
     val hits = mutableListOf<SourceSearchHit>()
     var skipped = 0L
     var hasMore = false
+    var skippedOversize = 0
+    var skippedBinary = 0
+
+    /** Files the scan could not search must be reported, never silently dropped. */
+    fun skipNote(): String {
+        val parts = mutableListOf<String>()
+        if (skippedOversize > 0) {
+            parts += "$skippedOversize source file(s) over " +
+                "${MAX_SOURCE_FILE_BYTES / (1024 * 1024)} MiB skipped"
+        }
+        if (skippedBinary > 0) {
+            parts += "$skippedBinary binary-looking file(s) skipped"
+        }
+        if (parts.isEmpty()) return ""
+        return parts.joinToString("; ") + "; matches inside skipped files are not reported"
+    }
 
     /** Returns true once the page window plus the has_more probe is filled. */
     fun scanFile(file: String, content: String): Boolean {
@@ -720,14 +762,21 @@ private fun scanSourcesJar(sourcesJar: Path, scan: SourceScan) {
     ZipFile(sourcesJar.toFile()).use { zip ->
         // Sorted names give deterministic pagination across invocations.
         val names = zip.entries().asSequence()
-            .filter { !it.isDirectory && isSourceFileName(it.name) && it.size <= MAX_SOURCE_FILE_BYTES }
+            .filter { !it.isDirectory && isSourceFileName(it.name) }
             .map { it.name }
             .sorted()
             .toList()
         for (name in names) {
             val entry = zip.getEntry(name) ?: continue
+            if (entry.size > MAX_SOURCE_FILE_BYTES) {
+                scan.skippedOversize++
+                continue
+            }
             val bytes = zip.getInputStream(entry).use { it.readBytes() }
-            if (bytes.contains(0.toByte())) continue
+            if (bytes.contains(0.toByte())) {
+                scan.skippedBinary++
+                continue
+            }
             if (scan.scanFile(name, String(bytes, StandardCharsets.UTF_8))) return
         }
     }
@@ -743,7 +792,10 @@ private fun scanDecompiledDirectory(directory: Path, scan: SourceScan) {
         emptyList<Path>()
     }
     for (file in files) {
-        if (Files.size(file) > MAX_SOURCE_FILE_BYTES) continue
+        if (Files.size(file) > MAX_SOURCE_FILE_BYTES) {
+            scan.skippedOversize++
+            continue
+        }
         val content = String(Files.readAllBytes(file), StandardCharsets.UTF_8)
         if (scan.scanFile(file.fileName.toString(), content)) return
     }
