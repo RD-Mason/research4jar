@@ -1,8 +1,6 @@
 package dev.research4jar.query
 
 import dev.research4jar.runtime.SessionFileLease
-import java.lang.reflect.InvocationTargetException
-import java.lang.reflect.Proxy
 import java.nio.file.AccessDeniedException
 import java.nio.file.FileSystemException
 import java.nio.file.Files
@@ -84,7 +82,7 @@ object Db {
         }
         return try {
             val connection = config.createConnection("jdbc:sqlite:$absolute")
-            if (lease == null) connection else leasedConnection(connection, lease)
+            if (lease == null) connection else LeasedConnection(connection, lease)
         } catch (exception: Exception) {
             lease?.close()
             throw exception
@@ -94,37 +92,32 @@ object Db {
     private fun isReadOnlyFileSystem(exception: FileSystemException): Boolean =
         exception.reason?.equals(READ_ONLY_FILE_SYSTEM_REASON, ignoreCase = true) == true
 
-    private fun leasedConnection(connection: Connection, lease: AutoCloseable): Connection {
-        val closed = AtomicBoolean(false)
-        return Proxy.newProxyInstance(
-            Connection::class.java.classLoader,
-            arrayOf(Connection::class.java),
-        ) { proxy, method, arguments ->
-            when {
-                method.name == "close" && method.parameterCount == 0 -> {
-                    if (closed.compareAndSet(false, true)) {
-                        try {
-                            connection.close()
-                        } finally {
-                            lease.close()
-                        }
-                    }
-                    null
-                }
+    /**
+     * Couples the lease's lifetime to the connection's. A compile-time
+     * delegate rather than a dynamic [java.lang.reflect.Proxy]: generating
+     * the proxy class cost ~3.6ms in every one-shot CLI process, and each
+     * JDBC call then paid reflective dispatch. Identity equals/hashCode and
+     * the idempotent close both match the previous proxy behaviour.
+     */
+    private class LeasedConnection(
+        private val delegate: Connection,
+        private val lease: AutoCloseable,
+    ) : Connection by delegate {
+        private val closed = AtomicBoolean(false)
 
-                method.name == "isClosed" && method.parameterCount == 0 ->
-                    closed.get() || connection.isClosed
-
-                method.name == "equals" && method.parameterCount == 1 -> proxy === arguments?.get(0)
-                method.name == "hashCode" && method.parameterCount == 0 -> System.identityHashCode(proxy)
-                method.name == "toString" && method.parameterCount == 0 -> "Leased($connection)"
-                else -> try {
-                    method.invoke(connection, *(arguments ?: emptyArray()))
-                } catch (exception: InvocationTargetException) {
-                    throw exception.targetException
+        override fun close() {
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    delegate.close()
+                } finally {
+                    lease.close()
                 }
             }
-        } as Connection
+        }
+
+        override fun isClosed(): Boolean = closed.get() || delegate.isClosed
+
+        override fun toString(): String = "Leased($delegate)"
     }
 
     private fun touchIfStale(path: Path) {

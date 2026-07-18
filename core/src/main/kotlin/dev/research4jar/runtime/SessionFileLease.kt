@@ -167,7 +167,14 @@ internal object SessionFileLease {
     private fun leasePaths(session: Path): LeasePaths {
         val parent = session.parent
             ?: throw IllegalArgumentException("session path has no parent: $session")
-        Files.createDirectories(parent)
+        // Query opens always find the sessions directory in place; only the
+        // builder/collector paths ever create it. createDirectories on an
+        // existing directory constructs and swallows a FileAlreadyExists
+        // exception internally — a measurable stack-fill on every one-shot
+        // query — so probe cheaply first.
+        if (!Files.isDirectory(parent)) {
+            Files.createDirectories(parent)
+        }
         // Keep the writer turnstile and the durable resource lease on
         // different inodes. On Darwin (and some other platforms), closing any
         // channel for a file can release every lock this JVM holds on that

@@ -87,12 +87,16 @@ fun findString(
     page: Int,
     pageSize: Int,
 ): StringSearchResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
-    val (total, pending) = if (
-        trigramSearchable(text) &&
-        !preferLegacyForDenseFts(session, findStringFtsDensityPlan(text))
-    ) {
+    val route = if (trigramSearchable(text)) findStringFtsRoute(session, text) else null
+    val (total, pending) = if (route != null && !route.preferLegacy) {
         try {
-            fetchPage(session, FIND_STRING_FTS_COUNT_SQL, FIND_STRING_FTS_SQL, "%$text%", page, pageSize)
+            if (route.exactTotal != null) {
+                // The sparse density probe already counted every FTS hit;
+                // only the page query remains.
+                route.exactTotal to fetchRows(session, FIND_STRING_FTS_SQL, "%$text%", page, pageSize)
+            } else {
+                fetchPage(session, FIND_STRING_FTS_COUNT_SQL, FIND_STRING_FTS_SQL, "%$text%", page, pageSize)
+            }
         } catch (_: SQLException) {
             // Session predates string_constants_fts; the legacy scan still answers.
             fetchLegacyPage(session, text, page, pageSize)
@@ -134,9 +138,19 @@ private fun fetchPage(
     page: Int,
     pageSize: Int,
 ): Pair<Int, List<PendingString>> {
-    val window = pageWindow(page, pageSize)
     val total = session.queryInt(countSql, listOf(pattern))
-    val pending = session.query(pageSql, listOf(pattern, window.limit, window.offset)) { rows ->
+    return total to fetchRows(session, pageSql, pattern, page, pageSize)
+}
+
+private fun fetchRows(
+    session: Connection,
+    pageSql: String,
+    pattern: String,
+    page: Int,
+    pageSize: Int,
+): List<PendingString> {
+    val window = pageWindow(page, pageSize)
+    return session.query(pageSql, listOf(pattern, window.limit, window.offset)) { rows ->
         rows.mapRows {
             val methodName = it.getString(3)
             val methodDescriptor = it.getString(4)
@@ -155,5 +169,4 @@ private fun fetchPage(
             )
         }
     }
-    return total to pending
 }
