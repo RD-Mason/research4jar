@@ -216,6 +216,18 @@ class AdaptiveFtsQueryTest {
             assertFalse(preferLegacyForDenseFts(db, classFtsDensityPlan("no-such-class")))
             assertFalse(preferLegacyForDenseFts(db, findStringFtsDensityPlan("no-such-string")))
 
+            // find-string's single-arm probe doubles as the exact result
+            // total whenever it stops short of the density threshold.
+            val sparseRoute = findStringFtsRoute(db, "StringMid 00042")
+            assertFalse(sparseRoute.preferLegacy)
+            assertEquals(1, sparseRoute.exactTotal)
+            val missRoute = findStringFtsRoute(db, "no-such-string")
+            assertFalse(missRoute.preferLegacy)
+            assertEquals(0, missRoute.exactTotal)
+            val denseRoute = findStringFtsRoute(db, "StringMid")
+            assertTrue(denseRoute.preferLegacy)
+            assertEquals(null, denseRoute.exactTotal)
+
             // Two individually sparse arms whose aggregate postings work is
             // dense must still select the scan.
             assertTrue(
@@ -311,6 +323,10 @@ class AdaptiveFtsQueryTest {
             assertTrue(preferLegacyForDenseFts(db, classFtsDensityPlan("CommonMid")))
             db.createStatement().use { statement -> statement.execute("DROP TABLE classes_fts") }
             assertTrue(preferLegacyForDenseFts(db, classFtsDensityPlan("CommonMid")))
+            db.createStatement().use { statement ->
+                statement.execute("DROP TABLE string_constants_fts")
+            }
+            assertTrue(findStringFtsRoute(db, "StringMid 00042").preferLegacy)
         }
     }
 }

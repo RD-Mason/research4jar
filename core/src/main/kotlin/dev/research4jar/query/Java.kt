@@ -211,6 +211,46 @@ internal fun preferLegacyForDenseFts(
     true
 }
 
+/**
+ * Find-string's density decision. Its plan has a single arm whose probe runs
+ * the identical predicate as FIND_STRING_FTS_COUNT_SQL, so a probe that
+ * stops short of the density threshold has already produced the exact result
+ * total: [exactTotal] lets the caller skip re-running the COUNT. Multi-arm
+ * plans (search-symbol) keep the boolean-only [preferLegacyForDenseFts] —
+ * overlapping arms make their aggregate a work bound, not a result count.
+ */
+internal class FindStringFtsRoute(val preferLegacy: Boolean, val exactTotal: Int?)
+
+internal fun findStringFtsRoute(
+    session: java.sql.Connection,
+    term: String,
+): FindStringFtsRoute = try {
+    val plan = findStringFtsDensityPlan(term)
+    val population = tablePopulation(session, plan)
+    if (population < FTS_DENSITY_MIN_POPULATION) {
+        FindStringFtsRoute(preferLegacy = false, exactTotal = null)
+    } else {
+        val threshold = (population - 1L) / FTS_DENSITY_DIVISOR + 1L
+        val probe = plan.probes.single()
+        val hits = session.query(
+            "SELECT COUNT(*) FROM (${probe.sql})",
+            probe.args + listOf(threshold),
+        ) { rows ->
+            rows.next()
+            rows.getLong(1)
+        }
+        if (hits >= threshold) {
+            FindStringFtsRoute(preferLegacy = true, exactTotal = null)
+        } else {
+            FindStringFtsRoute(preferLegacy = false, exactTotal = hits.toInt())
+        }
+    }
+} catch (_: java.sql.SQLException) {
+    // Same contract as preferLegacyForDenseFts: any missing/corrupt FTS
+    // structure safely selects the legacy scan.
+    FindStringFtsRoute(preferLegacy = true, exactTotal = null)
+}
+
 // Two-stage search shared by find-class/find-method/search-symbol: the fast
 // query probes only equality and range predicates (index-backed); its every
 // match outscores every contains-tier match, so a full fast page equals the

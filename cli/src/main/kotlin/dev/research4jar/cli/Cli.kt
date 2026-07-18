@@ -52,8 +52,14 @@ internal val PAGINATED_QUERY_COMMANDS = setOf(
 
 private val BASE_QUERY_OPTIONS = setOf("--project-dir", "--format", "--home")
 private val PAGING_OPTIONS = setOf("--page", "--page-size")
-private val SOURCE_USAGE_OPTIONS = setOf("--source-grep", "--no-source-grep")
-private val PARSED_OPTIONS = BASE_QUERY_OPTIONS + PAGING_OPTIONS + SOURCE_USAGE_OPTIONS + "--direct"
+
+// Spelled out (not composed with Set.plus) so loading this class does not
+// drag in the whole kotlin.collections facade: one-shot CLI startup pays
+// every class initialized here.
+private val PARSED_OPTIONS = setOf(
+    "--project-dir", "--format", "--home", "--page", "--page-size",
+    "--source-grep", "--no-source-grep", "--direct",
+)
 
 internal fun optionsForQuery(command: String): Set<String> = buildSet {
     addAll(BASE_QUERY_OPTIONS)
@@ -61,10 +67,14 @@ internal fun optionsForQuery(command: String): Set<String> = buildSet {
     if (command == "find-implementations" || command == "find-by-annotation") add("--direct")
 }
 
-internal fun preciseLookupOptions(): Set<String> =
-    BASE_QUERY_OPTIONS + "--page-size" + SOURCE_USAGE_OPTIONS
+internal fun preciseLookupOptions(): Set<String> = setOf(
+    "--project-dir", "--format", "--home", "--page-size",
+    "--source-grep", "--no-source-grep",
+)
 
-internal fun methodLookupOptions(): Set<String> = BASE_QUERY_OPTIONS + PAGING_OPTIONS
+internal fun methodLookupOptions(): Set<String> = setOf(
+    "--project-dir", "--format", "--home", "--page", "--page-size",
+)
 
 /** Everything Go's parseOptions produces (main.go options struct). */
 internal data class CommandOptions(
