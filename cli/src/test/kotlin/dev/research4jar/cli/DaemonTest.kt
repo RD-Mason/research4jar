@@ -1048,12 +1048,15 @@ class DaemonTest {
         return ServerHandle(serverThread, failure)
     }
 
-    private fun awaitEndpoint(config: Daemon.RuntimeConfig) {
-        repeat(200) {
+    private fun awaitEndpoint(config: Daemon.RuntimeConfig, server: ServerHandle? = null) {
+        // Generous budget: loaded CI runners (windows-latest especially) can
+        // take multiple seconds between thread start and endpoint publish.
+        repeat(2000) {
             if (Files.isRegularFile(config.endpointFile)) return
+            server?.failure?.get()?.let { throw IllegalStateException("daemon server died before publishing", it) }
             Thread.sleep(5)
         }
-        error("daemon endpoint was not published")
+        error("daemon endpoint was not published" + (server?.failure?.get()?.let { ": $it" } ?: ""))
     }
 
     private fun sendBuildMismatch(
