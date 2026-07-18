@@ -290,12 +290,19 @@ class StoreTest {
             "view" to listOf("DROP VIEW search_symbols"),
             "fts" to listOf("DROP TABLE classes_fts"),
             "wrong-fts-definition" to listOf(
-                "DROP TABLE methods_fts",
-                "CREATE VIRTUAL TABLE methods_fts USING fts5(" +
-                    "name, descriptor, symbol, content='methods', content_rowid='id', " +
+                "DROP TABLE method_names_fts",
+                "CREATE VIRTUAL TABLE method_names_fts USING fts5(" +
+                    "names, extra, content='method_name_packs', content_rowid='pack_id', " +
                     "tokenize='trigram', detail='none', columnsize=0)",
             ),
+            "domain-table" to listOf("DROP TABLE method_descriptors"),
+            "pack-table" to listOf("DROP TABLE string_value_packs"),
             "index" to listOf("DROP INDEX idx_s_strconst_method"),
+            "domain-index" to listOf("DROP INDEX idx_s_methods_descriptor"),
+            "non-unique-domain-index" to listOf(
+                "DROP INDEX idx_s_method_names_name",
+                "CREATE INDEX idx_s_method_names_name ON method_names(name)",
+            ),
             "extra-column" to listOf("ALTER TABLE methods ADD COLUMN symbol TEXT"),
             "wrong-index-definition" to listOf(
                 "DROP INDEX idx_s_methods_name",
@@ -331,9 +338,9 @@ class StoreTest {
 
         DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
             connection.createStatement().use { statement ->
-                statement.execute("DROP TABLE methods_fts")
+                statement.execute("DROP TABLE method_names_fts")
                 statement.execute(
-                    "CREATE TABLE methods_fts(rowid INTEGER, name TEXT, descriptor TEXT)",
+                    "CREATE TABLE method_names_fts(rowid INTEGER, names TEXT)",
                 )
             }
         }

@@ -49,8 +49,9 @@ class SessionDeltaTest {
         val charlie = shard("charlie")
         val delta = shard("delta")
         // Corrupt-shard orphans (a method whose class row is gone) merge with
-        // an unresolved owner. Their names still belong in methods_fts; alpha's
-        // rides the delta DELETE mirror and delta's the delta INSERT mirror.
+        // an unresolved owner. Their names still belong in the method-name
+        // domain; alpha's leaves a stale (harmless) domain value behind the
+        // delta's range delete and delta's rides the per-shard domain sync.
         injectOrphanMethod(alpha.path)
         injectOrphanMethod(delta.path)
 
@@ -70,33 +71,43 @@ class SessionDeltaTest {
         assertEquals(1, SessionBuilder().reusableSessionState(viaDelta)?.deltaDepth)
         assertEquals(0, SessionBuilder().reusableSessionState(viaFull)?.deltaDepth)
         assertEquals(canonicalDump(viaFull), canonicalDump(viaDelta))
-        // The FTS5 shadows are maintained incrementally on the delta path
-        // (mirrored deletes + per-shard inserts) while full builds rebuild
-        // them once at commit: integrity-check throws on any divergence from
-        // the content table, and a trigram-served LIKE must return the same
-        // rows either way.
+        // classes_fts is maintained incrementally on the delta path (mirrored
+        // deletes + per-shard inserts) and the search domains are appended
+        // per shard, while full builds rebuild/fill them once at commit:
+        // integrity-check throws on any shadow/content divergence, the pack
+        // partition invariants must hold, and a trigram-served LIKE must
+        // return the same LIVE rows either way — stale domain values from
+        // removed shards may exist in the delta session but join to nothing.
         assertFtsIntegrity(viaDelta)
         val probes = listOf(
-            "SELECT s.value, ss.shard_id FROM string_constants_fts f " +
-                "JOIN string_constants s ON s.id = f.rowid " +
+            "SELECT s.value, ss.shard_id FROM string_values_fts f " +
+                "JOIN string_value_packs k ON k.pack_id = f.rowid " +
+                "JOIN string_values v ON v.id BETWEEN k.min_id AND k.max_id " +
+                "JOIN string_constants s ON s.value = v.value " +
                 "JOIN session_shards ss ON ss.shard_key = s.source_shard_id " +
-                "WHERE f.value LIKE '%from%'",
+                "WHERE f.vals LIKE '%from%' AND v.value LIKE '%from%'",
             "SELECT c.fqn, c.kind, ss.shard_id FROM classes_fts f " +
                 "JOIN classes c ON c.id = f.rowid " +
                 "JOIN session_shards ss ON ss.shard_key = c.source_shard_id " +
                 "WHERE f.fqn LIKE '%Helper%'",
-            "SELECT m.name, ss.shard_id FROM methods_fts f " +
-                "JOIN methods m ON m.id = f.rowid " +
+            "SELECT m.name, ss.shard_id FROM method_names_fts f " +
+                "JOIN method_name_packs k ON k.pack_id = f.rowid " +
+                "JOIN method_names n ON n.id BETWEEN k.min_id AND k.max_id " +
+                "JOIN methods m ON m.name = n.name " +
                 "JOIN session_shards ss ON ss.shard_key = m.source_shard_id " +
-                "WHERE f.name LIKE '%bean%'",
-            "SELECT m.name, m.descriptor, ss.shard_id FROM methods_fts f " +
-                "JOIN methods m ON m.id = f.rowid " +
+                "WHERE f.names LIKE '%bean%' AND n.name LIKE '%bean%'",
+            "SELECT m.name, m.descriptor, ss.shard_id FROM method_descriptors_fts f " +
+                "JOIN method_descriptor_packs k ON k.pack_id = f.rowid " +
+                "JOIN method_descriptors d ON d.id BETWEEN k.min_id AND k.max_id " +
+                "JOIN methods m ON m.descriptor = d.descriptor " +
                 "JOIN session_shards ss ON ss.shard_key = m.source_shard_id " +
-                "WHERE f.descriptor LIKE '%Helper;%'",
-            "SELECT m.name, ss.shard_id FROM methods_fts f " +
-                "JOIN methods m ON m.id = f.rowid " +
+                "WHERE f.descriptors LIKE '%Helper;%' AND d.descriptor LIKE '%Helper;%'",
+            "SELECT m.name, ss.shard_id FROM method_names_fts f " +
+                "JOIN method_name_packs k ON k.pack_id = f.rowid " +
+                "JOIN method_names n ON n.id BETWEEN k.min_id AND k.max_id " +
+                "JOIN methods m ON m.name = n.name " +
                 "JOIN session_shards ss ON ss.shard_key = m.source_shard_id " +
-                "WHERE f.name LIKE '%orphaned%'",
+                "WHERE f.names LIKE '%orphaned%' AND n.name LIKE '%orphaned%'",
         )
         for (probe in probes) {
             assertEquals(ftsMatches(viaFull, probe), ftsMatches(viaDelta, probe), probe)
@@ -452,12 +463,48 @@ class SessionDeltaTest {
         }
     }
 
-    /** integrity-check throws on any shadow/content divergence. */
+    /**
+     * integrity-check throws on any shadow/content divergence; the pack
+     * checks prove every domain row is covered by exactly one pack and every
+     * pack reached the FTS — on the delta path these hold only if the
+     * per-shard sync appended consistently.
+     */
     private fun assertFtsIntegrity(session: Path) {
         DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
             connection.createStatement().use { statement ->
-                for (fts in listOf("string_constants_fts", "classes_fts", "methods_fts")) {
+                for (
+                fts in listOf(
+                    "classes_fts", "method_names_fts", "method_descriptors_fts",
+                    "string_values_fts",
+                )
+                ) {
                     statement.execute("INSERT INTO $fts($fts) VALUES('integrity-check')")
+                }
+                for (
+                (domain, pack) in listOf(
+                    "method_names" to "method_name_packs",
+                    "method_descriptors" to "method_descriptor_packs",
+                    "string_values" to "string_value_packs",
+                )
+                ) {
+                    statement.executeQuery(
+                        "SELECT (SELECT COUNT(*) FROM $domain), " +
+                            "(SELECT COALESCE(SUM(max_id - min_id + 1), 0) FROM $pack), " +
+                            "(SELECT COUNT(*) FROM $pack), " +
+                            "(SELECT COUNT(*) FROM ${domain}_fts)",
+                    ).use { rows ->
+                        assertTrue(rows.next())
+                        assertEquals(
+                            rows.getInt(1),
+                            rows.getInt(2),
+                            "$pack must partition $domain in $session",
+                        )
+                        assertEquals(
+                            rows.getInt(3),
+                            rows.getInt(4),
+                            "${domain}_fts must carry every pack in $session",
+                        )
+                    }
                 }
             }
         }

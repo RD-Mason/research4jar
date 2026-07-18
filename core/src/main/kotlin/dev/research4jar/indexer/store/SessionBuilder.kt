@@ -40,11 +40,15 @@ internal const val PACKAGE_NAME_EXPR =
  * (no id column) is covered through its shard's classes range. All rows
  * referencing another table's ids (annotations, string_constants, ...) come
  * from the same shard as their referent, so a per-shard delete never leaves
- * dangling references. The external-content FTS5 shadows (string_constants_fts,
- * classes_fts, methods_fts) are each kept in sync at two sites — one statement
- * per shadow before its content table's delete in
- * [SessionBuilder.deleteShards], one after its content table's INSERT in
- * [SessionBuilder.merge].
+ * dangling references. classes_fts, the one remaining per-row external-content
+ * FTS5 shadow, is kept in sync at two sites — one statement before the classes
+ * delete in [SessionBuilder.deleteShards], one after the classes INSERT in
+ * [SessionBuilder.merge]. The deduplicated search domains (method_names,
+ * method_descriptors, string_values and their pack/FTS structures) are
+ * append-only: [SessionBuilder.syncSearchDomains] adds newly-seen values and
+ * deletions never touch them — a stale domain value simply joins back to zero
+ * live rows, and because domains reference VALUES rather than row ids, later
+ * id reuse after a range delete can never resurface deleted rows.
  */
 internal val ID_TABLES = listOf(
     "config_properties",
@@ -89,12 +93,19 @@ private val SESSION_TABLE_COLUMNS = linkedMapOf(
         listOf("id", "config_fqn", "method_id", "bean_type_fqn", "bean_name", "source_shard_id"),
     "conditions" to listOf("id", "target_kind", "target_id", "type", "ref_value", "source_shard_id"),
     "string_constants" to listOf("id", "class_id", "method_id", "value", "source_shard_id"),
+    "method_names" to listOf("id", "name"),
+    "method_name_packs" to listOf("pack_id", "min_id", "max_id", "names"),
+    "method_descriptors" to listOf("id", "descriptor"),
+    "method_descriptor_packs" to listOf("pack_id", "min_id", "max_id", "descriptors"),
+    "string_values" to listOf("id", "value"),
+    "string_value_packs" to listOf("pack_id", "min_id", "max_id", "vals"),
 )
 
 private val SESSION_FTS_COLUMNS = linkedMapOf(
-    "string_constants_fts" to listOf("value"),
     "classes_fts" to listOf("fqn", "kind"),
-    "methods_fts" to listOf("name", "descriptor"),
+    "method_names_fts" to listOf("names"),
+    "method_descriptors_fts" to listOf("descriptors"),
+    "string_values_fts" to listOf("vals"),
 )
 
 private val SESSION_INTEGER_COLUMNS = buildMap {
@@ -111,26 +122,36 @@ private val SESSION_INTEGER_COLUMNS = buildMap {
         "string_constants",
     ).forEach { table -> put(table, setOf("source_shard_id")) }
     put("methods", setOf("owner_resolved", "source_shard_id"))
+    listOf("method_name_packs", "method_descriptor_packs", "string_value_packs")
+        .forEach { table -> put(table, setOf("min_id", "max_id")) }
 }
 
 private val SESSION_FTS_CREATE_SQL = linkedMapOf(
-    "string_constants_fts" to
-        "CREATE VIRTUAL TABLE string_constants_fts USING fts5(" +
-        "value, content='string_constants', content_rowid='id', " +
-        "tokenize='trigram', detail='none', columnsize=0)",
     "classes_fts" to
         "CREATE VIRTUAL TABLE classes_fts USING fts5(" +
         "fqn, kind, content='classes', content_rowid='id', " +
         "tokenize='trigram', detail='none', columnsize=0)",
-    "methods_fts" to
-        "CREATE VIRTUAL TABLE methods_fts USING fts5(" +
-        "name, descriptor, content='methods', content_rowid='id', " +
+    "method_names_fts" to
+        "CREATE VIRTUAL TABLE method_names_fts USING fts5(" +
+        "names, content='method_name_packs', content_rowid='pack_id', " +
+        "tokenize='trigram', detail='none', columnsize=0)",
+    "method_descriptors_fts" to
+        "CREATE VIRTUAL TABLE method_descriptors_fts USING fts5(" +
+        "descriptors, content='method_descriptor_packs', content_rowid='pack_id', " +
+        "tokenize='trigram', detail='none', columnsize=0)",
+    "string_values_fts" to
+        "CREATE VIRTUAL TABLE string_values_fts USING fts5(" +
+        "vals, content='string_value_packs', content_rowid='pack_id', " +
         "tokenize='trigram', detail='none', columnsize=0)",
 )
 
 /** Name plus the performance-critical part of each CREATE INDEX statement. */
 private val SESSION_INDEX_SQL_FRAGMENTS = linkedMapOf(
     "idx_session_shards_key" to "on session_shards(shard_key)",
+    "idx_s_methods_descriptor" to "on methods(descriptor)",
+    "idx_s_method_names_name" to "on method_names(name)",
+    "idx_s_method_descriptors_descriptor" to "on method_descriptors(descriptor)",
+    "idx_s_string_values_value" to "on string_values(value)",
     "idx_s_cfg_prefix" to "on config_properties(prefix)",
     "idx_s_cfg_name" to "on config_properties(name)",
     "idx_s_spi_mech" to "on spi_registrations(mechanism)",
@@ -154,6 +175,48 @@ private val SESSION_INDEX_SQL_FRAGMENTS = linkedMapOf(
     "idx_s_strconst_method" to
         "on string_constants(method_id, class_id) where method_id is not null",
     "idx_s_spi_impl" to "on spi_registrations(impl_fqn)",
+)
+
+/** Contract indexes that must be declared UNIQUE. The domain value indexes
+ * both guard the deduplication invariant and give the delta path its
+ * INSERT OR IGNORE conflict target. */
+private val SESSION_UNIQUE_INDEXES = setOf(
+    "idx_session_shards_key",
+    "idx_s_method_names_name",
+    "idx_s_method_descriptors_descriptor",
+    "idx_s_string_values_value",
+)
+
+/**
+ * One deduplicated search domain: the distinct values of one repetitive
+ * source column, packed [DOMAIN_PACK_SPAN] values per external-content FTS
+ * row. Deduplication is the primary win: the 222-jar fixture holds 687k
+ * method rows but only 113k distinct names (2.2MB) and 137k distinct
+ * descriptors (14.6MB), and the distinct sets stay virtually IDENTICAL at
+ * 1000 jars (3.3M method rows) — per-row shadows scale with rows, domains
+ * saturate. Packing then strips the residual per-ROW indexing overhead
+ * (~1us/row measured, comparable to tokenizing a 30-character value), so
+ * the FTS bill reduces to the domain's text. Queries
+ * treat a matching pack as a candidate set: members are enumerated through
+ * the pack's contiguous domain id range and re-verified with the same LIKE,
+ * so pack granularity can never change results. The concatenation is a pure
+ * pre-filter, complete for every pattern (a value's occurrence of the
+ * pattern appears verbatim in its pack's text).
+ */
+internal data class SearchDomain(
+    val sourceTable: String,
+    val valueColumn: String,
+    val domainTable: String,
+    val packTable: String,
+    val packColumn: String,
+)
+
+internal const val DOMAIN_PACK_SPAN = 256
+
+internal val SEARCH_DOMAINS = listOf(
+    SearchDomain("methods", "name", "method_names", "method_name_packs", "names"),
+    SearchDomain("methods", "descriptor", "method_descriptors", "method_descriptor_packs", "descriptors"),
+    SearchDomain("string_constants", "value", "string_values", "string_value_packs", "vals"),
 )
 
 private val SEARCH_SYMBOL_COLUMNS =
@@ -403,19 +466,17 @@ class SessionBuilder {
 
         fun commit(target: Path) {
             connection.createStatement().use { statement ->
-                // External-content fts5 tables never see the merge inserts;
-                // one rebuild per shadow scans its fully merged content table.
-                statement.execute(
-                    "INSERT INTO string_constants_fts(string_constants_fts) VALUES('rebuild')",
-                )
+                // The external-content classes_fts never sees the merge
+                // inserts; one rebuild scans the fully merged classes table.
                 statement.execute(
                     "INSERT INTO classes_fts(classes_fts) VALUES('rebuild')",
                 )
-                statement.execute(
-                    "INSERT INTO methods_fts(methods_fts) VALUES('rebuild')",
-                )
             }
+            // Indexes first: the domain fills below run their DISTINCT as an
+            // index distinct-scan (O(distinct) seeks) instead of a temp
+            // B-tree over every merged row.
             createIndexes(connection)
+            syncSearchDomains(connection, methodIdOffset = 0, stringIdOffset = 0)
             connection.createStatement().use { statement ->
                 // Sampled ANALYZE: sqlite_stat1 selectivity estimates from a
                 // few hundred rows per index steer the planner just as well
@@ -547,7 +608,7 @@ class SessionBuilder {
                 val entry = schema[name] ?: return null
                 if (entry.first != "index") return null
                 val createSql = normalizeSchemaSql(entry.second ?: return null)
-                val qualifier = if (name == "idx_session_shards_key") "unique " else ""
+                val qualifier = if (name in SESSION_UNIQUE_INDEXES) "unique " else ""
                 val expectedSql = normalizeSchemaSql(
                     "create ${qualifier}index $name $fragment",
                 )
@@ -682,6 +743,12 @@ class SessionBuilder {
             // build. MEMORY keeps ROLLBACK working for the merge error path.
             statement.execute("PRAGMA journal_mode=MEMORY")
             statement.execute("PRAGMA synchronous=OFF")
+            // Index creation and the domain GROUP BYs run through SQLite's
+            // sorter; keeping its spill buffers and a build-sized page cache
+            // in memory is measurably faster and costs bounded native memory
+            // (outside the JVM heap) only while the build connection lives.
+            statement.execute("PRAGMA temp_store=MEMORY")
+            statement.execute("PRAGMA cache_size=-65536")
         }
     }
 
@@ -846,28 +913,44 @@ class SessionBuilder {
                 )
                 """.trimIndent(),
             )
-            // Trigram index for find-string's substring LIKE: fts5 pushes a
-            // plain `value LIKE ?` down to the trigram doclists. External
-            // content avoids duplicating the values; detail='none' plus
-            // columnsize=0 drop positions and the docsize shadow table, and
-            // both are verified to keep the LIKE pushdown on this SQLite
-            // build (EXPLAIN QUERY PLAN shows INDEX 0:L0). The table indexes
-            // nothing by itself — commit() runs the 'rebuild' command once
-            // every shard has merged.
-            statement.execute(SESSION_FTS_CREATE_SQL.getValue("string_constants_fts"))
-            // The same trigram pushdown for search-symbol's contains fallback
-            // over classes and methods: fts5 serves each column's own
-            // `LIKE '%...%'` from the doclists (EXPLAIN QUERY PLAN shows
-            // INDEX 0:L0 for the first column, 0:L1 for the second — verified
-            // for all four columns on this SQLite build), so the cascade stops
-            // scanning the two largest session tables. Indexing the compact
-            // method name rather than its repeated owner#name symbol nearly
-            // halves this shadow's build time and bytes; owner substrings use
-            // classes_fts. Nullable class kinds index as absent. Like
-            // string_constants_fts these index nothing until commit() runs
-            // their 'rebuild'.
+            // Trigram pushdown for search-symbol's class contains fallback:
+            // fts5 serves each column's own `LIKE '%...%'` from the doclists
+            // (EXPLAIN QUERY PLAN shows INDEX 0:L0 for the first column,
+            // 0:L1 for the second — verified on this SQLite build), so the
+            // cascade stops scanning the classes table. detail='none' plus
+            // columnsize=0 drop positions and the docsize shadow table.
+            // Nullable class kinds index as absent. Indexes nothing until
+            // commit() runs its 'rebuild'. Class FQNs stay per-row because
+            // they are mostly unique (~85% distinct) — no domain to gain.
             statement.execute(SESSION_FTS_CREATE_SQL.getValue("classes_fts"))
-            statement.execute(SESSION_FTS_CREATE_SQL.getValue("methods_fts"))
+            // Method names/descriptors and string values are massively
+            // repetitive, so their substring search runs over deduplicated,
+            // packed value domains instead of per-row shadows (the per-row
+            // methods_fts/string_constants_fts rebuilds were ~25s of a 33s
+            // 1000-jar session build; see SEARCH_DOMAINS). Reverse lookup
+            // back to rows goes value-equality through idx_s_methods_name,
+            // idx_s_methods_descriptor and idx_s_strconst_value.
+            for (domain in SEARCH_DOMAINS) {
+                statement.execute(
+                    """
+                    CREATE TABLE ${domain.domainTable} (
+                      id INTEGER PRIMARY KEY,
+                      ${domain.valueColumn} TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(
+                    """
+                    CREATE TABLE ${domain.packTable} (
+                      pack_id INTEGER PRIMARY KEY,
+                      min_id INTEGER NOT NULL,
+                      max_id INTEGER NOT NULL,
+                      ${domain.packColumn} TEXT NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(SESSION_FTS_CREATE_SQL.getValue("${domain.domainTable}_fts"))
+            }
             // search_symbols is a view, not a copy: the materialized table
             // plus its four indexes were 65% of the session bytes while the
             // broad-search query could not use those indexes anyway
@@ -1031,27 +1114,23 @@ class SessionBuilder {
                 statement.setLong(3, shardKey)
                 statement.executeUpdate()
             }
-            // Full builds skip this: Stream.commit rebuilds each whole shadow
-            // in one pass over the merged content, which costs the same
-            // tokenize work once instead of per shard. The delta path has no
-            // rebuild, so it mirrors each addition here (deletions are
-            // mirrored in deleteShards). Each shard's rows are exactly the
-            // contiguous id range above the offset captured before its merge.
+            // Full builds skip this: Stream.commit rebuilds classes_fts in
+            // one pass and fills the search domains set-based over the fully
+            // merged tables. The delta path has no rebuild, so it mirrors the
+            // classes_fts addition here (its deletion is mirrored in
+            // deleteShards — each shard's rows are exactly the contiguous id
+            // range above the offset captured before its merge) and appends
+            // this shard's newly-seen values to the search domains. Domains
+            // are append-only across deltas: values whose rows all leave the
+            // session simply stop matching anything.
             if (syncFts) {
                 connection.createStatement().use { statement ->
-                    statement.executeUpdate(
-                        "INSERT INTO string_constants_fts(rowid, value) " +
-                            "SELECT id, value FROM string_constants WHERE id > $stringIdOffset",
-                    )
                     statement.executeUpdate(
                         "INSERT INTO classes_fts(rowid, fqn, kind) " +
                             "SELECT id, fqn, kind FROM classes WHERE id > $classIdOffset",
                     )
-                    statement.executeUpdate(
-                        "INSERT INTO methods_fts(rowid, name, descriptor) " +
-                            "SELECT id, name, descriptor FROM methods WHERE id > $methodIdOffset",
-                    )
                 }
+                syncSearchDomains(connection, methodIdOffset, stringIdOffset)
             }
             connection.prepareStatement(
                 "INSERT INTO session_shard_ranges(shard_id, table_name, min_id, max_id) " +
@@ -1291,27 +1370,16 @@ class SessionBuilder {
             connection.createStatement().use { statement ->
                 for (shardId in shardIds) {
                     val ranges = rangesByShard[shardId] ?: continue
-                    // External-content FTS5 rows must be removed while the
-                    // doomed content rows are still readable — the 'delete'
-                    // command needs the exact indexed values.
-                    ranges["string_constants"]?.let { range ->
-                        statement.executeUpdate(
-                            "INSERT INTO string_constants_fts(string_constants_fts, rowid, value) " +
-                                "SELECT 'delete', id, value FROM string_constants " +
-                                "WHERE id BETWEEN ${range.first} AND ${range.last}",
-                        )
-                    }
+                    // classes_fts rows must be removed while the doomed
+                    // content rows are still readable — the external-content
+                    // 'delete' command needs the exact indexed values. The
+                    // search domains need no mirror: they reference values,
+                    // not row ids, so deleted rows simply stop being found
+                    // through them and id reuse cannot resurface stale hits.
                     ranges["classes"]?.let { range ->
                         statement.executeUpdate(
                             "INSERT INTO classes_fts(classes_fts, rowid, fqn, kind) " +
                                 "SELECT 'delete', id, fqn, kind FROM classes " +
-                                "WHERE id BETWEEN ${range.first} AND ${range.last}",
-                        )
-                    }
-                    ranges["methods"]?.let { range ->
-                        statement.executeUpdate(
-                            "INSERT INTO methods_fts(methods_fts, rowid, name, descriptor) " +
-                                "SELECT 'delete', id, name, descriptor FROM methods " +
                                 "WHERE id BETWEEN ${range.first} AND ${range.last}",
                         )
                     }
@@ -1356,12 +1424,79 @@ class SessionBuilder {
     }
 
     private fun maxId(connection: Connection, table: String): Int =
+        maxValue(connection, table, "id")
+
+    private fun maxValue(connection: Connection, table: String, column: String): Int =
         connection.createStatement().use { statement ->
-            statement.executeQuery("SELECT COALESCE(MAX(id), 0) FROM $table").use { rows ->
+            statement.executeQuery("SELECT COALESCE(MAX($column), 0) FROM $table").use { rows ->
                 rows.next()
                 rows.getInt(1)
             }
         }
+
+    /**
+     * Appends every newly-seen method name/descriptor and string value to its
+     * deduplicated domain, packs the appended values [DOMAIN_PACK_SPAN] per
+     * row, and feeds the new packs to the domain's trigram FTS. One code path
+     * serves both build modes: the full build calls this once at commit with
+     * zero offsets (INSERT OR IGNORE degenerates to plain insert into the
+     * empty domain, and the DISTINCT runs as an index distinct-scan), the
+     * delta path calls it per added shard with that shard's pre-merge row
+     * offsets (the unique domain index absorbs already-known values). Pack
+     * membership is recorded as the pack's contiguous [min_id, max_id] domain
+     * id range, so a delta appending fewer than a full pack simply starts a
+     * fresh pack — nothing ever rewrites an existing domain row, pack, or FTS
+     * entry, and the 8-generation delta rebase bounds the resulting partial
+     * packs. Because the trailing LIMIT-free statements only read rows above
+     * the captured offsets, reruns are naturally idempotent per merge
+     * transaction. Internal (not private) so query-test fixtures that insert
+     * session rows directly can run the same fill the merge paths run.
+     */
+    internal fun syncSearchDomains(connection: Connection, methodIdOffset: Int, stringIdOffset: Int) {
+        connection.createStatement().use { statement ->
+            for (domain in SEARCH_DOMAINS) {
+                val sourceOffset =
+                    if (domain.sourceTable == "methods") methodIdOffset else stringIdOffset
+                val domainOffset = maxId(connection, domain.domainTable)
+                val packOffset = maxValue(connection, domain.packTable, "pack_id")
+                val sourceFilter = if (sourceOffset == 0) "" else " WHERE id > $sourceOffset"
+                statement.executeUpdate(
+                    "INSERT OR IGNORE INTO ${domain.domainTable}(${domain.valueColumn}) " +
+                        "SELECT DISTINCT ${domain.valueColumn} " +
+                        "FROM ${domain.sourceTable}$sourceFilter",
+                )
+                // group_concat's member order inside one pack is whatever the
+                // GROUP BY delivers — irrelevant, because queries enumerate
+                // members through [min_id, max_id] and re-verify each value.
+                // A value carrying an embedded NUL contributes only its
+                // pre-NUL prefix: SQLite's LIKE and the fts5 tokenizer treat
+                // text as NUL-terminated, so the full value would hide every
+                // pack member concatenated after it, while the prefix is
+                // precisely the part LIKE can ever see of such a value (the
+                // member-level re-check against the real value stays exact).
+                val packedValue =
+                    "CASE WHEN instr(${domain.valueColumn}, char(0)) = 0 " +
+                        "THEN ${domain.valueColumn} " +
+                        "ELSE substr(${domain.valueColumn}, 1, " +
+                        "instr(${domain.valueColumn}, char(0)) - 1) END"
+                statement.executeUpdate(
+                    """
+                    INSERT INTO ${domain.packTable}(pack_id, min_id, max_id, ${domain.packColumn})
+                    SELECT $packOffset + 1 + (id - $domainOffset - 1) / $DOMAIN_PACK_SPAN,
+                           MIN(id), MAX(id), group_concat($packedValue, char(10))
+                    FROM ${domain.domainTable}
+                    WHERE id > $domainOffset
+                    GROUP BY (id - $domainOffset - 1) / $DOMAIN_PACK_SPAN
+                    """.trimIndent(),
+                )
+                statement.executeUpdate(
+                    "INSERT INTO ${domain.domainTable}_fts(rowid, ${domain.packColumn}) " +
+                        "SELECT pack_id, ${domain.packColumn} FROM ${domain.packTable} " +
+                        "WHERE pack_id > $packOffset",
+                )
+            }
+        }
+    }
 
     private fun createIndexes(connection: Connection) {
         connection.createStatement().use { statement ->
@@ -1383,6 +1518,13 @@ class SessionBuilder {
             )
             statement.execute("CREATE INDEX idx_s_methods_class ON methods(class_id)")
             statement.execute("CREATE INDEX idx_s_methods_name ON methods(name)")
+            // The descriptor domain's reverse lookup: the FTS walk yields
+            // matching descriptor VALUES; this index maps a value back to its
+            // method rows. Chosen over a per-row descriptor_id mapping by
+            // measurement — the sorter builds this index in ~0.4s per 687k
+            // methods, while resolving integer ids cost ~1.3s set-based at
+            // commit (probe join + int index) and ~3s per-shard.
+            statement.execute("CREATE INDEX idx_s_methods_descriptor ON methods(descriptor)")
             // Corrupt shards can carry a method whose class is absent, hence
             // an unresolved (formerly NULL-symbol) owner. The index keeps the tiny compatibility
             // branch for its original name-prefix semantics O(orphan count).
@@ -1407,6 +1549,20 @@ class SessionBuilder {
                     "string_constants(method_id, class_id) WHERE method_id IS NOT NULL",
             )
             statement.execute("CREATE INDEX idx_s_spi_impl ON spi_registrations(impl_fqn)")
+            // Domain uniqueness guards. Created before the commit-time domain
+            // fill: the fill's DISTINCT emits values in index order, so these
+            // build by pure appends; the delta path needs them as the
+            // INSERT OR IGNORE conflict target.
+            statement.execute(
+                "CREATE UNIQUE INDEX idx_s_method_names_name ON method_names(name)",
+            )
+            statement.execute(
+                "CREATE UNIQUE INDEX idx_s_method_descriptors_descriptor " +
+                    "ON method_descriptors(descriptor)",
+            )
+            statement.execute(
+                "CREATE UNIQUE INDEX idx_s_string_values_value ON string_values(value)",
+            )
         }
     }
 }

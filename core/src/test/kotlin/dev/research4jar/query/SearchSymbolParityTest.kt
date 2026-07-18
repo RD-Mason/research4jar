@@ -248,14 +248,12 @@ class SearchSymbolParityTest {
             repeat(2) { exec(insertString, 1, null, "the Widget constant dup", "shard-0") }
 
             // Rows were inserted directly (not through the shard merge), so
-            // re-run the external-content rebuilds the merge commit performs.
+            // re-run the classes_fts rebuild and the search-domain fill the
+            // merge commit performs.
             connection.createStatement().use { statement ->
                 statement.execute("INSERT INTO classes_fts(classes_fts) VALUES('rebuild')")
-                statement.execute("INSERT INTO methods_fts(methods_fts) VALUES('rebuild')")
-                statement.execute(
-                    "INSERT INTO string_constants_fts(string_constants_fts) VALUES('rebuild')",
-                )
             }
+            SessionBuilder().syncSearchDomains(connection, methodIdOffset = 0, stringIdOffset = 0)
             connection.commit()
         }
         return session
@@ -741,7 +739,9 @@ class SearchSymbolParityTest {
         DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
             connection.createStatement().use {
                 it.execute("DROP TABLE classes_fts")
-                it.execute("DROP TABLE methods_fts")
+                it.execute("DROP TABLE method_names_fts")
+                it.execute("DROP TABLE method_descriptors_fts")
+                it.execute("DROP TABLE string_values_fts")
             }
         }
         val (comparisons, _) = assertSearchSymbolParity(session)
@@ -752,10 +752,18 @@ class SearchSymbolParityTest {
 
     @Test
     fun `sessions with the old symbol methods fts schema fall back to legacy`() {
+        // Simulates a pre-v9 session: the per-row methods_fts exists but the
+        // packed domain structures do not — the new queries must retry their
+        // legacy SQL atomically instead of failing or reading the old shadow.
         val session = buildSession()
         DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
             connection.createStatement().use { statement ->
-                statement.execute("DROP TABLE methods_fts")
+                statement.execute("DROP TABLE method_names_fts")
+                statement.execute("DROP TABLE method_descriptors_fts")
+                statement.execute("DROP TABLE method_name_packs")
+                statement.execute("DROP TABLE method_descriptor_packs")
+                statement.execute("DROP TABLE method_names")
+                statement.execute("DROP TABLE method_descriptors")
                 statement.execute(
                     """
                     CREATE VIRTUAL TABLE methods_fts USING fts5(
