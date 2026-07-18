@@ -46,7 +46,7 @@ class McpServerTest {
             "get_class", "get_bean_definitions", "explain_conditional", "find_string",
             "list_extension_points", "find_class", "find_method", "list_packages",
             "search_symbols", "open_symbol", "dependency_precise", "class_origin",
-            "find_artifact", "why_dependency",
+            "find_artifact", "why_dependency", "get_source", "search_source",
         )
         for (name in queryTools) {
             val schema = assertNotNull(tools[name], name)["inputSchema"]
@@ -54,6 +54,16 @@ class McpServerTest {
             val properties = schema["properties"]
             assertTrue(properties.has("home"), "$name must expose the implemented home override")
         }
+
+        // Source retrieval stays local-first: network download is a distinct
+        // opt-in flag, and search_source must bind to exactly one jar.
+        val getSourceProperties = assertNotNull(tools["get_source"])["inputSchema"]["properties"]
+        assertTrue(getSourceProperties.has("fetch"))
+        assertTrue(!getSourceProperties.has("page"), "get_source output is a single class, not a page")
+        val searchSourceSchema = assertNotNull(tools["search_source"])["inputSchema"]
+        assertTrue(searchSourceSchema["properties"].has("in"))
+        assertTrue(searchSourceSchema["properties"].has("fetch"))
+        assertTrue(searchSourceSchema["required"].map { it.asText() }.containsAll(listOf("text", "in")))
 
         val paging = assertNotNull(tools["search_symbols"])["inputSchema"]["properties"]
         assertEquals(1, paging["page"]["minimum"].asInt())

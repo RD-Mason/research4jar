@@ -52,6 +52,13 @@ dependencies {
     // Ed25519 for registry shard signatures; JDK EdDSA needs Java 15+ and the
     // runtime keeps a Java 8 baseline.
     implementation("net.i2p.crypto:eddsa:0.3.0")
+    // Source retrieval (get-source/search-source): CFR decompiles dependency
+    // classes when no sources jar exists locally; JavaParser slices single
+    // method bodies out of retrieved sources. Both are Java 8 compatible
+    // (verifyJava8Runtime enforces it) and both load lazily inside the source
+    // commands only — never on the query hot path.
+    implementation("org.benf:cfr:0.152")
+    implementation("com.github.javaparser:javaparser-core:3.25.10")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.12.2")

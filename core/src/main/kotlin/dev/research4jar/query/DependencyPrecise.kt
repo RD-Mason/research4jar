@@ -387,7 +387,9 @@ private fun artifactOrigins(sources: List<CachedManifestRow>, term: String): Lis
     return dedupeOrigins(origins)
 }
 
-private fun sourceMatchesArtifact(source: CachedManifestRow, term: String): Boolean {
+// Shared with search-source's --in resolution; the matching rules must stay
+// identical to the artifact command so agents can reuse the same spellings.
+internal fun sourceMatchesArtifact(source: CachedManifestRow, term: String): Boolean {
     if (source.coordinate.isNotEmpty() &&
         (
             artifactMatchesArg(source.coordinate, term) ||

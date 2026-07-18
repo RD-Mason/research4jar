@@ -1,0 +1,345 @@
+package dev.research4jar.query
+
+import dev.research4jar.indexer.Hashing
+import dev.research4jar.indexer.extract.ExtractedClass
+import dev.research4jar.indexer.extract.ExtractedJar
+import dev.research4jar.indexer.store.CachedDigest
+import dev.research4jar.indexer.store.Manifest
+import dev.research4jar.indexer.store.SessionBuilder
+import dev.research4jar.indexer.store.SessionShard
+import dev.research4jar.indexer.store.ShardWriter
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.jar.JarEntry
+import java.util.jar.JarOutputStream
+import javax.tools.ToolProvider
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+
+/**
+ * End-to-end acquisition-ladder coverage on real artifacts built at test
+ * time: javac-compiled classes packed into jars, a matching sources jar next
+ * to one of them, and no sources at all for the other — so both the
+ * sources-jar branch and the CFR decompile branch run against genuine files.
+ */
+class SourceRetrievalTest {
+    private lateinit var root: Path
+    private lateinit var repo: Path
+    private lateinit var manifestPath: Path
+    private lateinit var pointer: ProjectPointerData
+    private lateinit var withSourcesJar: Path
+    private lateinit var decompileOnlyJar: Path
+
+    private val utilSource = """
+        package com.example.fixture;
+
+        /** Fixture class shipped in the sources jar. */
+        public class Util {
+            public static final String MARKER = "sources-jar-marker";
+
+            /** No-arg overload. */
+            public int compute() {
+                return 41;
+            }
+
+            public int compute(int seed) {
+                return seed + MARKER.length();
+            }
+
+            public static class Inner {
+                public String innerCall(String input) {
+                    return "inner:" + input;
+                }
+            }
+        }
+    """.trimIndent()
+
+    private val decompSource = """
+        package com.example.decomp;
+
+        public class Decomp {
+            public String greet(String name) {
+                return "hello " + name;
+            }
+
+            public String greet(String name, int times) {
+                StringBuilder builder = new StringBuilder();
+                for (int i = 0; i < times; i++) {
+                    builder.append(name);
+                }
+                return builder.toString();
+            }
+
+            public static class Nested {
+                public int nestedValue() {
+                    return 7;
+                }
+            }
+        }
+    """.trimIndent()
+
+    @BeforeTest
+    fun buildFixture() {
+        root = Files.createTempDirectory("research4jar-source-retrieval")
+        repo = Files.createDirectories(root.resolve("repo"))
+        manifestPath = root.resolve("manifest.db")
+
+        withSourcesJar = compileToJar(
+            "fixture-1.0.jar",
+            mapOf("com/example/fixture/Util.java" to utilSource),
+        )
+        writeSourcesJar(
+            repo.resolve("fixture-1.0-sources.jar"),
+            mapOf("com/example/fixture/Util.java" to utilSource),
+        )
+        decompileOnlyJar = compileToJar(
+            "decomp-1.0.jar",
+            mapOf("com/example/decomp/Decomp.java" to decompSource),
+        )
+
+        val manifest = Manifest(manifestPath)
+        val session = root.resolve("session.db")
+        val shards = listOf(
+            registerShard(manifest, withSourcesJar, "com.example:fixture:1.0", listOf(
+                "com.example.fixture.Util", "com.example.fixture.Util\$Inner",
+            )),
+            registerShard(manifest, decompileOnlyJar, "com.example:decomp:1.0", listOf(
+                "com.example.decomp.Decomp", "com.example.decomp.Decomp\$Nested",
+            )),
+        )
+        SessionBuilder().build(session, shards)
+        pointer = ProjectPointerData(
+            schemaVersion = 2,
+            extractorVersion = 2,
+            classpathFingerprint = "test",
+            sessionDbPath = session.toString(),
+        )
+    }
+
+    private fun registerShard(
+        manifest: Manifest,
+        jar: Path,
+        coordinate: String,
+        fqns: List<String>,
+    ): SessionShard {
+        val sha = Hashing.sha256(jar)
+        val shardId = "$sha@2"
+        val shardPath = root.resolve("${coordinate.split(":")[1]}.shard.db")
+        ShardWriter().write(
+            shardPath,
+            shardId,
+            ExtractedJar(
+                coordinate = coordinate,
+                classes = fqns.map { fqn ->
+                    ExtractedClass(
+                        fqn = fqn,
+                        kind = "class",
+                        superFqn = null,
+                        modifiers = 1,
+                        isAbstract = false,
+                        sourceFile = null,
+                        interfaces = emptyList(),
+                    )
+                },
+            ),
+        )
+        manifest.register(
+            shardId = shardId,
+            coordinate = coordinate,
+            jarFilename = jar.fileName.toString(),
+            jarSha256 = sha,
+            shardPath = shardPath,
+            shardChecksum = "checksum-$shardId",
+            sizeBytes = Files.size(shardPath),
+        )
+        manifest.putJarDigests(
+            mapOf(
+                jar.toAbsolutePath().toString() to CachedDigest(
+                    sizeBytes = Files.size(jar),
+                    mtimeMillis = Files.getLastModifiedTime(jar).toMillis(),
+                    sha256 = sha,
+                ),
+            ),
+        )
+        return SessionShard(shardId, shardPath)
+    }
+
+    private fun compileToJar(jarName: String, sources: Map<String, String>): Path {
+        val sourceDir = Files.createDirectories(root.resolve("$jarName-src"))
+        val classesDir = Files.createDirectories(root.resolve("$jarName-classes"))
+        val files = sources.map { (path, text) ->
+            val file = sourceDir.resolve(path)
+            Files.createDirectories(file.parent)
+            Files.write(file, text.toByteArray(Charsets.UTF_8))
+            file.toString()
+        }
+        val compiler = checkNotNull(ToolProvider.getSystemJavaCompiler()) { "javac unavailable" }
+        val exit = compiler.run(null, null, null, "-d", classesDir.toString(), *files.toTypedArray())
+        assertEquals(0, exit, "javac failed")
+        val jar = repo.resolve(jarName)
+        JarOutputStream(Files.newOutputStream(jar)).use { output ->
+            Files.walk(classesDir).use { paths ->
+                paths.filter { Files.isRegularFile(it) }.sorted().forEach { file ->
+                    output.putNextEntry(JarEntry(classesDir.relativize(file).toString()))
+                    output.write(Files.readAllBytes(file))
+                    output.closeEntry()
+                }
+            }
+        }
+        return jar
+    }
+
+    private fun writeSourcesJar(target: Path, entries: Map<String, String>) {
+        JarOutputStream(Files.newOutputStream(target)).use { output ->
+            for ((name, text) in entries) {
+                output.putNextEntry(JarEntry(name))
+                output.write(text.toByteArray(Charsets.UTF_8))
+                output.closeEntry()
+            }
+        }
+    }
+
+    private fun getSource(arg: String) =
+        getSource(pointer, manifestPath.toString(), root.toString(), "", arg, fetch = false)
+
+    private fun searchSource(text: String, target: String, page: Int = 1, pageSize: Int = 20) =
+        searchSource(
+            pointer, manifestPath.toString(), root.toString(), "",
+            text, target, false, page, pageSize,
+        )
+
+    @Test
+    fun `sources jar hit returns the original source with provenance`() {
+        val response = getSource("com.example.fixture.Util")
+        assertEquals("sources-jar", response.sourceKind)
+        assertEquals("com.example.fixture.Util", response.fqn)
+        assertEquals("com.example:fixture:1.0", response.coordinate)
+        assertEquals("com/example/fixture/Util.java", response.sourceEntry)
+        assertTrue(response.sourcePath.endsWith("fixture-1.0-sources.jar"))
+        assertTrue(response.source.contains("sources-jar-marker"))
+        assertEquals("java", response.language)
+    }
+
+    @Test
+    fun `inner classes map to the outer source file in both spellings`() {
+        for (spelling in listOf("com.example.fixture.Util\$Inner", "com.example.fixture.Util.Inner")) {
+            val response = getSource(spelling)
+            assertEquals("com.example.fixture.Util\$Inner", response.fqn, spelling)
+            assertEquals("com/example/fixture/Util.java", response.sourceEntry, spelling)
+            assertTrue(response.source.contains("innerCall"), spelling)
+        }
+        val sliced = getSource("com.example.fixture.Util\$Inner#innerCall")
+        assertEquals(1, sliced.slices.size)
+        assertTrue(sliced.slices.single().source.contains("\"inner:\""))
+    }
+
+    @Test
+    fun `method slicing from the sources jar returns every overload`() {
+        val response = getSource("com.example.fixture.Util#compute")
+        assertEquals("sources-jar", response.sourceKind)
+        assertEquals("", response.source)
+        assertEquals(2, response.slices.size)
+        assertTrue(response.slices[0].source.contains("return 41"))
+        assertTrue(response.slices[1].source.contains("MARKER.length()"))
+        assertTrue(response.slices.all { it.startLine in 1..it.endLine })
+    }
+
+    @Test
+    fun `sources jar miss decompiles with cfr and caches by content hash`() {
+        val response = getSource("com.example.decomp.Decomp")
+        assertEquals("decompiled", response.sourceKind)
+        assertTrue(response.source.contains("greet"), response.source.take(400))
+        assertTrue(response.classJarPath.endsWith("decomp-1.0.jar"))
+
+        val cached = root.resolve("sources").resolve("decompiled")
+            .resolve(Hashing.sha256(decompileOnlyJar)).resolve("com.example.decomp.Decomp.java")
+        assertTrue(Files.isRegularFile(cached), "expected decompile cache at $cached")
+        assertEquals(cached.toString(), response.sourcePath)
+
+        // A cache hit must not need the class jar (or CFR) at all.
+        val hidden = decompileOnlyJar.resolveSibling("decomp-1.0.jar.hidden")
+        Files.move(decompileOnlyJar, hidden)
+        try {
+            val warm = getSource("com.example.decomp.Decomp#greet")
+            assertEquals("decompiled", warm.sourceKind)
+            assertEquals(2, warm.slices.size)
+            assertTrue(warm.slices.any { it.source.contains("StringBuilder") })
+        } finally {
+            Files.move(hidden, decompileOnlyJar)
+        }
+    }
+
+    @Test
+    fun `decompiled inner classes slice through the outer class file`() {
+        val response = getSource("com.example.decomp.Decomp\$Nested#nestedValue")
+        assertEquals("decompiled", response.sourceKind)
+        assertEquals(1, response.slices.size)
+        assertTrue(response.slices.single().source.contains("7"))
+    }
+
+    @Test
+    fun `unknown method falls back to the whole file with a note`() {
+        val response = getSource("com.example.fixture.Util#doesNotExist")
+        assertEquals(0, response.slices.size)
+        assertTrue(response.source.contains("sources-jar-marker"))
+        assertTrue(response.note.contains("doesNotExist"), response.note)
+    }
+
+    @Test
+    fun `unindexed class fails with a pointer to find-class`() {
+        val failure = assertFailsWith<IllegalArgumentException> {
+            getSource("com.example.missing.Nope")
+        }
+        assertTrue(failure.message!!.contains("find-class"), failure.message)
+    }
+
+    @Test
+    fun `search-source scans the sources jar with pagination`() {
+        val all = searchSource("compute", "com.example:fixture:1.0")
+        assertEquals("sources-jar", all.sourceKind)
+        assertTrue(all.total >= 2, "expected multiple hits, got ${all.total}")
+        assertTrue(all.results.all { it.file == "com/example/fixture/Util.java" })
+        assertTrue(all.results.all { it.line >= 1 })
+        assertTrue(!all.hasMore)
+
+        val paged = searchSource("compute", "fixture-1.0.jar", page = 1, pageSize = 1)
+        assertEquals(1, paged.total)
+        assertTrue(paged.hasMore)
+        val second = searchSource("compute", "fixture", page = 2, pageSize = 1)
+        assertEquals(1, second.total)
+        assertTrue(second.results.single().line != paged.results.single().line)
+    }
+
+    @Test
+    fun `search-source over a decompile-only jar decompiles the jar once`() {
+        val response = searchSource("greet", "com.example.decomp.Decomp")
+        assertEquals("decompiled", response.sourceKind)
+        assertTrue(response.total >= 1)
+        assertTrue(response.results.all { it.file.endsWith(".java") })
+
+        val marker = root.resolve("sources").resolve("decompiled")
+            .resolve(Hashing.sha256(decompileOnlyJar)).resolve(".complete")
+        assertTrue(Files.isRegularFile(marker), "whole-jar decompile must leave $marker")
+
+        // The cached tree also serves get-source without re-decompilation.
+        val cachedClass = getSource("com.example.decomp.Decomp")
+        assertEquals("decompiled", cachedClass.sourceKind)
+    }
+
+    @Test
+    fun `search-source rejects ambiguous and unknown targets`() {
+        // "1.0" substring-matches both fixture jars' filename stems.
+        val ambiguous = assertFailsWith<IllegalArgumentException> {
+            searchSource("x", "1.0")
+        }
+        assertTrue(ambiguous.message!!.contains("matches 2 jars"), ambiguous.message)
+
+        val unknown = assertFailsWith<IllegalArgumentException> {
+            searchSource("x", "no.such:artifact:9")
+        }
+        assertTrue(unknown.message!!.contains("no indexed jar"), unknown.message)
+    }
+}

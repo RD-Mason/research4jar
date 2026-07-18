@@ -128,5 +128,19 @@ class CliHelpTest {
         assertTrue("unknown option: --direct" in reject("open-symbol", "example.Widget", "--direct"))
         assertTrue("unknown option: --no-source-grep" in reject("dep", "why", "g:a", "--no-source-grep"))
         assertTrue("unknown option: --dry-run" in reject("cache", "stats", "--dry-run"))
+        assertTrue("unknown option: --in" in reject("get-source", "example.Widget", "--in", "widget.jar"))
+        assertTrue("unknown option: --fetch" in reject("find-class", "Widget", "--fetch"))
+    }
+
+    @Test
+    fun `search-source requires a jar selector before touching the project`() {
+        val stdout = ByteArrayOutputStream()
+        val code = runCli(
+            arrayOf("search-source", "ObjectMapper"),
+            PrintStream(stdout),
+            PrintStream(ByteArrayOutputStream()),
+        )
+        assertEquals(2, code)
+        assertTrue("requires --in" in stdout.toString(Charsets.UTF_8))
     }
 }

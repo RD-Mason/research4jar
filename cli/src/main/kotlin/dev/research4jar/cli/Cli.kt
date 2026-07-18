@@ -42,12 +42,14 @@ internal val QUERY_COMMANDS = setOf(
     "search-symbol",
     "open-symbol",
     "why-dependency",
+    "get-source",
+    "search-source",
 )
 
 internal val PAGINATED_QUERY_COMMANDS = setOf(
     "find-config-properties", "find-implementations", "find-by-annotation",
     "get-bean-definitions", "find-string", "list-extension-points", "find-class",
-    "find-method", "list-packages", "search-symbol",
+    "find-method", "list-packages", "search-symbol", "search-source",
 )
 
 private val BASE_QUERY_OPTIONS = setOf("--project-dir", "--format", "--home")
@@ -58,13 +60,15 @@ private val PAGING_OPTIONS = setOf("--page", "--page-size")
 // every class initialized here.
 private val PARSED_OPTIONS = setOf(
     "--project-dir", "--format", "--home", "--page", "--page-size",
-    "--source-grep", "--no-source-grep", "--direct",
+    "--source-grep", "--no-source-grep", "--direct", "--fetch", "--in",
 )
 
 internal fun optionsForQuery(command: String): Set<String> = buildSet {
     addAll(BASE_QUERY_OPTIONS)
     if (command in PAGINATED_QUERY_COMMANDS) addAll(PAGING_OPTIONS)
     if (command == "find-implementations" || command == "find-by-annotation") add("--direct")
+    if (command == "get-source" || command == "search-source") add("--fetch")
+    if (command == "search-source") add("--in")
 }
 
 internal fun preciseLookupOptions(): Set<String> = setOf(
@@ -86,6 +90,8 @@ internal data class CommandOptions(
     val home: String = "",
     val direct: Boolean = false,
     val sourceGrep: Boolean = true,
+    val fetch: Boolean = false,
+    val inTarget: String = "",
 )
 
 /**
@@ -285,6 +291,8 @@ internal fun parseOptions(
     var home = ""
     var direct = false
     var sourceGrep = true
+    var fetch = false
+    var inTarget = ""
     var index = 0
     while (index < args.size) {
         val argument = args[index]
@@ -328,6 +336,12 @@ internal fun parseOptions(
             "--direct" -> direct = true
             "--source-grep" -> sourceGrep = true
             "--no-source-grep" -> sourceGrep = false
+            "--fetch" -> fetch = true
+            "--in" -> {
+                val (value, next) = optionValue(args, index, argument)
+                inTarget = value
+                index = next
+            }
             else -> {
                 if (argument.isNotEmpty() && argument[0] == '-') {
                     fail("invalid_arguments", "unknown option: $argument", 2)
@@ -363,6 +377,8 @@ internal fun parseOptions(
         home = home,
         direct = direct,
         sourceGrep = sourceGrep,
+        fetch = fetch,
+        inTarget = inTarget,
     )
 }
 

@@ -15,6 +15,8 @@ import dev.research4jar.query.MethodSearchResponse
 import dev.research4jar.query.PackageListResponse
 import dev.research4jar.query.ProjectStatusResponse
 import dev.research4jar.query.SearchSymbolResponse
+import dev.research4jar.query.SourceResponse
+import dev.research4jar.query.SourceSearchResponse
 import dev.research4jar.query.StringSearchResponse
 import dev.research4jar.query.SymbolResponse
 import dev.research4jar.registry.GoJson
@@ -175,6 +177,8 @@ internal fun printText(response: Any, out: PrintStream) {
         is DependencyWhyResponse -> printWhyDependencyText(response, out)
         is DependencyPreciseResponse -> printDependencyPreciseText(response, out)
         is ProjectStatusResponse -> printProjectStatusText(response, out)
+        is SourceResponse -> printSourceText(response, out)
+        is SourceSearchResponse -> printSourceSearchText(response, out)
         else ->
             // Nested detail responses (get-class, explain-conditional) read best
             // as structured JSON even in text mode. Go leaves the encoder's
@@ -305,6 +309,40 @@ private fun printDependencyPreciseText(response: DependencyPreciseResponse, out:
             "${response.coverage.jarsIndexed}/${response.coverage.jarsTotal} jars, " +
             "${response.coverage.jarsMissing.size} missing\n",
     )
+}
+
+// Text mode prints the raw source under a compact provenance header — the
+// token-efficient shape for agents that asked for text.
+private fun printSourceText(response: SourceResponse, out: PrintStream) {
+    val symbol = if (response.method.isEmpty()) response.fqn else "${response.fqn}#${response.method}"
+    out.print("// $symbol (${response.sourceKind}: ${response.sourcePath})\n")
+    if (response.note.isNotEmpty()) {
+        out.print("// note: ${response.note}\n")
+    }
+    if (response.slices.isEmpty()) {
+        out.print(response.source)
+        if (!response.source.endsWith("\n")) out.print("\n")
+        return
+    }
+    for (slice in response.slices) {
+        out.print("// lines ${slice.startLine}-${slice.endLine}: ${slice.signature}\n")
+        out.print(slice.source)
+        out.print("\n")
+    }
+}
+
+private fun printSourceSearchText(response: SourceSearchResponse, out: PrintStream) {
+    out.print(
+        "in: ${valueOrText(response.coordinate, response.jarFilename)} " +
+            "(${response.sourceKind}: ${response.sourcePath})\n\n",
+    )
+    val writer = GoTabWriter(out)
+    writer.row("LOCATION", "TEXT")
+    for (hit in response.results) {
+        writer.row("${hit.file}:${hit.line}", hit.text)
+    }
+    writer.flush()
+    printSearchSummary(response.page, response.pageSize, response.total, response.hasMore, response.coverage, out)
 }
 
 private fun printProjectStatusText(response: ProjectStatusResponse, out: PrintStream) {
