@@ -38,4 +38,28 @@ class ProjectPointerTest {
             )
         }
     }
+
+
+    @Test
+    fun `legacy guidance section upgrades in place, edited sections stay untouched`() {
+        val project = Files.createTempDirectory("research4jar-guidance-upgrade")
+        // Simulate a project guided by the previous release: heading present,
+        // body without the source-retrieval commands.
+        val legacy = ProjectPointer.legacySnippetsForTest().first()
+        val trailing = "\n\n## User notes\n\nkeep me\n"
+        Files.writeString(project.resolve("CLAUDE.md"), "# Mine\n\n" + legacy + trailing)
+        // An edited variant must never be rewritten.
+        Files.writeString(project.resolve("AGENTS.md"), "# Mine\n\n" + legacy.replace("research4jar dep why", "research4jar dep why  # my note") + trailing)
+
+        ProjectPointer.ensureClaudeInstructions(project)
+
+        val upgraded = Files.readString(project.resolve("CLAUDE.md"))
+        assertTrue(upgraded.contains("get-source"), "legacy section must gain the new commands")
+        assertTrue(upgraded.contains("## User notes\n\nkeep me"), "content after the section survives")
+        assertEquals(1, "## Research4Jar（Java 依赖事实查询）".toRegex().findAll(upgraded).count())
+        val edited = Files.readString(project.resolve("AGENTS.md"))
+        assertTrue(!edited.contains("get-source"), "user-edited section is never rewritten")
+        // GEMINI.md did not exist: plain append applies.
+        assertTrue(Files.readString(project.resolve("GEMINI.md")).contains("get-source"))
+    }
 }

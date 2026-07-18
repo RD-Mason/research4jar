@@ -75,6 +75,55 @@ object ProjectPointer {
         如果用户问的内容不在结果里，结合 `coverage` 判断是「确实不存在」还是「所在 jar 未被索引」，并如实说明。
     """.trimIndent()
 
+    /**
+     * Prior published snippet bodies, verbatim. appendGuidance upgrades an
+     * existing guidance section ONLY when it matches one of these exactly —
+     * a section the user edited is theirs and is never rewritten.
+     */
+    private val legacySnippets = listOf(
+        """
+        $HEADING
+
+        本项目已用 Research4Jar 索引了 Maven/Java 依赖 jar 里的类、方法、注解、字符串、
+        SPI、Spring 配置项与字节码事实。
+
+        依赖、JAR、外部类、import 来源问题优先使用 `.research4jar/project.json` 指向的索引与
+        Research4Jar CLI/MCP 工具。不要只读 `.research4jar` 里的 JSON/SQLite 文件；先调用工具拿结构化答案。
+        当用户询问依赖 jar 里的 Java/Spring 行为、某个类/方法/import 来自哪里、某个 Maven 依赖为什么存在、
+        或配置项、接口实现、注解使用、@Bean 定义、条件装配、SPI 扩展点时，先检索再展开：
+
+        ```bash
+        research4jar dep precise <import|类|坐标|jar>       # 直接回答 import/class 来自哪个 jar，并联动源码消费位置
+        research4jar artifact <坐标|artifactId|jar>         # 显式查 artifact/jar 及其依赖路径
+        research4jar class <类名或 FQN>                     # 类来源 jar/依赖路径/源码消费位置
+        research4jar method <方法名或 Class#method>         # 显式查方法（find-method 的短入口）
+        research4jar search-symbol <关键词>                # 首选宽检索：类/方法/注解/SPI/配置项/字符串
+        research4jar open-symbol <类 FQN 或 Class#method>  # 展开 search-symbol 返回的符号
+        research4jar dep why <坐标|jar|类 FQN>              # 解释 Maven 依赖来源与传递链路
+        research4jar find-class <类名或包前缀>             # 通用 Java 类查询
+        research4jar find-method <方法名或 Class#method>   # 通用 Java 方法查询
+        research4jar list-packages [包前缀]                # 按 jar/package 查看包结构
+        research4jar find-config-properties <配置项前缀>   # 配置项：类型/默认值/来源 jar
+        research4jar find-implementations <接口或类 FQN>   # 实现类（默认含传递闭包）
+        research4jar find-by-annotation <注解 FQN>         # 标注类（默认展开元注解）
+        research4jar get-class <类 FQN>                    # 单个类的全部已索引事实
+        research4jar get-bean-definitions <类型或配置类 FQN>
+        research4jar explain-conditional <配置类 FQN>      # 类与 @Bean 方法的条件装配
+        research4jar find-string <子串>                    # 字节码字符串常量检索
+        research4jar list-extension-points [key]           # SPI 注册总览/明细
+        ```
+
+        输出包含匹配结果、来源 jar，以及 `coverage` 字段（已索引多少个 jar、哪些 jar 未索引）。
+        `dep precise` 会同时用依赖索引确认「有没有这个依赖/来自哪个 jar」，并用源码搜索确认「项目哪里消费」。
+        `dep why` 依赖 Maven 项目索引时生成的 `.research4jar/dependencies.json`。
+        加 `--direct` 可关闭传递闭包/元注解展开；注解查询不合并 @AliasFor 属性别名。
+        依赖变更后运行 `research4jar index` 增量更新索引。
+        如果用户问的内容不在结果里，结合 `coverage` 判断是「确实不存在」还是「所在 jar 未被索引」，并如实说明。
+    """.trimIndent(),
+    )
+
+    internal fun legacySnippetsForTest(): List<String> = legacySnippets
+
     fun write(projectDir: Path, projectIndex: ProjectIndex, objectMapper: ObjectMapper) {
         val research4JarDir = projectDir.resolve(".research4jar")
         Files.createDirectories(research4JarDir)
@@ -111,7 +160,10 @@ object ProjectPointer {
         } else {
             ""
         }
-        if (existing.contains(HEADING)) return
+        if (existing.contains(HEADING)) {
+            upgradeLegacyGuidance(file, existing)
+            return
+        }
 
         val separator = when {
             existing.isEmpty() || existing.endsWith("\n\n") -> ""
@@ -121,6 +173,28 @@ object ProjectPointer {
         Files.write(
             file,
             (existing + separator + snippet + "\n").toByteArray(StandardCharsets.UTF_8),
+        )
+    }
+
+    /**
+     * Replaces this tool's guidance section in place when it is byte-equal
+     * (modulo trailing whitespace) to a prior published version. The section
+     * spans from our heading to the next second-level heading or EOF.
+     */
+    private fun upgradeLegacyGuidance(file: Path, existing: String) {
+        val start = existing.indexOf(HEADING)
+        if (start < 0) return
+        val afterHeading = start + HEADING.length
+        val nextHeading = existing.indexOf("\n## ", afterHeading)
+        val end = if (nextHeading >= 0) nextHeading + 1 else existing.length
+        val section = existing.substring(start, end)
+        if (section.trimEnd() == snippet.trimEnd()) return
+        if (legacySnippets.none { it.trimEnd() == section.trimEnd() }) return
+        val replacement = snippet + if (nextHeading >= 0) "\n" else "\n"
+        Files.write(
+            file,
+            (existing.substring(0, start) + replacement + existing.substring(end))
+                .toByteArray(StandardCharsets.UTF_8),
         )
     }
 }
