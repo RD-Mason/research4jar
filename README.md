@@ -82,12 +82,13 @@ One Kotlin/JVM codebase behind one CLI, four layers:
 3. **Session** — the shards matching a project's classpath merge into one session database. Symbol references stay unresolved until query time, so relationships cross jar boundaries.
 4. **Query** — the CLI opens the session read-only (C SQLite via sqlite-jdbc) and returns JSON with provenance. Substring search runs on deduplicated trigram FTS indexes on large sessions and falls back to plain scans on small ones — whichever is faster, results byte-identical either way.
 
-### Measured performance (v0.2.0, Apple Silicon)
+### Measured performance (v0.3.0, Apple Silicon)
 
 | | 222 jars / 184 MB | 1,000 jars / 869 MB |
 | --- | --- | --- |
 | First index (cold, full extraction) | ~7.5 s | ~30 s |
 | Re-index, nothing changed | ~0.3 s | ~0.4 s |
+| Dependency source read, warm (`get-source Class#method`) | ~0.18 s | ~0.18 s (per-class, size-independent) |
 | Re-index after swapping a few jars (delta) | ~1 s | ~2 s |
 | Session size on disk | 277 MB | 1.5 GB |
 | Warm query via daemon | 100–130 ms | 100–130 ms |
