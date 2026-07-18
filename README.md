@@ -16,7 +16,7 @@ Research4Jar is a single Kotlin/JVM codebase behind one CLI, following a four-la
 1. **Jar facts**: the indexer reads metadata and bytecode with ASM without loading classes or executing jar code.
 2. **Immutable shards**: each jar becomes one content-addressed SQLite shard identified by `<jar_sha256>@<extractor_version>`.
 3. **Project session**: shards selected by a project's classpath are merged into a compact session database. Symbol references remain unresolved until query time, so relationships can cross jar boundaries.
-4. **Query and host integration**: the same CLI opens the session read-only (C SQLite via sqlite-jdbc) and returns JSON with provenance and coverage. A project pointer and agent guidance files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) let coding agents call it directly; a background daemon keeps warm CLI queries at ~130 ms.
+4. **Query and host integration**: the same CLI opens the session read-only (C SQLite via sqlite-jdbc) and returns JSON with provenance and coverage. A project pointer and agent guidance files (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) let coding agents call it directly; a background daemon keeps typical warm CLI queries around 100–130 ms.
 
 ## Requirements
 
@@ -71,13 +71,18 @@ exec java -jar /path/to/research4jar-cli.jar "$@"' > ~/.local/bin/research4jar &
 ### CLI daemon
 
 One-shot JVM startup is real: a cold query pays ~0.5 s. The first query command
-therefore starts a background daemon (TCP loopback, token-authenticated,
-30-minute idle exit) and subsequent queries round-trip in ~130 ms with
+therefore starts a background daemon (TCP loopback, nonce/HMAC mutually authenticated,
+30-minute idle exit) and typical subsequent queries round-trip in roughly 100–130 ms with
 byte-identical output. The installed launcher additionally enables Class Data
-Sharing on JDK 19+ (probed once, cached, plain-java fallback everywhere else). `RESEARCH4JAR_NO_DAEMON=1` opts out; any
-`RESEARCH4JAR_*` environment override also bypasses the daemon so custom homes
-and registries always see exact semantics. Long-lived hosts (MCP) never need
-it — the server process itself stays warm.
+Sharing on JDK 19+ (probed once, cached, plain-java fallback everywhere else).
+`RESEARCH4JAR_NO_DAEMON=1` opts out. Custom `RESEARCH4JAR_HOME` values remain
+warm and isolated: each home discovers its own authenticated daemon. Long-lived
+hosts (MCP) never need it — the server process itself stays warm. The
+`status --check-classpath` mode deliberately stays cold because its build-tool
+probe must observe the current shell's `PATH`, `JAVA_HOME`, and build-tool environment.
+Large legal pages (`--page-size` above 100) also run through the cold path so the
+shared 256 MiB daemon cannot retain an oversized result; output and exit semantics
+remain the same.
 
 ## Quick Start
 
@@ -118,13 +123,13 @@ If you are not sure which command to use, start with the task:
 | Search broadly when you only have a word or symbol fragment | `research4jar search-symbol '<text>'`, then `research4jar open-symbol '<fqn|Class#method>'` |
 | Inspect Spring Boot behavior | `find-config-properties`, `get-bean-definitions`, `explain-conditional`, `find-implementations`, or `find-by-annotation` |
 
-`research4jar index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache, unchanged classpaths reuse the session database, and small classpath changes update the previous session in place (seconds even on thousand-jar classpaths).
+`research4jar index` prefers the project's `mvnw`/`gradlew` wrapper and falls back to `mvn`/`gradle` on PATH; pass `--jars <dir|glob|list>` to index explicit jars instead. Re-runs are incremental — unchanged jars hit the content-addressed cache, unchanged classpaths reuse the session database, and small classpath changes derive a new content-addressed session by copy-on-write cloning the previous session and applying only the shard delta (seconds even on thousand-jar classpaths).
 
 `find-implementations` is transitive by default (subinterface and superclass chains across jars); `find-by-annotation` expands meta-annotations by default (querying `@Component` finds `@Service` classes). Pass `--direct` for declared-only matching.
 
 `dep precise` is the direct "symbol to dependency" entrypoint: pass an import line, class FQN/simple name, `Class#method`, Maven coordinate, artifact id, or jar filename. It returns the owning jar/coordinate, the Maven dependency path when `.research4jar/dependencies.json` is available, and bounded `source_usages` from source/build-file search so agents can confirm both "the dependency exists" and "where the project consumes it". `class <NAME|FQN>` is the class-only version of that origin lookup; use `find-class` when you want fuzzy class search instead.
 
-Query commands support `--format json|text` and `--project-dir`; search/list commands also support `--page` and `--page-size`. Use `--home` or `RESEARCH4JAR_HOME` to override the global data directory. Use `--no-source-grep` on `dep precise`/`artifact` to skip the bounded source/build-file usage search.
+Query commands support `--format json|text` and `--project-dir`; search/list commands also support `--page` and `--page-size` (maximum 1000 rows per page and a 100000-result window). Use `--home` or `RESEARCH4JAR_HOME` to override the global data directory. Use `--no-source-grep` on `dep precise`/`artifact`/`class` to skip the bounded source/build-file usage search.
 For high-fanout retrieval commands (`find-class`, `find-method`, `list-packages`, and `search-symbol`), JSON responses include `has_more`; use it to continue paging instead of relying on an exact pre-count.
 
 ## Use from Cursor, Claude Code, or any MCP host
@@ -147,7 +152,7 @@ For high-fanout retrieval commands (`find-class`, `find-method`, `list-packages`
 claude mcp add research4jar -- research4jar mcp
 ```
 
-Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath via Maven/Gradle), `project_status`, `dependency_precise`, `class_origin`, `find_artifact`, `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Each accepts an optional `project_dir`; by default the server searches upward from its working directory. For agents, call `project_status` to check whether an index exists and inspect coverage/provenance state, then use broad search first (`search_symbols`) and expand one result (`open_symbol`) or use `dependency_precise`/`class_origin` to answer "which jar owns this import/class?", "which dependency brought this jar in?", and "where does this project consume it?".
+Tools exposed: `check_environment`, `index_project` (auto-resolves the classpath via Maven/Gradle), `project_status`, `dependency_precise`, `class_origin`, `find_artifact`, `search_symbols`, `open_symbol`, `why_dependency`, `find_class`, `find_method`, `list_packages`, `find_config_properties`, `find_implementations`, `find_by_annotation`, `get_class`, `get_bean_definitions`, `explain_conditional`, `find_string`, `list_extension_points`. Project/query tools accept optional `project_dir` and `home`; by default the server searches upward from its working directory and uses the standard data home. For agents, call `project_status` to check whether an index exists and inspect coverage/provenance state, then use broad search first (`search_symbols`) and expand one result (`open_symbol`) or use `dependency_precise`/`class_origin` to answer "which jar owns this import/class?", "which dependency brought this jar in?", and "where does this project consume it?".
 
 Agents should call `check_environment` before `index_project` on a new machine; it returns the same missing-tool status, user install notes, agent install commands, and verification commands as `research4jar doctor --format json`. `index_project` also accepts `registry` and `registry_pubkey`; when the registry covers the classpath, MCP indexing skips extraction entirely and only merges downloaded shards.
 
@@ -200,7 +205,7 @@ research4jar cache gc --max-age 30d           # also drop session databases idle
 research4jar cache gc --dry-run               # report without deleting
 ```
 
-Sessions are always rebuilt from shards by the next `research4jar index`, so session GC is safe; evicted shards re-download or re-extract on demand.
+Sessions are always rebuilt from shards by the next `research4jar index`, so session GC is safe; active queries/index copies hold a cross-process lease and cannot be unlinked underneath their project pointer. Deleted sessions also shed their per-session lease sidecars under a stable directory-level lifecycle lock, so repeated classpath churn does not leave one pair of lock files per old session. Evicted shards re-download or re-extract on demand. `--max-age 0d` or `0h` disables completed-session expiry while still reclaiming abandoned build temporaries.
 
 Session cleanup also runs automatically: every `research4jar index` removes sessions unused for more than 30 days (a session's mtime tracks last use). Tune or disable with `RESEARCH4JAR_SESSION_MAX_AGE` (`7d`, `12h`, `off`). Shard cleanup stays manual.
 
@@ -237,7 +242,7 @@ Use this field when interpreting an empty result. It distinguishes "not found in
 - Maven dependency provenance: `research4jar index` captures `.research4jar/dependencies.json` for Maven projects and `why-dependency`/`dep why` explains direct/transitive dependency paths by coordinate, jar filename, artifact id, or class FQN
 - Maven/Gradle classpath auto-discovery (`research4jar index`) and an MCP stdio server (`research4jar mcp`)
 - Shard registry: static-hostable export (`research4jar registry export`), verified download-instead-of-extract (`research4jar index --registry`), and ed25519 signing
-- Pure-Go indexing for registry-covered classpaths: session merge, project pointer, and CLAUDE.md guidance without a JVM
+- Registry-covered indexing: build the session, project pointer, and agent guidance from cached/downloaded shards without local JAR extraction or a separate indexer process
 - Cache lifecycle: usage stats, stale-version and orphan cleanup, LRU eviction, and session expiry (`research4jar cache stats|gc`)
 - Linux, macOS, and Windows-compatible data paths; one Java 8+ fat jar runs everywhere
 
@@ -265,7 +270,7 @@ The suite includes generated cross-jar fixtures, fixed-version Spring golden jar
 - M3: build-tool/classpath discovery ✅ (pulled forward) and distribution foundations ✅
 - M4: host integrations and MCP ✅ (pulled forward)
 - M5: shard lifecycle — registry export/download with signing, LRU, and garbage collection ✅
-- [M6](docs/M6.md): pure-Java consolidation — one Kotlin codebase, Maven/Gradle build plugins, CLI daemon, Maven Central packaging ✅
+- [M6](docs/M6.md): pure-Java consolidation — one Kotlin codebase, Maven/Gradle build plugins, CLI daemon, Maven Central packaging ✅ (implementation complete; first Central publication pending)
 
 Next up: the first Maven Central release (activating zero-install onboarding) and a hosted public registry of pre-indexed shards for popular Spring artifacts.
 

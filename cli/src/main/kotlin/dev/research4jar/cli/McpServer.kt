@@ -2,10 +2,13 @@ package dev.research4jar.cli
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.core.JsonGenerator
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import dev.research4jar.envcheck.EnvCheck
 import dev.research4jar.query.ProjectIndex
 import dev.research4jar.query.ProjectNotFoundException
+import dev.research4jar.query.MAX_PAGE_SIZE
+import dev.research4jar.query.MAX_RESULT_WINDOW
 import dev.research4jar.query.dependencyPrecise
 import dev.research4jar.query.classPrecise
 import dev.research4jar.query.artifactPrecise
@@ -27,29 +30,31 @@ import dev.research4jar.query.whyDependency
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.OutputStream
-import java.io.PrintStream
 
 /**
  * Minimal Model Context Protocol server over stdio (newline-delimited
- * JSON-RPC 2.0), ported from querier/internal/mcp/server.go. Tool names,
- * schemas, and error strings must stay identical to the Go server.
+ * JSON-RPC 2.0). Tool schemas are also enforced server-side so misspelled or
+ * stale arguments cannot silently select the server's working-directory
+ * project or change a query's meaning.
  */
 object McpServer {
     private const val PROTOCOL_VERSION = "2024-11-05"
     private const val SERVER_NAME = "research4jar"
-    private const val SERVER_VERSION = "0.2.0"
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
 
     fun serve(stdin: InputStream, stdout: OutputStream) {
         val reader: BufferedReader = stdin.bufferedReader()
-        val writer = PrintStream(stdout, false, "UTF-8")
-        while (true) {
-            val line = reader.readLine() ?: return
-            if (line.isBlank()) continue
-            val reply = handleLine(line.trim()) ?: continue
-            writer.println(mapper.writeValueAsString(reply))
-            writer.flush()
+        mapper.factory.createGenerator(stdout).use { writer ->
+            writer.disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET)
+            while (true) {
+                val line = reader.readLine() ?: return
+                if (line.isBlank()) continue
+                val reply = handleLine(line.trim()) ?: continue
+                mapper.writeValue(writer, reply)
+                writer.writeRaw('\n')
+                writer.flush()
+            }
         }
     }
 
@@ -76,7 +81,7 @@ object McpServer {
             "initialize" -> reply["result"] = mapOf(
                 "protocolVersion" to negotiatedVersion(params),
                 "capabilities" to mapOf("tools" to emptyMap<String, Any>()),
-                "serverInfo" to mapOf("name" to SERVER_NAME, "version" to SERVER_VERSION),
+                "serverInfo" to mapOf("name" to SERVER_NAME, "version" to CLI_VERSION),
             )
 
             "ping" -> reply["result"] = emptyMap<String, Any>()
@@ -92,14 +97,16 @@ object McpServer {
 
     private fun negotiatedVersion(params: JsonNode?): String {
         val requested = params?.get("protocolVersion")?.asText() ?: ""
-        return if (requested.isNotEmpty()) requested else PROTOCOL_VERSION
+        // MCP requires the server to answer with a version it actually
+        // supports. Echoing an arbitrary client string falsely advertised
+        // compatibility and let the session continue with unknown semantics.
+        return if (requested == PROTOCOL_VERSION) requested else PROTOCOL_VERSION
     }
 
     data class ToolArguments(
         val projectDir: String = "",
         val home: String = "",
         val jars: String = "",
-        val indexer: String = "",
         val registry: String = "",
         val registryPubkey: String = "",
         val prefix: String = "",
@@ -108,6 +115,7 @@ object McpServer {
         val arg: String = "",
         val direct: Boolean = false,
         val noSourceGrep: Boolean = false,
+        val checkClasspath: Boolean = false,
         val page: Int = 1,
         val pageSize: Int = 20,
         val sourceBuild: Boolean = false,
@@ -116,15 +124,20 @@ object McpServer {
     private fun parseArguments(node: JsonNode?): ToolArguments {
         fun text(name: String) = node?.get(name)?.asText() ?: ""
         fun flag(name: String) = node?.get(name)?.asBoolean() ?: false
-        fun int(name: String, fallback: Int): Int {
-            val value = node?.get(name)?.asInt() ?: 0
-            return if (value < 1) fallback else value
+        fun positiveInt(name: String, fallback: Int, maximum: Int = Int.MAX_VALUE): Int {
+            val field = node?.get(name) ?: return fallback
+            require(field.isIntegralNumber && field.canConvertToInt()) {
+                "$name must be a positive integer"
+            }
+            val value = field.intValue()
+            require(value >= 1) { "$name must be a positive integer" }
+            require(value <= maximum) { "$name must be between 1 and $maximum" }
+            return value
         }
         return ToolArguments(
             projectDir = text("project_dir"),
             home = text("home"),
             jars = text("jars"),
-            indexer = text("indexer"),
             registry = text("registry"),
             registryPubkey = text("registry_pubkey"),
             prefix = text("prefix"),
@@ -133,15 +146,35 @@ object McpServer {
             arg = text("arg"),
             direct = flag("direct"),
             noSourceGrep = flag("no_source_grep"),
-            page = int("page", 1),
-            pageSize = int("page_size", 20),
+            checkClasspath = flag("check_classpath"),
+            page = positiveInt("page", 1),
+            pageSize = positiveInt("page_size", 20, MAX_PAGE_SIZE),
             sourceBuild = flag("source_build"),
         )
     }
 
     private fun callTool(params: JsonNode?): Map<String, Any?> {
-        val name = params?.get("name")?.asText() ?: ""
-        val arguments = parseArguments(params?.get("arguments"))
+        if (params == null || !params.isObject) return toolError("tool call params must be an object")
+        val nameNode = params.get("name")
+        if (nameNode == null || !nameNode.isTextual || nameNode.textValue().isEmpty()) {
+            return toolError("tool name must be a non-empty string")
+        }
+        val name = nameNode.textValue()
+        val argumentNode = params.get("arguments")
+        val contractError = validateArguments(name, argumentNode)
+        if (contractError != null) return toolError(contractError)
+        val arguments = try {
+            parseArguments(argumentNode)
+        } catch (exception: IllegalArgumentException) {
+            return toolError(exception.message ?: "invalid tool arguments")
+        }
+        val lastRequested = Math.addExact(
+            Math.multiplyExact((arguments.page - 1).toLong(), arguments.pageSize.toLong()),
+            arguments.pageSize.toLong(),
+        )
+        if (lastRequested > MAX_RESULT_WINDOW) {
+            return toolError("requested page exceeds the $MAX_RESULT_WINDOW-result window")
+        }
         val result = try {
             dispatchTool(name, arguments)
         } catch (_: ProjectNotFoundException) {
@@ -157,6 +190,44 @@ object McpServer {
         return mapOf("content" to listOf(mapOf("type" to "text", "text" to encoded)))
     }
 
+    @Suppress("UNCHECKED_CAST")
+    private fun validateArguments(name: String, node: JsonNode?): String? {
+        val definition = toolCatalog().firstOrNull { it["name"] == name }
+            ?: return "unknown tool: $name"
+        if (node != null && !node.isObject) return "arguments must be an object"
+
+        val inputSchema = definition.getValue("inputSchema") as Map<String, Any?>
+        val properties = inputSchema.getValue("properties") as Map<String, Map<String, Any?>>
+        val required = (inputSchema["required"] as? List<String>).orEmpty()
+        val supplied = buildSet {
+            node?.fieldNames()?.forEachRemaining(::add)
+        }
+        val unknown = supplied - properties.keys
+        if (unknown.isNotEmpty()) {
+            return "unknown argument${if (unknown.size == 1) "" else "s"}: ${unknown.sorted().joinToString(", ")}"
+        }
+        for (field in required) {
+            val value = node?.get(field)
+            if (value == null || value.isNull || (value.isTextual && value.textValue().isEmpty())) {
+                return "$field is required"
+            }
+        }
+        for (field in supplied) {
+            val value = node!!.get(field)
+            val expectedType = properties.getValue(field)["type"]
+            val valid = when (expectedType) {
+                "string" -> value.isTextual
+                "boolean" -> value.isBoolean
+                "integer" -> value.isIntegralNumber && value.canConvertToInt()
+                else -> false
+            }
+            if (!valid) return "$field must be ${articleFor(expectedType)}$expectedType"
+        }
+        return null
+    }
+
+    private fun articleFor(type: Any?): String = if (type == "integer") "an " else "a "
+
     private fun dispatchTool(name: String, arguments: ToolArguments): Any {
         if (name == "check_environment") {
             // EnvCheck.run takes an envcheck.Options value, not named fields.
@@ -171,7 +242,7 @@ object McpServer {
             return IndexOrchestrator.runIndexTool(arguments)
         }
         if (name == "project_status") {
-            return projectStatus(arguments.projectDir, arguments.home)
+            return projectStatus(arguments.projectDir, arguments.home, arguments.checkClasspath)
         }
         val (pointer, manifestPath) = ProjectIndex.resolve(
             arguments.projectDir.ifEmpty { null },
@@ -288,18 +359,36 @@ object McpServer {
             "description" to "Spring project root (directory containing .research4jar). " +
                 "Defaults to searching upward from the server's working directory.",
         )
-        val paging = mapOf(
-            "page" to mapOf("type" to "integer", "description" to "Result page, 1-based (default 1)."),
-            "page_size" to mapOf("type" to "integer", "description" to "Results per page (default 20)."),
+        val home = mapOf(
+            "type" to "string",
+            "description" to "Optional Research4Jar data home; defaults to the standard user data directory.",
         )
+        val paging = mapOf(
+            "page" to mapOf(
+                "type" to "integer",
+                "minimum" to 1,
+                "description" to "Result page, 1-based (default 1; maximum result window $MAX_RESULT_WINDOW).",
+            ),
+            "page_size" to mapOf(
+                "type" to "integer",
+                "minimum" to 1,
+                "maximum" to MAX_PAGE_SIZE,
+                "description" to "Results per page (default 20, maximum $MAX_PAGE_SIZE).",
+            ),
+        )
+        val boundedPageSize = paging.getValue("page_size")
+
+        fun withProject(props: Map<String, Any?>): Map<String, Any?> =
+            props + mapOf("project_dir" to projectDir, "home" to home)
 
         fun withPaging(props: Map<String, Any?>): Map<String, Any?> =
-            props + paging + mapOf("project_dir" to projectDir)
+            withProject(props + paging)
 
         fun schema(props: Map<String, Any?>, vararg required: String): Map<String, Any?> {
             val result = LinkedHashMap<String, Any?>()
             result["type"] = "object"
             result["properties"] = props
+            result["additionalProperties"] = false
             if (required.isNotEmpty()) result["required"] = required.toList()
             return result
         }
@@ -330,6 +419,7 @@ object McpServer {
                 schema(
                     mapOf(
                         "project_dir" to projectDir,
+                        "home" to home,
                         "jars" to mapOf(
                             "type" to "string",
                             "description" to "Optional jar directory, glob, or comma-separated jar list. Omit to auto-resolve via the build tool.",
@@ -353,9 +443,10 @@ object McpServer {
                 schema(
                     mapOf(
                         "project_dir" to projectDir,
-                        "home" to mapOf(
-                            "type" to "string",
-                            "description" to "Optional Research4Jar data home; defaults to the standard user data directory.",
+                        "home" to home,
+                        "check_classpath" to mapOf(
+                            "type" to "boolean",
+                            "description" to "Resolve the current build classpath and report whether it still matches the index.",
                         ),
                     ),
                 ),
@@ -404,9 +495,8 @@ object McpServer {
                 "Get everything indexed about a class: kind, superclass, interfaces, " +
                     "annotations, methods, @Bean definitions, and Spring conditions.",
                 schema(
-                    mapOf(
-                        "fqn" to mapOf("type" to "string", "description" to "Class fully-qualified name."),
-                        "project_dir" to projectDir,
+                    withProject(
+                        mapOf("fqn" to mapOf("type" to "string", "description" to "Class fully-qualified name.")),
                     ),
                     "fqn",
                 ),
@@ -425,9 +515,10 @@ object McpServer {
                 "Explain when an auto-configuration class activates: its class-level " +
                     "@ConditionalOn* conditions plus every @Bean method's conditions.",
                 schema(
-                    mapOf(
-                        "fqn" to mapOf("type" to "string", "description" to "Configuration class fully-qualified name."),
-                        "project_dir" to projectDir,
+                    withProject(
+                        mapOf(
+                            "fqn" to mapOf("type" to "string", "description" to "Configuration class fully-qualified name."),
+                        ),
                     ),
                     "fqn",
                 ),
@@ -487,9 +578,10 @@ object McpServer {
                 "open_symbol",
                 "Open a symbol returned by search_symbols. Use a class FQN or Class#method.",
                 schema(
-                    mapOf(
-                        "fqn" to mapOf("type" to "string", "description" to "Class FQN or Class#method symbol."),
-                        "project_dir" to projectDir,
+                    withProject(
+                        mapOf(
+                            "fqn" to mapOf("type" to "string", "description" to "Class FQN or Class#method symbol."),
+                        ),
                     ),
                     "fqn",
                 ),
@@ -501,21 +593,17 @@ object McpServer {
                     "bounded source/build-file usages so agents can confirm both dependency presence " +
                     "and project consumption.",
                 schema(
-                    mapOf(
+                    withProject(mapOf(
                         "text" to mapOf(
                             "type" to "string",
                             "description" to "Import line, class FQN/simple name, Class#method, group:artifact, artifact id, or jar filename.",
                         ),
-                        "project_dir" to projectDir,
-                        "page_size" to mapOf(
-                            "type" to "integer",
-                            "description" to "Max origins and source usage rows to return (default 20).",
-                        ),
+                        "page_size" to boundedPageSize,
                         "no_source_grep" to mapOf(
                             "type" to "boolean",
                             "description" to "Skip bounded source/build-file usage search.",
                         ),
-                    ),
+                    )),
                     "text",
                 ),
             ),
@@ -525,21 +613,17 @@ object McpServer {
                     "dependency provenance and bounded source/build-file usages. Use find_class " +
                     "for fuzzy class search.",
                 schema(
-                    mapOf(
+                    withProject(mapOf(
                         "text" to mapOf(
                             "type" to "string",
                             "description" to "Class simple name, class FQN, or import line.",
                         ),
-                        "project_dir" to projectDir,
-                        "page_size" to mapOf(
-                            "type" to "integer",
-                            "description" to "Max origins and source usage rows to return (default 20).",
-                        ),
+                        "page_size" to boundedPageSize,
                         "no_source_grep" to mapOf(
                             "type" to "boolean",
                             "description" to "Skip bounded source/build-file usage search.",
                         ),
-                    ),
+                    )),
                     "text",
                 ),
             ),
@@ -548,21 +632,17 @@ object McpServer {
                 "Find a dependency artifact or jar by group:artifact, group:artifact:version, " +
                     "artifact id, or jar filename; returns the indexed jar plus dependency provenance.",
                 schema(
-                    mapOf(
+                    withProject(mapOf(
                         "text" to mapOf(
                             "type" to "string",
                             "description" to "group:artifact, group:artifact:version, artifact id, or jar filename.",
                         ),
-                        "project_dir" to projectDir,
-                        "page_size" to mapOf(
-                            "type" to "integer",
-                            "description" to "Max origins and source usage rows to return (default 20).",
-                        ),
+                        "page_size" to boundedPageSize,
                         "no_source_grep" to mapOf(
                             "type" to "boolean",
                             "description" to "Skip bounded source/build-file usage search.",
                         ),
-                    ),
+                    )),
                     "text",
                 ),
             ),
@@ -571,9 +651,10 @@ object McpServer {
                 "Explain why a Maven dependency jar is present. Accepts group:artifact, " +
                     "group:artifact:version, jar filename, or a class FQN.",
                 schema(
-                    mapOf(
-                        "fqn" to mapOf("type" to "string", "description" to "Coordinate, jar filename, or class FQN."),
-                        "project_dir" to projectDir,
+                    withProject(
+                        mapOf(
+                            "fqn" to mapOf("type" to "string", "description" to "Coordinate, jar filename, or class FQN."),
+                        ),
                     ),
                     "fqn",
                 ),

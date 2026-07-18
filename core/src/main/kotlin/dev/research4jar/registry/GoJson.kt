@@ -10,6 +10,9 @@ import com.fasterxml.jackson.core.util.DefaultPrettyPrinter
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.json.JsonMapper
 import com.fasterxml.jackson.module.kotlin.kotlinModule
+import java.io.ByteArrayOutputStream
+import java.io.OutputStream
+import java.nio.charset.StandardCharsets
 
 /**
  * JSON rendering that byte-matches Go's encoding/json: two-space indentation,
@@ -34,8 +37,25 @@ object GoJson {
         escapingMapper.writer(GoPrettyPrinter()).writeValueAsString(value)
 
     /** Mirrors the Go CLI's printJSON encoder: indented, unescaped HTML, trailing newline. */
-    fun encodeIndent(value: Any): String =
-        plainMapper.writer(GoPrettyPrinter()).writeValueAsString(value) + "\n"
+    fun encodeIndent(value: Any): String {
+        val output = ByteArrayOutputStream()
+        encodeIndent(value, output)
+        return String(output.toByteArray(), StandardCharsets.UTF_8)
+    }
+
+    /**
+     * Streaming form of [encodeIndent]. The target is deliberately left open:
+     * CLI daemons pass a bounded capture stream here, so Jackson must hit that
+     * budget while serializing instead of first materializing an unbounded JSON
+     * string on the daemon heap.
+     */
+    fun encodeIndent(value: Any, output: OutputStream) {
+        plainMapper.factory.createGenerator(output).use { generator ->
+            generator.disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET)
+            plainMapper.writer(GoPrettyPrinter()).writeValue(generator, value)
+            generator.writeRaw('\n')
+        }
+    }
 }
 
 private class GoPrettyPrinter : DefaultPrettyPrinter() {

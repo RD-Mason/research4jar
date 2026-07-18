@@ -135,7 +135,11 @@ fun getClass(
         }
     }
 
-    val sources = if (classRows.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (classRows.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, classRows.map { it.shardId })
+    } else {
+        null
+    }
     val results = classRows.map { row ->
         ClassDetail(
             fqn = row.fqn,
@@ -172,6 +176,7 @@ fun getBeanDefinitions(
     page: Int,
     pageSize: Int,
 ): BeanDefinitionsResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
+    val window = pageWindow(page, pageSize)
     val total = session.queryInt(
         "SELECT COUNT(*) FROM bean_definitions WHERE bean_type_fqn = ? OR config_fqn = ?",
         listOf(fqn, fqn),
@@ -188,10 +193,14 @@ fun getBeanDefinitions(
         ORDER BY b.config_fqn, b.bean_name, b.source_shard_id, b.id
         LIMIT ? OFFSET ?
         """.trimIndent(),
-        listOf(fqn, fqn, pageSize, (page - 1) * pageSize),
+        listOf(fqn, fqn, window.limit, window.offset),
     )
 
-    val sources = if (beans.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (beans.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, beans.map { it.sourceJar })
+    } else {
+        null
+    }
     val results = beans.map { it.copy(sourceJar = sourceJarName(sources, it.sourceJar)) }
 
     BeanDefinitionsResponse(
@@ -219,7 +228,11 @@ fun explainConditional(
         listOf(fqn),
     ) { rows -> rows.mapRows { ClassRef(it.getInt(1), it.getString(2)) } }
 
-    val sources = if (refs.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (refs.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, refs.map { it.shardId })
+    } else {
+        null
+    }
     val results = refs.map { ref ->
         ConditionalTarget(
             fqn = fqn,
@@ -340,7 +353,10 @@ private fun beansForConfig(
         WHERE b.config_fqn = ? AND b.source_shard_id = ?
         ORDER BY b.bean_name, b.id
         """.trimIndent(),
-        listOf(configFqn, shardId),
+        // Production v7 rows carry an INTEGER key. Bind it as Long so the
+        // equality keeps integer affinity; retain text for hand-written and
+        // pre-v7 compatibility fixtures.
+        listOf(configFqn, shardId.toLongOrNull() ?: shardId),
     ).map { it.copy(sourceJar = sourceJarName(sources, it.sourceJar)) }
 
 // scanBeans runs a bean query (with sourceJar temporarily holding the shard

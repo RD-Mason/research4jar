@@ -57,7 +57,7 @@ internal fun errMessage(exception: Throwable): String =
 
 /** Mirrors the Go CLI's printJSON: 2-space indent, no HTML escaping, trailing newline. */
 internal fun printJson(out: PrintStream, response: Any) {
-    out.print(GoJson.encodeIndent(response))
+    GoJson.encodeIndent(response, out)
 }
 
 internal fun emitResponse(response: Any, format: String, io: CliIO) {

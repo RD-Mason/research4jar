@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import dev.research4jar.runtime.WorkingDirectoryContext
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -38,12 +39,12 @@ object ProjectIndex {
 
     fun locate(projectDir: String?): Path {
         if (!projectDir.isNullOrEmpty()) {
-            val candidate = Paths.get(projectDir).toAbsolutePath().normalize()
+            val candidate = WorkingDirectoryContext.resolve(projectDir)
                 .resolve(".research4jar").resolve("project.json")
             if (Files.isRegularFile(candidate)) return candidate
             throw ProjectNotFoundException()
         }
-        var current = Paths.get("").toAbsolutePath()
+        var current = WorkingDirectoryContext.current()
         while (true) {
             val candidate = current.resolve(".research4jar").resolve("project.json")
             if (Files.isRegularFile(candidate)) return candidate

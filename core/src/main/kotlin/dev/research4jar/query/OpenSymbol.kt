@@ -64,15 +64,22 @@ private fun openMethodSymbol(
     arg: String,
 ): OpenSymbolResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
     data class Pending(val method: MethodSearchResult, val shardId: String)
+    val ambiguous = arg.indexOf('#', arg.indexOf('#') + 1) >= 0
+    val predicate = if (ambiguous) {
+        "m.owner_resolved <> 0 AND c.fqn || '#' || m.name = ?"
+    } else {
+        "c.fqn = ? AND m.name = ? AND m.owner_resolved <> 0"
+    }
+    val args = if (ambiguous) listOf(arg) else listOf(classFqn, methodName)
     val pending = session.query(
         """
         SELECT c.fqn, m.name, m.descriptor, m.return_fqn, m.modifiers, m.source_shard_id
-        FROM methods m
-        JOIN classes c ON c.id = m.class_id
-        WHERE m.symbol = ?
-        ORDER BY m.descriptor, m.source_shard_id
+        FROM classes c
+        CROSS JOIN methods m INDEXED BY idx_s_methods_class ON m.class_id = c.id
+        WHERE $predicate
+        ORDER BY m.descriptor, m.source_shard_id, c.fqn, m.name
         """.trimIndent(),
-        listOf("$classFqn#$methodName"),
+        args,
     ) { rows ->
         rows.mapRows {
             Pending(
@@ -91,7 +98,11 @@ private fun openMethodSymbol(
         }
     }
 
-    val sources = if (pending.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (pending.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, pending.map { it.shardId })
+    } else {
+        null
+    }
     val results = pending.map {
         OpenSymbolResult(
             kind = "method",

@@ -144,7 +144,7 @@ fun findByAnnotation(
             FROM annotations a
             JOIN classes c ON c.id = a.target_id
             WHERE a.target_kind = 'class' AND a.annotation_fqn = ?
-            ORDER BY c.fqn, c.source_shard_id
+            ORDER BY c.fqn, c.source_shard_id, a.annotation_fqn, COALESCE(a.attributes, '')
             LIMIT ? OFFSET ?"""
     }
     return findSymbols(
@@ -177,13 +177,18 @@ private fun findSymbols(
     selectSql: String,
     scan: (ResultSet) -> Pair<SymbolResult, String>,
 ): SymbolResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
+    val window = pageWindow(page, pageSize)
     val total = session.queryInt(countSql, bindArgs)
     val pending = session.query(
         selectSql,
-        bindArgs + listOf(pageSize, (page - 1) * pageSize),
+        bindArgs + listOf(window.limit, window.offset),
     ) { rows -> rows.mapRows(scan) }
 
-    val sources = if (pending.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (pending.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, pending.map { it.second })
+    } else {
+        null
+    }
     SymbolResponse(
         query = request,
         results = pending.map { (result, shardId) ->

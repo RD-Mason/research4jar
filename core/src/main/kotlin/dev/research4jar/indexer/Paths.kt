@@ -1,5 +1,6 @@
 package dev.research4jar.indexer
 
+import dev.research4jar.runtime.WorkingDirectoryContext
 import java.nio.file.Path
 import java.nio.file.Paths
 
@@ -40,6 +41,6 @@ object Research4JarPaths {
                 }
             }
         }
-        return DataPaths(home.toAbsolutePath().normalize())
+        return DataPaths(WorkingDirectoryContext.resolve(home))
     }
 }

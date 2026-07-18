@@ -8,6 +8,8 @@ import java.sql.DriverManager
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -16,20 +18,20 @@ import kotlin.test.assertTrue
  * SEARCH_SYMBOL_SQL (kept as the oracle) would return, and that the
  * find-class/find-method contains fallbacks return exactly the pages of
  * their legacy scans. The session mixes all six symbol kinds with
- * adversarial rows: orphaned methods with NULL symbols (some deliberately
- * matching battery terms through name/descriptor/owner/detail arms), method
- * symbols whose fqn half disagrees with the joined class (so owner arms must
- * not lean on symbol containment), case variants (ranges are case-sensitive,
- * LIKE is not), CJK names (empty range upper bound), kind values, descriptor
+ * adversarial rows: methods with unresolved owners / NULL projected names
+ * matching battery terms through name/descriptor/owner/detail arms), case
+ * variants (ranges are case-sensitive, LIKE is not), CJK names (empty range
+ * upper bound), kind values, descriptor
  * fragments, '('-carrying terms, and LIKE wildcard literals, across a
  * battery of terms and pages. The fixture keeps the two invariants the
- * rewrites rely on and real merges guarantee: a non-NULL symbol ends with
- * '#' || name, and a string constant's method belongs to the string's class.
+ * rewrites rely on and real merges guarantee: a resolved method projects as
+ * owner FQN || '#' || name, and a string constant's method belongs to the
+ * string's class.
  *
- * Rows whose ORDER BY key collides carry identical payloads (kind and
- * descriptor are functions of their row's key columns; string values embed a
- * unique counter), because tie order within a page is not a promise of
- * either implementation.
+ * The fixture also includes overloaded methods with the same kind/name/shard
+ * but different descriptors. They exercise the payload-complete ORDER BY
+ * that keeps adjacent pages deterministic across the oracle, fast path, and
+ * FTS tiers.
  */
 class SearchSymbolParityTest {
     private data class Row(
@@ -110,13 +112,21 @@ class SearchSymbolParityTest {
                 insertClass, 903, "org.acme.StrOwnerOnlyXy",
                 kindFor("org.acme.StrOwnerOnlyXy"), "StrOwnerOnlyXy", "org.acme", "shard-2",
             )
+            exec(
+                insertClass, 904, "io.测试.工具类Box#do",
+                kindFor("io.测试.工具类Box#do"), "工具类Box#do", "io.测试", "shard-1",
+            )
+            exec(
+                insertClass, 905, "prefix.NulOwner\u0000Hidden",
+                kindFor("prefix.NulOwner\u0000Hidden"), "NulOwner\u0000Hidden", "prefix", "shard-2",
+            )
             // Term-free host for the shielded orphans below (they match
             // battery terms only through their own name/descriptor arms).
             exec(insertClass, 999, "qq.safe.Qz", kindFor("qq.safe.Qz"), "Qz", "qq.safe", "shard-0")
 
             val insertMethod =
                 """INSERT INTO methods(id, class_id, name, descriptor, return_fqn,
-                   modifiers, symbol, source_shard_id)
+                   modifiers, owner_resolved, source_shard_id)
                    VALUES (?, ?, ?, ?, NULL, 1, ?, ?)"""
             val descriptors = listOf("()V", "(Ljava/lang/String;)V", "(I)Z")
             val methodsByClass = HashMap<Int, MutableList<Int>>()
@@ -128,18 +138,17 @@ class SearchSymbolParityTest {
                     // terms match at most one of them at a time.
                     exec(
                         insertMethod, methodId, 999, "qqq$methodId",
-                        "(Lqq/safe/P$methodId;)V", null, "shard-${random.nextInt(3)}",
+                        "(Lqq/safe/P$methodId;)V", 0, "shard-${random.nextInt(3)}",
                     )
                 } else {
                     val owner = random.nextInt(1, 61)
                     val name = "do${word()}"
-                    // The symbol keeps the merge invariant (ends with #name)
-                    // but its fqn half deliberately disagrees with the joined
-                    // class: owner arms must not be served from symbol.
+                    // Keep the production merge invariant: the owner resolves,
+                    // so the query projection is owner FQN plus '#' plus name.
                     exec(
                         insertMethod, methodId, owner, name,
                         descriptors[(owner + name.length) % descriptors.size],
-                        "com.example.C$owner#$name", "shard-${random.nextInt(3)}",
+                        1, "shard-${random.nextInt(3)}",
                     )
                     methodsByClass.getOrPut(owner) { mutableListOf() }.add(methodId)
                 }
@@ -147,13 +156,39 @@ class SearchSymbolParityTest {
             // Orphans that DO match battery terms: on the term-matching host
             // (owner arms), by unique name (exact/prefix/case arms) and by
             // unique descriptor (descriptor arms).
-            exec(insertMethod, 901, 902, "zzOrphanSave", "(I)Lzz/uniq/Beta;", null, "shard-0")
-            exec(insertMethod, 902, 999, "qqOrphanRun", "(Lzz/uniq/Alpha;)V", null, "shard-1")
+            exec(insertMethod, 901, 902, "zzOrphanSave", "(I)Lzz/uniq/Beta;", 0, "shard-0")
+            exec(insertMethod, 902, 999, "qqOrphanRun", "(Lzz/uniq/Alpha;)V", 0, "shard-1")
             // A fully consistent method on the CJK class for exact-symbol and
             // detail-arm terms.
             exec(
                 insertMethod, 904, 901, "doDetailProbe", "(Ljava/lang/String;)V",
-                "io.测试.工具类Box#doDetailProbe", "shard-0",
+                1, "shard-0",
+            )
+            exec(
+                insertMethod, 905, 901, "doOverloadProbe", "(I)V",
+                1, "shard-overload",
+            )
+            exec(
+                insertMethod, 906, 901, "doOverloadProbe", "(Ljava/lang/String;)V",
+                1, "shard-overload",
+            )
+            // More than one '#' is ambiguous to the fast parser. It must use
+            // the computed-expression fallback and still preserve exact score.
+            exec(
+                insertMethod, 907, 901, "do#HashProbe", "()V",
+                1, "shard-0",
+            )
+            exec(
+                insertMethod, 908, 904, "HashProbe", "(I)V",
+                1, "shard-1",
+            )
+            exec(
+                insertMethod, 909, 905, "probeBoundary", "()V",
+                1, "shard-2",
+            )
+            exec(
+                insertMethod, 910, 901, "nulName\u0000Hidden", "(Lzz/uniq/NulDescriptor;)V",
+                1, "shard-0",
             )
 
             repeat(40) {
@@ -209,6 +244,7 @@ class SearchSymbolParityTest {
             exec(insertString, 903, null, "plain constant beta", "shard-2")
             exec(insertString, 901, null, "配置中心加载完成", "shard-0")
             exec(insertString, 901, 904, "detail probe owner one", "shard-0")
+            exec(insertString, 901, 910, "nul detail must stay hidden", "shard-0")
             repeat(2) { exec(insertString, 1, null, "the Widget constant dup", "shard-0") }
 
             // Rows were inserted directly (not through the shard merge), so
@@ -221,6 +257,44 @@ class SearchSymbolParityTest {
                 )
             }
             connection.commit()
+        }
+        return session
+    }
+
+    /**
+     * Builds one controlled score-82 prefix followed by score-55 contains
+     * tail. This makes the deep-page fast/contains boundary independent of
+     * the randomized parity fixture above.
+     */
+    private fun buildDeepBoundarySession(fastCount: Int, containsCount: Int): Path {
+        val dir = Files.createTempDirectory("r4j-deep-boundary")
+        val session = dir.resolve("session.db")
+        SessionBuilder().build(session, emptyList())
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+            connection.prepareStatement(
+                """
+                INSERT INTO classes(
+                  fqn, kind, super_fqn, modifiers, is_abstract, source_file,
+                  simple_name, package_name, source_shard_id
+                ) VALUES (?, 'class', NULL, 1, 0, NULL, ?, ?, 1)
+                """.trimIndent(),
+            ).use { insert ->
+                fun add(packageName: String, simpleName: String) {
+                    insert.setString(1, "$packageName.$simpleName")
+                    insert.setString(2, simpleName)
+                    insert.setString(3, packageName)
+                    insert.executeUpdate()
+                }
+                repeat(fastCount) { index ->
+                    add("fast.boundary", "Needle%04d".format(index))
+                }
+                repeat(containsCount) { index ->
+                    add("contains.boundary", "BoxNeedle%04d".format(index))
+                }
+            }
+            connection.createStatement().use { statement ->
+                statement.execute("INSERT INTO classes_fts(classes_fts) VALUES('rebuild')")
+            }
         }
         return session
     }
@@ -249,7 +323,9 @@ class SearchSymbolParityTest {
         "qqOrphanRun", "qqOrphanR", "qqorphanrun", "qqq3", "qqq30",
         "zz/uniq/Alpha", "zz/uniq/Beta", "OrphanHostWidget", "rphanRu", "OrphanSav",
         "StrOwnerOnly", "DetailProb", "doDetailProbe", "etailProb",
-        "io.测试.工具类Box#doDetailProbe",
+        "io.测试.工具类Box#doDetailProbe", "具类Box#doDet", "Box#do", "do#Hash",
+        "io.测试.工具类Box#do#HashProbe", "NulOwner#probe", "NulDescriptor",
+        "prefix.NulOwner\u0000Hidden#probeBoundary",
         "the Widget constant dup",
         "zzqqxx-nothing",
     )
@@ -314,7 +390,7 @@ class SearchSymbolParityTest {
         pageSize: Int,
     ): Pair<List<MethodRow>, Boolean> {
         val rows = session.query(
-            METHOD_SEARCH_SQL,
+            routeMethodExactMatch(METHOD_SEARCH_SQL, term),
             methodMatchArgs(term) + listOf(pageSize + 1, (page - 1) * pageSize),
         ) { result ->
             result.mapRows {
@@ -379,15 +455,77 @@ class SearchSymbolParityTest {
 
     @Test
     fun `cascade pages equal the single-query oracle for every term and page`() {
-        // Several seeds: the randomized rows land differently but every
-        // ORDER BY tie stays payload-identical by construction, so the
-        // battery is deterministic for any seed.
+        // Several seeds: randomized rows land differently while the explicit
+        // payload keys keep every page deterministic.
         for (seed in listOf(42, 7, 1234)) {
             val session = buildSession(seed)
             val (comparisons, orphanPages) = assertSearchSymbolParity(session)
             // Guard against the battery silently degenerating to empty results.
             assertTrue(comparisons > 150, "seed=$seed ran $comparisons page comparisons")
             assertTrue(orphanPages > 0, "seed=$seed must reach NULL-symbol orphan rows")
+        }
+    }
+
+    @Test
+    fun `overloaded methods keep a stable payload order across page boundaries`() {
+        val session = buildSession()
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { db ->
+            for (term in listOf("doOverloadProbe", "verloadProb")) {
+                val details = mutableListOf<String?>()
+                for (page in 1..3) {
+                    val (expected, expectedHasMore) = oraclePage(db, term, page, pageSize = 1)
+                    val (actual, actualHasMore) = searchSymbolRows(db, term, page, pageSize = 1)
+                    assertEquals(
+                        expected,
+                        actual.map {
+                            Row(it.kind, it.name, it.owner, it.detail, it.shardId, it.score, it.matchReason)
+                        },
+                        "overload term=$term page=$page",
+                    )
+                    assertEquals(expectedHasMore, actualHasMore)
+                    details += actual.singleOrNull()?.detail
+                }
+                assertEquals(listOf("(I)V", "(Ljava/lang/String;)V", null), details)
+            }
+        }
+    }
+
+    @Test
+    fun `deep pages stay exact on both sides of the fast prefix boundary`() {
+        val term = "Needle"
+        val page = 3
+        val pageSize = 4
+        val offset = (page - 1) * pageSize
+        for (delta in -1..1) {
+            val fastCount = offset + pageSize + delta
+            val session = buildDeepBoundarySession(fastCount, containsCount = 3)
+            DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { db ->
+                val observedFastCount = db.query(
+                    SEARCH_SYMBOL_FAST_SQL,
+                    matchArgs(term) + listOf(100, 0),
+                ) { rows -> rows.mapRows { _ -> 1 }.size }
+                assertEquals(fastCount, observedFastCount, "fixture fast count for delta=$delta")
+
+                val (expected, expectedHasMore) = oraclePage(db, term, page, pageSize)
+                val (actual, actualHasMore) = searchSymbolRows(db, term, page, pageSize)
+                val actualRows = actual.map {
+                    Row(it.kind, it.name, it.owner, it.detail, it.shardId, it.score, it.matchReason)
+                }
+                assertEquals(expected, actualRows, "deep boundary delta=$delta")
+                assertEquals(expectedHasMore, actualHasMore, "deep hasMore delta=$delta")
+                assertTrue(actualHasMore, "the contains tail keeps every boundary page open")
+
+                // -1 must fill the final slot from contains; = must fall back
+                // solely to discover has_more; +1 is served by the direct
+                // pageSize+1 fast slice.
+                val fastOnPage = minOf(pageSize, fastCount - offset)
+                assertEquals(
+                    List(fastOnPage) { "simple_prefix" } +
+                        List(pageSize - fastOnPage) { "class_contains" },
+                    actualRows.map(Row::matchReason),
+                    "score-tier transition for delta=$delta",
+                )
+            }
         }
     }
 
@@ -427,6 +565,106 @@ class SearchSymbolParityTest {
             assertTrue(
                 count(METHOD_SEARCH_FTS_SQL, methodMatchArgs("oGadget") + listOf(mPattern, mPattern, 100, 0)) > 0,
                 "find-method fts must match",
+            )
+        }
+    }
+
+    @Test
+    fun `single hash terms use the indexed boundary decomposition when safe`() {
+        val term = "具类Box#doDet"
+        assertEquals(2, methodContainsQueries(term).size)
+        assertNotNull(symbolContainsTiers(term)[1].ftsSql)
+        assertNull(symbolContainsTiers("a#b")[1].ftsSql)
+        assertNull(symbolContainsTiers("owner#method#tail")[1].ftsSql)
+        assertNull(symbolContainsTiers("owner\u0000#method")[1].ftsSql)
+    }
+
+    @Test
+    fun `exact method symbols preserve embedded NUL on either side of the delimiter`() {
+        val session = buildSession()
+        val cases = listOf(
+            Triple(
+                "prefix.NulOwner\u0000Hidden#probeBoundary",
+                "prefix.NulOwner\u0000Hidden",
+                "probeBoundary",
+            ),
+            Triple(
+                "io.测试.工具类Box#nulName\u0000Hidden",
+                "io.测试.工具类Box",
+                "nulName\u0000Hidden",
+            ),
+        )
+
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { db ->
+            for ((term, owner, name) in cases) {
+                val method = findMethod(pointer(session), "", term, page = 1, pageSize = 1)
+                assertEquals(1, method.results.size, "find-method exact term=$term")
+                assertEquals(owner, method.results.single().classFqn)
+                assertEquals(name, method.results.single().name)
+                assertEquals(100, method.results.single().score)
+                assertEquals("exact_method", method.results.single().matchReason)
+
+                val (symbols, _) = searchSymbolRows(db, term, page = 1, pageSize = 1)
+                assertEquals(1, symbols.size, "search-symbol exact term=$term")
+                assertEquals("method", symbols.single().kind)
+                assertEquals(term, symbols.single().name)
+                assertEquals(98, symbols.single().score)
+                assertEquals("exact_method", symbols.single().matchReason)
+            }
+        }
+    }
+
+    @Test
+    fun `open-symbol probes owner and name while preserving unresolved owners`() {
+        val session = buildSession()
+        val resolved = openSymbol(
+            pointer(session), "", "io.测试.工具类Box#do#HashProbe",
+        )
+        assertEquals(2, resolved.total)
+        assertEquals(setOf("do#HashProbe", "HashProbe"), resolved.results.map { it.method?.name }.toSet())
+        assertTrue(resolved.results.all { it.method?.matchReason == "exact_method" })
+
+        val unresolved = openSymbol(pointer(session), "", "qq.safe.Qz#qqOrphanRun")
+        assertEquals(0, unresolved.total)
+    }
+
+    @Test
+    fun `strict fast score tiers equal the mega union without duplicates`() {
+        val session = buildSession()
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { db ->
+            fun rows(sql: String, args: List<Any?>): List<Row> = db.query(sql, args) { result ->
+                result.mapRows {
+                    Row(
+                        it.getString(1), it.getString(2), it.getString(3), it.getString(4),
+                        it.getString(5), it.getInt(6), it.getString(7),
+                    )
+                }
+            }
+            for (term in terms) {
+                val expected = rows(
+                    routeMethodExactMatch(SEARCH_SYMBOL_FAST_SQL, term),
+                    matchArgs(term) + listOf(10_000, 0),
+                )
+                val actual = searchSymbolFastTiers(term).flatMap { sql ->
+                    rows(sql, matchArgs(term) + listOf(10_000))
+                }
+                assertEquals(expected, actual, "fast tiers for term=$term")
+            }
+        }
+    }
+
+    @Test
+    fun `string detail arms use the method lookup index`() {
+        val session = buildSession()
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { db ->
+            val pattern = "%DetailProb%"
+            val details = db.query(
+                "EXPLAIN QUERY PLAN $SEARCH_SYMBOL_STRING_FTS_SQL",
+                matchArgs("DetailProb") + listOf(pattern, pattern, pattern, pattern, 20),
+            ) { rows -> rows.mapRows { it.getString(4) } }
+            assertTrue(
+                details.count { "idx_s_strconst_method" in it } >= 2,
+                "method-name and descriptor arms must probe strings by method: $details",
             )
         }
     }
@@ -513,6 +751,63 @@ class SearchSymbolParityTest {
     }
 
     @Test
+    fun `sessions with the old symbol methods fts schema fall back to legacy`() {
+        val session = buildSession()
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("DROP TABLE methods_fts")
+                statement.execute(
+                    """
+                    CREATE VIRTUAL TABLE methods_fts USING fts5(
+                      symbol, descriptor,
+                      tokenize='trigram', detail='none', columnsize=0
+                    )
+                    """.trimIndent(),
+                )
+                statement.execute(
+                    "INSERT INTO methods_fts(rowid, symbol, descriptor) " +
+                        "SELECT m.id, CASE WHEN m.owner_resolved = 0 THEN NULL " +
+                        "ELSE c.fqn || '#' || m.name END, m.descriptor " +
+                        "FROM methods m JOIN classes c ON c.id = m.class_id",
+                )
+            }
+        }
+
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { db ->
+            // The first term forces the method-name tier; the second also
+            // reaches the string-detail tier. Both new queries reference the
+            // absent `name` column and must retry their legacy SQL atomically.
+            for (term in listOf("rphanRu", "etailProb")) {
+                val (expected, expectedHasMore) = oraclePage(db, term, page = 1, pageSize = 100)
+                val (actual, actualHasMore) = searchSymbolRows(db, term, page = 1, pageSize = 100)
+                val actualRows = actual.map {
+                    Row(it.kind, it.name, it.owner, it.detail, it.shardId, it.score, it.matchReason)
+                }
+                assertTrue(expected.isNotEmpty(), "old-schema probe must match for term=$term")
+                if (term == "etailProb") {
+                    assertTrue(expected.any { it.kind == "method" })
+                    assertTrue(expected.any { it.kind == "string" })
+                }
+                assertEquals(expected, actualRows, "search-symbol old methods_fts term=$term")
+                assertEquals(expectedHasMore, actualHasMore)
+            }
+
+            val term = "rphanRu"
+            val (expected, expectedHasMore) = methodOraclePage(db, term, page = 1, pageSize = 100)
+            val response = findMethod(pointer(session), "", term, page = 1, pageSize = 100)
+            val actual = response.results.map {
+                MethodRow(
+                    it.classFqn, it.name, it.descriptor, it.returnFqn, it.modifiers,
+                    it.sourceJar, it.score, it.matchReason,
+                )
+            }
+            assertTrue(expected.isNotEmpty(), "find-method old-schema probe must match")
+            assertEquals(expected, actual)
+            assertEquals(expectedHasMore, response.hasMore)
+        }
+    }
+
+    @Test
     fun `term routing matches the trigram contract`() {
         // Class/method tiers follow find-string's routing rule.
         assertTrue(classContainsQueries("Widget").size == 2)
@@ -523,6 +818,7 @@ class SearchSymbolParityTest {
         assertTrue(classContainsQueries("Wid_get").size == 1)
         assertTrue(classContainsQueries("back\\slash").size == 1)
         assertTrue(methodContainsQueries("()V").size == 2)
+        assertTrue(methodContainsQueries("owner#method").size == 2)
         assertTrue(methodContainsQueries(")V").size == 1)
         // search-symbol: the string tier alone rejects '(' terms (its detail
         // column is a name||descriptor concatenation); annotation/spi/config

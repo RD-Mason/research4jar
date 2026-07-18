@@ -131,6 +131,14 @@ class FindStringParityTest {
     ): Pair<Int, List<StringConstant>> {
         val pattern = "%${escapeLike(term)}%"
         val total = oracle.queryInt(FIND_STRING_COUNT_SQL, listOf(pattern))
+        val canonicalShardIds = oracle.query(
+            "SELECT shard_key, shard_id FROM session_shards",
+            emptyList(),
+        ) { result ->
+            buildMap {
+                while (result.next()) put(result.getLong(1).toString(), result.getString(2))
+            }
+        }
         val rows = oracle.query(
             FIND_STRING_SQL,
             listOf(pattern, pageSize, (page - 1) * pageSize),
@@ -146,7 +154,7 @@ class FindStringParityTest {
                     } else {
                         null
                     },
-                    sourceJar = it.getString(5),
+                    sourceJar = canonicalShardIds[it.getString(5)] ?: it.getString(5),
                 )
             }
         }

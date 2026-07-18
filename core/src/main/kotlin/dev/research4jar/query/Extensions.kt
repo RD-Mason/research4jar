@@ -40,6 +40,7 @@ fun listExtensionPoints(
     page: Int,
     pageSize: Int,
 ): ExtensionPointsResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
+    val window = pageWindow(page, pageSize)
     if (arg.isEmpty()) {
         val total = session.queryInt(
             """SELECT COUNT(*) FROM (
@@ -55,7 +56,7 @@ fun listExtensionPoints(
             ORDER BY mechanism, COALESCE(key, '')
             LIMIT ? OFFSET ?
             """.trimIndent(),
-            listOf(pageSize, (page - 1) * pageSize),
+            listOf(window.limit, window.offset),
         ) { rows ->
             rows.mapRows {
                 ExtensionPoint(
@@ -88,7 +89,7 @@ fun listExtensionPoints(
         ORDER BY mechanism, COALESCE(key, ''), impl_fqn, source_shard_id
         LIMIT ? OFFSET ?
         """.trimIndent(),
-        listOf(arg, arg, pageSize, (page - 1) * pageSize),
+        listOf(arg, arg, window.limit, window.offset),
     ) { rows ->
         rows.mapRows {
             Pending(
@@ -103,7 +104,11 @@ fun listExtensionPoints(
         }
     }
 
-    val sources = if (pending.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (pending.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, pending.map { it.shardId })
+    } else {
+        null
+    }
     ExtensionPointsResponse(
         query = SymbolRequest(command = "list-extension-points", arg = arg),
         results = pending.map {

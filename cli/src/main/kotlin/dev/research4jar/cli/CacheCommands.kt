@@ -15,6 +15,10 @@ import java.time.Duration
  * Go CLI exactly.
  */
 internal fun runCacheCommand(args: Array<String>, io: CliIO) {
+    if (helpRequested(args)) {
+        printCacheHelp(io.out)
+        return
+    }
     if (args.isEmpty() || (args[0] != "stats" && args[0] != "gc")) {
         fail("invalid_arguments", "usage: research4jar cache <stats|gc> [options]", 2)
     }
@@ -25,7 +29,14 @@ internal fun runCacheCommand(args: Array<String>, io: CliIO) {
     var dryRun = false
     var index = 1
     while (index < args.size) {
-        when (val argument = args[index]) {
+        val argument = args[index]
+        if (
+            subcommand == "stats" &&
+            argument in setOf("--max-size", "--max-age", "--dry-run")
+        ) {
+            fail("invalid_arguments", "unknown option: $argument", 2)
+        }
+        when (argument) {
             "--home", "--max-size", "--max-age" -> {
                 val (value, next) = optionValue(args, index, argument)
                 when (argument) {

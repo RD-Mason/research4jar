@@ -140,6 +140,7 @@ private fun dependencyPrecise(
     pageSize: Int,
     includeSourceUsages: Boolean,
 ): DependencyPreciseResponse {
+    requirePageSize(pageSize)
     val sources = loadManifestSources(manifestPath)
     val origins = dependencyOrigins(pointer, sources, lookup, pageSize)
 
@@ -313,8 +314,8 @@ private fun classOrigins(
     if (simple.isEmpty()) {
         simple = term
     }
-    val byShard = manifestByShard(sources)
-    val origins = session.query(
+    data class PendingOrigin(val fqn: String, val shardKey: String, val matchReason: String)
+    val pending = session.query(
         """
         SELECT fqn, source_shard_id,
                CASE
@@ -334,12 +335,13 @@ private fun classOrigins(
         listOf(term, simple, term, simple, term, simple, limitOrDefault(limit)),
     ) { rows ->
         rows.mapRows {
-            val fqn = it.getString(1)
-            val shardId = it.getString(2)
-            val matchReason = it.getString(3)
-            originFromSource(byShard[shardId] ?: emptyManifestSource, matchReason)
-                .copy(fqn = fqn, shardId = shardId)
+            PendingOrigin(it.getString(1), it.getString(2), it.getString(3))
         }
+    }
+    val byShard = ManifestCache.mapSessionRows(session, sources, pending.map { it.shardKey })
+    val origins = pending.map { row ->
+        originFromSource(byShard[row.shardKey] ?: emptyManifestSource, row.matchReason)
+            .copy(fqn = row.fqn)
     }
     dedupeOrigins(origins)
 }
@@ -350,8 +352,8 @@ private fun packageOrigins(
     packageName: String,
     limit: Int,
 ): List<DependencyOrigin> = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
-    val byShard = manifestByShard(sources)
-    val origins = session.query(
+    data class PendingOrigin(val packageName: String, val shardKey: String)
+    val pending = session.query(
         """
         SELECT package_name, source_shard_id
         FROM classes
@@ -363,11 +365,13 @@ private fun packageOrigins(
         listOf(packageName, limitOrDefault(limit)),
     ) { rows ->
         rows.mapRows {
-            val matchedPackage = it.getString(1)
-            val shardId = it.getString(2)
-            originFromSource(byShard[shardId] ?: emptyManifestSource, "package_import")
-                .copy(packageName = matchedPackage, shardId = shardId)
+            PendingOrigin(it.getString(1), it.getString(2))
         }
+    }
+    val byShard = ManifestCache.mapSessionRows(session, sources, pending.map { it.shardKey })
+    val origins = pending.map { row ->
+        originFromSource(byShard[row.shardKey] ?: emptyManifestSource, "package_import")
+            .copy(packageName = row.packageName)
     }
     dedupeOrigins(origins)
 }
@@ -736,9 +740,6 @@ private fun sourceUsageFile(path: Path): Boolean {
     val index = name.lastIndexOf('.')
     return index >= 0 && name.substring(index) in sourceUsageExtensions
 }
-
-private fun manifestByShard(sources: List<CachedManifestRow>): Map<String, CachedManifestRow> =
-    sources.associateBy { it.shardId }
 
 private fun dedupeOrigins(origins: List<DependencyOrigin>): List<DependencyOrigin> {
     val seen = mutableSetOf<String>()

@@ -3,6 +3,7 @@ package dev.research4jar.query
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
 import dev.research4jar.indexer.Research4JarVersions
+import dev.research4jar.runtime.WorkingDirectoryContext
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.security.MessageDigest
@@ -132,9 +133,9 @@ fun projectStatus(
 
 private fun statusProjectDir(projectDir: String?): String =
     if (!projectDir.isNullOrEmpty()) {
-        Paths.get(projectDir).toAbsolutePath().normalize().toString()
+        WorkingDirectoryContext.resolve(projectDir).toString()
     } else {
-        Paths.get("").toAbsolutePath().toString()
+        WorkingDirectoryContext.current().toString()
     }
 
 private fun dependencyProvenanceStatus(projectDir: String): DependencyProvenanceStatus {

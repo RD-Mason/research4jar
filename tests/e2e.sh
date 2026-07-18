@@ -740,7 +740,8 @@ for database in "$concurrent_home"/shards/*.db "$concurrent_home"/sessions/*.db;
   test "$(sqlite3 "$database" 'PRAGMA integrity_check;')" = "ok"
 done
 
-# The Go CLI drives the JVM indexer end to end (research4jar index).
+# The Kotlin/JVM CLI runs the in-process indexing pipeline end to end. The
+# legacy --indexer value remains accepted for command-line compatibility.
 cli_index_project="$work/cli-index-project"
 cli_index_home="$work/cli-index-home"
 mkdir -p "$cli_index_project"
@@ -849,9 +850,10 @@ project3="$work/project3"
 mkdir -p "$project3"
 index3_json="$work/index3.json"
 index3_err="$work/index3.err"
-# --indexer points at nothing: a registry-covered classpath must finish in
-# pure Go without ever launching the JVM indexer. broken.jar (not a zip) can
-# never have a shard, so the covered set lists every jar except it.
+# --indexer points at nothing: a registry-covered classpath must finish from
+# cached/downloaded shards without local JAR extraction or a separate indexer
+# process. broken.jar (not a zip) can never have a shard, so the covered set
+# lists every jar except it.
 covered_jars="$(ls "$jars"/*.jar | grep -v broken.jar | paste -sd, -)"
 if ! "$RESEARCH4JAR_QUERY" index --jars "$covered_jars" --project-dir "$project3" --home "$home3" \
   --registry "http://127.0.0.1:$registry_port" --registry-pubkey "$pubkey" \
@@ -869,7 +871,7 @@ mkdir -p "$mcp_registry_project"
 {
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}'
   printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"index_project\",\"arguments\":{\"project_dir\":\"$mcp_registry_project\",\"home\":\"$mcp_registry_home\",\"jars\":\"$covered_jars\",\"registry\":\"http://127.0.0.1:$registry_port\",\"registry_pubkey\":\"$pubkey\",\"indexer\":\"/nonexistent/research4jar-index\"}}}"
+  printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"index_project\",\"arguments\":{\"project_dir\":\"$mcp_registry_project\",\"home\":\"$mcp_registry_home\",\"jars\":\"$covered_jars\",\"registry\":\"http://127.0.0.1:$registry_port\",\"registry_pubkey\":\"$pubkey\"}}}"
 } | "$RESEARCH4JAR_QUERY" mcp > "$mcp_registry_output"
 python3 - "$mcp_registry_output" "$mcp_registry_project" <<'PY'
 import json
@@ -892,8 +894,8 @@ assert payload["registry_prefetch"]["complete"] is True, payload
 assert pathlib.Path(sys.argv[2], ".research4jar", "project.json").is_file(), payload
 PY
 
-# Partial coverage (broken.jar can have no shard) must fall back to the JVM
-# indexer, which then skips every cached shard and reports the broken jar.
+# Partial coverage (broken.jar can have no shard) must locally extract only
+# cache/registry misses, skip every cached shard, and report the broken jar.
 project4="$work/project4"
 mkdir -p "$project4"
 index4_json="$work/index4.json"
@@ -918,7 +920,7 @@ grep -q "downloaded" "$index3_err" || {
   exit 1
 }
 grep -q "no local extraction" "$index3_err" || {
-  echo "expected the pure-Go session build path:" >&2
+  echo "expected the registry-covered no-local-extraction path:" >&2
   cat "$index3_err" >&2
   exit 1
 }
@@ -957,8 +959,8 @@ response = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert response["total"] >= 1, response
 PY
 
-# The Go-written CLAUDE.md snippet must stay byte-identical to the Kotlin one
-# (both writers dedupe by heading, so drift would double-append).
+# Local-extraction and registry-backed routes use the same Kotlin writer; the
+# resulting CLAUDE.md guidance must stay byte-identical across both routes.
 python3 - "$project/CLAUDE.md" "$project3/CLAUDE.md" <<'PY'
 import pathlib
 import sys
@@ -969,8 +971,8 @@ go_written = pathlib.Path(sys.argv[2]).read_text()
 kotlin_snippet = kotlin_written[kotlin_written.index(heading):]
 go_snippet = go_written[go_written.index(heading):]
 assert kotlin_snippet == go_snippet, (
-    "CLAUDE.md snippet drift between Kotlin and Go writers:\n"
-    f"kotlin: {kotlin_snippet!r}\ngo: {go_snippet!r}"
+    "CLAUDE.md snippet drift between local-extraction and registry-backed routes:\n"
+    f"local: {kotlin_snippet!r}\nregistry: {go_snippet!r}"
 )
 PY
 
@@ -1003,4 +1005,4 @@ if [ -e "$home3/shards/deadbeef@2.db" ]; then
   exit 1
 fi
 
-echo "Research4Jar M2 + M5 end-to-end checks passed."
+echo "Research4Jar JVM end-to-end checks passed."

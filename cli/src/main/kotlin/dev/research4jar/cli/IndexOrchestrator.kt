@@ -73,6 +73,10 @@ object IndexOrchestrator {
     // --- CLI `index` command (Go runIndexCommand) ---
 
     fun runIndexCommand(args: Array<String>, io: CliIO) {
+        if (helpRequested(args)) {
+            printIndexHelp(io.out)
+            return
+        }
         var jars = ""
         var projectDir = "."
         var home = ""

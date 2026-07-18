@@ -1,5 +1,7 @@
 package dev.research4jar.indexer
 
+import dev.research4jar.runtime.WorkingDirectoryContext
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -15,6 +17,38 @@ class PathsTest {
             userHome = "/home/user",
         )
         assertEquals(expected("/custom/research4jar"), paths.home.toString())
+    }
+
+    @Test
+    fun `relative explicit home follows request working directory`() {
+        val requestDirectory = Files.createTempDirectory("r4j-request-cwd")
+        val paths = WorkingDirectoryContext.withDirectory(requestDirectory) {
+            Research4JarPaths.resolve(
+                explicitHome = "relative-home",
+                environment = emptyMap(),
+                osName = "Linux",
+                userHome = "/home/user",
+            )
+        }
+
+        assertEquals(requestDirectory.resolve("relative-home").normalize(), paths.home)
+    }
+
+    @Test
+    fun `relative environment home follows request working directory`() {
+        val requestDirectory = Files.createTempDirectory("r4j-env-home-cwd")
+        val paths = WorkingDirectoryContext.withDirectory(requestDirectory) {
+            Research4JarPaths.resolve(
+                environment = mapOf("RESEARCH4JAR_HOME" to "relative-environment-home"),
+                osName = "Linux",
+                userHome = "/home/user",
+            )
+        }
+
+        assertEquals(
+            requestDirectory.resolve("relative-environment-home").normalize(),
+            paths.home,
+        )
     }
 
     @Test

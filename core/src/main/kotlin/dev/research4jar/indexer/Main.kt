@@ -393,19 +393,32 @@ private const val DELTA_MAX_CHANGED_FRACTION = 0.25
 private fun withinDeltaThreshold(changed: Int, newSetSize: Int): Boolean =
     changed <= newSetSize * DELTA_MAX_CHANGED_FRACTION
 
+// A delta is much cheaper than rebuilding a large session, but repeated FTS5
+// delete/insert generations accumulate segments and leave row/index page holes.
+// The performance audit's deliberately modest 5% swaps grew a 100k-row session
+// from 17.5MB to 47.6MB in 30 generations, grew live FTS pages 4.8x, and slowed
+// 200 LIKE probes from 0.85s after a rebuild to 5.73s. Eight consecutive deltas
+// retain most of the real-world win (an observed 8.9s delta versus a ~192s full
+// merge at 10k jars) while rebasing well before that pathological chain length.
+// Semantics: depths 0..7 may derive another delta, producing depths 1..8;
+// depth 8 forces the ninth changed generation through a full rebuild to depth 0.
+internal const val MAX_CONSECUTIVE_SESSION_DELTAS = 8
+
 private data class SessionDeltaPlan(
     val previousSession: Path,
     val previousFingerprint: String,
     val previousShardIds: Set<String>,
+    val previousDeltaDepth: Int,
 )
 
 /**
  * Delta eligibility, decided once the expected shard set is known and no
  * reusable session exists for its fingerprint: the project pointer names a
  * previous session that exists, carries the current schema version, records
- * its shard set (session_shards), and differs from the expected set by at
- * most [DELTA_MAX_CHANGED_FRACTION]. Null on any miss — the caller then
- * rebuilds fully.
+ * its shard set (session_shards), has fewer than
+ * [MAX_CONSECUTIVE_SESSION_DELTAS] prior deltas, and differs from the expected
+ * set by at most [DELTA_MAX_CHANGED_FRACTION]. Null on any miss — the caller
+ * then rebuilds fully.
  */
 private fun planSessionDelta(
     projectDir: Path,
@@ -420,11 +433,23 @@ private fun planSessionDelta(
         return null
     }
     val previousSession = Paths.get(pointer.sessionDbPath).toAbsolutePath().normalize()
-    val previousShardIds = sessionBuilder.reusableShardSet(previousSession) ?: return null
+    val previousState = sessionBuilder.reusableSessionState(previousSession) ?: return null
+    val previousShardIds = previousState.shardIds
     val expected = expectedShardIds.toSet()
     val changed = (previousShardIds - expected).size + (expected - previousShardIds).size
     if (changed == 0 || !withinDeltaThreshold(changed, expected.size)) return null
-    return SessionDeltaPlan(previousSession, pointer.classpathFingerprint, previousShardIds)
+    if (previousState.deltaDepth >= MAX_CONSECUTIVE_SESSION_DELTAS) {
+        progress(
+            "rebuilding session to compact ${previousState.deltaDepth} consecutive delta updates",
+        )
+        return null
+    }
+    return SessionDeltaPlan(
+        previousSession,
+        pointer.classpathFingerprint,
+        previousShardIds,
+        previousState.deltaDepth,
+    )
 }
 
 /**
@@ -448,7 +473,8 @@ private fun applySessionDelta(
     val target = sessionPathFor(dataPaths, sessionFingerprint(actualIds.toList()))
     progress(
         "delta-updating session: +${added.size} -${removed.size} shards " +
-            "(base ${plan.previousFingerprint})",
+            "(base ${plan.previousFingerprint}, chain " +
+            "${plan.previousDeltaDepth + 1}/$MAX_CONSECUTIVE_SESSION_DELTAS)",
     )
     return try {
         sessionBuilder.buildDelta(plan.previousSession, target, removed, added)
@@ -522,18 +548,21 @@ private fun warn(message: String) {
  * RESEARCH4JAR_SESSION_MAX_AGE (default 30d; "off" or "0" disables). Old
  * sessions otherwise accumulate one multi-hundred-MB file per classpath
  * change with nothing reclaiming them; the swept ones rebuild from cached
- * shards in seconds if a project still needs them.
+ * shards in seconds if a project still needs them. Abandoned .tmp databases
+ * older than the independent safety window are always reclaimed, even when
+ * completed-session expiry is disabled.
  */
 private fun sweepStaleSessions(dataPaths: DataPaths) {
     val configured = System.getenv("RESEARCH4JAR_SESSION_MAX_AGE")?.trim()
-    if (configured != null && (configured.equals("off", ignoreCase = true) || configured == "0")) {
-        return
-    }
-    val maxAge = if (configured.isNullOrEmpty()) {
+    val expiryDisabled =
+        configured != null && (configured.equals("off", ignoreCase = true) || configured == "0")
+    val maxAge = if (expiryDisabled) {
+        null
+    } else if (configured.isNullOrEmpty()) {
         Duration.ofDays(30)
     } else {
         try {
-            dev.research4jar.cache.parseAge(configured)
+            dev.research4jar.cache.parseAge(configured).takeIf { it > Duration.ZERO }
         } catch (exception: IllegalArgumentException) {
             warn("RESEARCH4JAR_SESSION_MAX_AGE: ${exception.message}; using default 30d")
             Duration.ofDays(30)
@@ -542,9 +571,22 @@ private fun sweepStaleSessions(dataPaths: DataPaths) {
     val sweep = dev.research4jar.cache.collectStaleSessions(dataPaths, maxAge)
     if (sweep.removed > 0) {
         val reclaimedMb = sweep.reclaimedBytes / (1024 * 1024)
+        val removedKinds = buildList {
+            if (sweep.removedSessions > 0) {
+                add("${sweep.removedSessions} expired session(s)")
+            }
+            if (sweep.removedTemporaries > 0) {
+                add("${sweep.removedTemporaries} abandoned build temporary file(s)")
+            }
+        }.joinToString(" and ")
         progress(
-            "removed ${sweep.removed} stale session(s), reclaimed ${reclaimedMb}MB " +
-                "(unused for ${maxAge.toDays()}d; set RESEARCH4JAR_SESSION_MAX_AGE=off to keep them)",
+            "removed $removedKinds, reclaimed ${reclaimedMb}MB" +
+                if (maxAge != null) {
+                    " (sessions unused for ${maxAge.toDays()}d; " +
+                        "set RESEARCH4JAR_SESSION_MAX_AGE=off to keep them)"
+                } else {
+                    " (session expiry disabled)"
+                },
         )
     }
 }

@@ -23,6 +23,17 @@ object Research4JarVersions {
      * M6 == 4: search_symbols becomes a view over the base tables (the
      * materialized copy and its four indexes were 65% of the session bytes)
      * and derived columns are computed set-based in SQL.
+     * M6 == 5: adds shard/range bookkeeping plus string_constants_fts for
+     * incremental session updates and indexed string substring search.
+     * M6 == 6: adds classes_fts and methods_fts; old v5 sessions remain
+     * query-compatible through scan fallbacks, but must rebuild to receive
+     * the new search latency.
+     * M6 == 7: stores the repeated per-row source shard reference as a compact
+     * ordered INTEGER key; session_shards retains the canonical text id and
+     * query responses resolve the key back through that table.
+     * M6 == 8: removes the repeated owner#name method symbol. Queries derive
+     * it from the owning class and compact method name; owner_resolved keeps
+     * the legacy NULL-symbol semantics for malformed/orphan shard rows.
      */
-    const val SESSION = 5
+    const val SESSION = 8
 }

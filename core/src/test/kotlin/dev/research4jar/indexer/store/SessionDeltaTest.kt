@@ -1,6 +1,7 @@
 package dev.research4jar.indexer.store
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import dev.research4jar.indexer.MAX_CONSECUTIVE_SESSION_DELTAS
 import dev.research4jar.indexer.extract.ConfigProperty
 import dev.research4jar.indexer.extract.ExtractedAnnotation
 import dev.research4jar.indexer.extract.ExtractedBeanDefinition
@@ -48,8 +49,8 @@ class SessionDeltaTest {
         val charlie = shard("charlie")
         val delta = shard("delta")
         // Corrupt-shard orphans (a method whose class row is gone) merge with
-        // a NULL symbol. alpha's rides the delta DELETE mirror and delta's
-        // the delta INSERT mirror; both must leave methods_fts sound.
+        // an unresolved owner. Their names still belong in methods_fts; alpha's
+        // rides the delta DELETE mirror and delta's the delta INSERT mirror.
         injectOrphanMethod(alpha.path)
         injectOrphanMethod(delta.path)
 
@@ -65,6 +66,9 @@ class SessionDeltaTest {
         val viaFull = root.resolve("full-session.db")
         SessionBuilder().build(viaFull, listOf(bravo, charlie, delta))
 
+        assertEquals(0, SessionBuilder().reusableSessionState(previous)?.deltaDepth)
+        assertEquals(1, SessionBuilder().reusableSessionState(viaDelta)?.deltaDepth)
+        assertEquals(0, SessionBuilder().reusableSessionState(viaFull)?.deltaDepth)
         assertEquals(canonicalDump(viaFull), canonicalDump(viaDelta))
         // The FTS5 shadows are maintained incrementally on the delta path
         // (mirrored deletes + per-shard inserts) while full builds rebuild
@@ -73,14 +77,26 @@ class SessionDeltaTest {
         // rows either way.
         assertFtsIntegrity(viaDelta)
         val probes = listOf(
-            "SELECT s.value, s.source_shard_id FROM string_constants_fts f " +
-                "JOIN string_constants s ON s.id = f.rowid WHERE f.value LIKE '%from%'",
-            "SELECT c.fqn, c.kind, c.source_shard_id FROM classes_fts f " +
-                "JOIN classes c ON c.id = f.rowid WHERE f.fqn LIKE '%Helper%'",
-            "SELECT m.symbol, m.source_shard_id FROM methods_fts f " +
-                "JOIN methods m ON m.id = f.rowid WHERE f.symbol LIKE '%#bean%'",
-            "SELECT m.symbol, m.descriptor, m.source_shard_id FROM methods_fts f " +
-                "JOIN methods m ON m.id = f.rowid WHERE f.descriptor LIKE '%Helper;%'",
+            "SELECT s.value, ss.shard_id FROM string_constants_fts f " +
+                "JOIN string_constants s ON s.id = f.rowid " +
+                "JOIN session_shards ss ON ss.shard_key = s.source_shard_id " +
+                "WHERE f.value LIKE '%from%'",
+            "SELECT c.fqn, c.kind, ss.shard_id FROM classes_fts f " +
+                "JOIN classes c ON c.id = f.rowid " +
+                "JOIN session_shards ss ON ss.shard_key = c.source_shard_id " +
+                "WHERE f.fqn LIKE '%Helper%'",
+            "SELECT m.name, ss.shard_id FROM methods_fts f " +
+                "JOIN methods m ON m.id = f.rowid " +
+                "JOIN session_shards ss ON ss.shard_key = m.source_shard_id " +
+                "WHERE f.name LIKE '%bean%'",
+            "SELECT m.name, m.descriptor, ss.shard_id FROM methods_fts f " +
+                "JOIN methods m ON m.id = f.rowid " +
+                "JOIN session_shards ss ON ss.shard_key = m.source_shard_id " +
+                "WHERE f.descriptor LIKE '%Helper;%'",
+            "SELECT m.name, ss.shard_id FROM methods_fts f " +
+                "JOIN methods m ON m.id = f.rowid " +
+                "JOIN session_shards ss ON ss.shard_key = m.source_shard_id " +
+                "WHERE f.name LIKE '%orphaned%'",
         )
         for (probe in probes) {
             assertEquals(ftsMatches(viaFull, probe), ftsMatches(viaDelta, probe), probe)
@@ -90,17 +106,9 @@ class SessionDeltaTest {
             )
         }
         // Both build paths must carry exactly delta's orphan (alpha's was
-        // removed), and the partial orphan index the query side unions over
-        // must exist in the session either path produced.
-        assertEquals(1, scalar(viaDelta, "SELECT COUNT(*) FROM methods WHERE symbol IS NULL"))
-        assertEquals(1, scalar(viaFull, "SELECT COUNT(*) FROM methods WHERE symbol IS NULL"))
-        assertEquals(
-            1,
-            scalar(
-                viaDelta,
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'idx_s_methods_orphan'",
-            ),
-        )
+        // removed); its compact name shadow is covered by the probes above.
+        assertEquals(1, scalar(viaDelta, "SELECT COUNT(*) FROM methods WHERE owner_resolved = 0"))
+        assertEquals(1, scalar(viaFull, "SELECT COUNT(*) FROM methods WHERE owner_resolved = 0"))
         assertTrue(SessionBuilder().isReusable(viaDelta))
         assertEquals(
             setOf(bravo.shardId, charlie.shardId, delta.shardId),
@@ -111,6 +119,50 @@ class SessionDeltaTest {
             setOf(alpha.shardId, bravo.shardId, charlie.shardId),
             SessionBuilder().reusableShardSet(previous),
         )
+        assertNoTemporaries(root)
+    }
+
+    @Test
+    fun `session builder tracks a multi-generation delta chain and full build resets it`() {
+        val root = Files.createTempDirectory("research4jar-delta-chain")
+        fun shard(name: String): SessionShard {
+            val path = root.resolve("$name-shard.db")
+            ShardWriter().write(path, "sha-$name", richJar(name))
+            return SessionShard("sha-$name@t", path)
+        }
+
+        val builder = SessionBuilder()
+        val active = (1..8).map { shard("chain$it") }.toMutableList()
+        var previous = root.resolve("generation-0.db")
+        builder.build(previous, active)
+        assertEquals(0, builder.reusableSessionState(previous)?.deltaDepth)
+
+        // Exercise the entire policy-sized chain with real class/method/string
+        // rows. Every generation must carry the atomically incremented depth,
+        // remain logically equal to a clean merge, and keep all three external-
+        // content FTS shadows aligned through repeated delete/insert cycles.
+        for (generation in 1..MAX_CONSECUTIVE_SESSION_DELTAS) {
+            val removed = active.removeAt(0)
+            val added = shard("chain${generation + 8}")
+            active += added
+            val delta = root.resolve("generation-$generation.db")
+            builder.buildDelta(previous, delta, setOf(removed.shardId), listOf(added))
+
+            assertEquals(generation, builder.reusableSessionState(delta)?.deltaDepth)
+            assertFtsIntegrity(delta)
+            val full = root.resolve("generation-$generation-full.db")
+            builder.build(full, active)
+            assertEquals(0, builder.reusableSessionState(full)?.deltaDepth)
+            assertFtsIntegrity(full)
+            assertEquals(canonicalDump(full), canonicalDump(delta), "generation $generation")
+            previous = delta
+        }
+
+        val rebased = root.resolve("rebased.db")
+        builder.build(rebased, active)
+        assertEquals(0, builder.reusableSessionState(rebased)?.deltaDepth)
+        assertFtsIntegrity(rebased)
+        assertEquals(canonicalDump(rebased), canonicalDump(previous))
         assertNoTemporaries(root)
     }
 
@@ -129,6 +181,83 @@ class SessionDeltaTest {
         }
         assertFalse(Files.exists(root.resolve("target-session.db")))
         assertNoTemporaries(root)
+    }
+
+    @Test
+    fun `delta shard keys use the full signed range and fail safely without a gap`() {
+        val root = Files.createTempDirectory("research4jar-delta-shard-keys")
+        fun emptyShard(id: String): SessionShard {
+            val path = root.resolve("$id-shard.db")
+            ShardWriter().write(path, "sha-$id", ExtractedJar(null))
+            return SessionShard(id, path)
+        }
+        val alpha = emptyShard("a@2")
+        val omega = emptyShard("z@2")
+        val middle = emptyShard("m@2")
+        val builder = SessionBuilder()
+
+        val boundaryBase = root.resolve("boundary-base.db")
+        builder.build(boundaryBase, listOf(alpha, omega))
+        DriverManager.getConnection("jdbc:sqlite:$boundaryBase").use { connection ->
+            connection.prepareStatement(
+                "UPDATE session_shards SET shard_key = CASE shard_id " +
+                    "WHEN 'a@2' THEN ? ELSE ? END",
+            ).use { statement ->
+                statement.setLong(1, Long.MIN_VALUE)
+                statement.setLong(2, Long.MAX_VALUE)
+                statement.executeUpdate()
+            }
+        }
+        val boundaryDelta = root.resolve("boundary-delta.db")
+        builder.buildDelta(boundaryBase, boundaryDelta, emptySet(), listOf(middle))
+        DriverManager.getConnection("jdbc:sqlite:$boundaryDelta").use { connection ->
+            val ordered = connection.createStatement().executeQuery(
+                "SELECT shard_id, shard_key FROM session_shards ORDER BY shard_id",
+            ).use { rows ->
+                buildList {
+                    while (rows.next()) add(rows.getString(1) to rows.getLong(2))
+                }
+            }
+            assertEquals(listOf("a@2", "m@2", "z@2"), ordered.map { it.first })
+            assertTrue(ordered[0].second < ordered[1].second)
+            assertTrue(ordered[1].second < ordered[2].second)
+        }
+
+        val exhaustedBase = root.resolve("exhausted-base.db")
+        builder.build(exhaustedBase, listOf(alpha, omega))
+        DriverManager.getConnection("jdbc:sqlite:$exhaustedBase").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("UPDATE session_shards SET shard_key = 0 WHERE shard_id = 'a@2'")
+                statement.execute("UPDATE session_shards SET shard_key = 1 WHERE shard_id = 'z@2'")
+            }
+        }
+        val exhaustedTarget = root.resolve("exhausted-target.db")
+        assertFailsWith<ShardKeySpaceExhaustedException> {
+            builder.buildDelta(exhaustedBase, exhaustedTarget, emptySet(), listOf(middle))
+        }
+        assertFalse(Files.exists(exhaustedTarget))
+        assertNoTemporaries(root)
+
+        val compactTailBase = root.resolve("compact-tail-base.db")
+        builder.build(compactTailBase, listOf(alpha, middle))
+        val finalTail = emptyShard("zz@2")
+        val compactTailDelta = root.resolve("compact-tail-delta.db")
+        builder.buildDelta(
+            compactTailBase,
+            compactTailDelta,
+            emptySet(),
+            listOf(omega, finalTail),
+        )
+        DriverManager.getConnection("jdbc:sqlite:$compactTailDelta").use { connection ->
+            val keys = connection.createStatement().executeQuery(
+                "SELECT shard_key FROM session_shards ORDER BY shard_id",
+            ).use { rows ->
+                buildList {
+                    while (rows.next()) add(rows.getLong(1))
+                }
+            }
+            assertEquals(listOf(0L, 65_536L, 131_072L, 196_608L), keys)
+        }
     }
 
     @Test
@@ -179,6 +308,60 @@ class SessionDeltaTest {
         val stderr = runIndex(jars, project, home)
         assertFalse(stderr.contains("delta-updating"), stderr)
         assertEquals(4, SessionBuilder().reusableShardSet(sessionOf(project))?.size)
+    }
+
+    @Test
+    fun `pipeline allows eight deltas then fully rebases the ninth generation`() {
+        val root = Files.createTempDirectory("research4jar-delta-depth")
+        val jars = root.resolve("jars")
+        val project = root.resolve("project")
+        val home = root.resolve("home")
+        Files.createDirectories(jars)
+        assertEquals(8, MAX_CONSECUTIVE_SESSION_DELTAS)
+        val active = (1..8).toMutableList()
+        active.forEach { writeServiceJar(jars.resolve("lib$it.jar"), "com.example.Impl$it") }
+
+        assertFalse(runIndex(jars, project, home).contains("delta-updating"))
+        assertEquals(0, SessionBuilder().reusableSessionState(sessionOf(project))?.deltaDepth)
+
+        for (generation in 1..MAX_CONSECUTIVE_SESSION_DELTAS + 1) {
+            val removed = active.removeAt(0)
+            val added = generation + 8
+            Files.delete(jars.resolve("lib$removed.jar"))
+            writeServiceJar(jars.resolve("lib$added.jar"), "com.example.Impl$added")
+            active += added
+
+            val stderr = runIndex(jars, project, home)
+            val session = sessionOf(project)
+            if (generation <= MAX_CONSECUTIVE_SESSION_DELTAS) {
+                assertContains(stderr, "delta-updating session: +1 -1 shards")
+                assertContains(
+                    stderr,
+                    "chain $generation/$MAX_CONSECUTIVE_SESSION_DELTAS",
+                )
+                assertEquals(generation, SessionBuilder().reusableSessionState(session)?.deltaDepth)
+            } else {
+                assertFalse(stderr.contains("delta-updating"), stderr)
+                assertContains(stderr, "rebuilding session to compact 8 consecutive delta updates")
+                assertEquals(0, SessionBuilder().reusableSessionState(session)?.deltaDepth)
+            }
+            assertEquals(8, SessionBuilder().reusableShardSet(session)?.size)
+            assertFtsIntegrity(session)
+        }
+
+        // The ninth-generation policy build is a genuine from-scratch result:
+        // deleting it makes an identical run rebuild through the no-base path,
+        // and both logical data and FTS integrity agree exactly.
+        val policyRebase = root.resolve("policy-rebase.db")
+        val session = sessionOf(project)
+        Files.copy(session, policyRebase)
+        Files.delete(session)
+        assertFalse(runIndex(jars, project, home).contains("delta-updating"))
+        val forcedFull = sessionOf(project)
+        assertEquals(0, SessionBuilder().reusableSessionState(forcedFull)?.deltaDepth)
+        assertEquals(canonicalDump(forcedFull), canonicalDump(policyRebase))
+        assertFtsIntegrity(policyRebase)
+        assertFtsIntegrity(forcedFull)
     }
 
     @Test
@@ -255,7 +438,7 @@ class SessionDeltaTest {
     /**
      * Hand-crafts the corrupt-shard case: a method row whose class row is
      * missing, which [SessionBuilder.merge]'s LEFT JOIN turns into a NULL
-     * session symbol. ShardWriter can never emit one, so the row is spliced
+     * unresolved session owner. ShardWriter can never emit one, so the row is spliced
      * into the finished shard file.
      */
     private fun injectOrphanMethod(shard: Path) {
@@ -367,61 +550,71 @@ class SessionDeltaTest {
             "session_meta" to "SELECT session_schema_version FROM session_meta",
             "session_shards" to "SELECT shard_id FROM session_shards",
             "classes" to
-                "SELECT fqn, kind, super_fqn, modifiers, is_abstract, source_file, " +
-                "simple_name, package_name, source_shard_id FROM classes",
+                "SELECT c.fqn, c.kind, c.super_fqn, c.modifiers, c.is_abstract, c.source_file, " +
+                "c.simple_name, c.package_name, ss.shard_id FROM classes c " +
+                "JOIN session_shards ss ON ss.shard_key = c.source_shard_id",
             "class_interfaces" to
-                "SELECT c.fqn, ci.interface_fqn, ci.source_shard_id " +
-                "FROM class_interfaces ci JOIN classes c ON c.id = ci.class_id",
+                "SELECT c.fqn, ci.interface_fqn, ss.shard_id " +
+                "FROM class_interfaces ci JOIN classes c ON c.id = ci.class_id " +
+                "JOIN session_shards ss ON ss.shard_key = ci.source_shard_id",
             "methods" to
-                "SELECT c.fqn, m.name, m.descriptor, m.return_fqn, m.modifiers, m.symbol, " +
-                "m.source_shard_id FROM methods m JOIN classes c ON c.id = m.class_id",
+                "SELECT c.fqn, m.name, m.descriptor, m.return_fqn, m.modifiers, m.owner_resolved, " +
+                "ss.shard_id FROM methods m JOIN classes c ON c.id = m.class_id " +
+                "JOIN session_shards ss ON ss.shard_key = m.source_shard_id",
             "annotations" to
                 """
                 SELECT a.target_kind,
                        CASE WHEN a.target_kind = 'class' THEN c.fqn
                             ELSE mc.fqn || '#' || m.name || m.descriptor END,
-                       a.annotation_fqn, a.attributes, a.source_shard_id
+                       a.annotation_fqn, a.attributes, ss.shard_id
                 FROM annotations a
                 LEFT JOIN classes c ON a.target_kind = 'class' AND c.id = a.target_id
                 LEFT JOIN methods m ON a.target_kind = 'method' AND m.id = a.target_id
                 LEFT JOIN classes mc ON mc.id = m.class_id
+                JOIN session_shards ss ON ss.shard_key = a.source_shard_id
                 """.trimIndent(),
             "conditions" to
                 """
                 SELECT o.target_kind,
                        CASE WHEN o.target_kind = 'class' THEN c.fqn
                             ELSE mc.fqn || '#' || m.name || m.descriptor END,
-                       o.type, o.ref_value, o.source_shard_id
+                       o.type, o.ref_value, ss.shard_id
                 FROM conditions o
                 LEFT JOIN classes c ON o.target_kind = 'class' AND c.id = o.target_id
                 LEFT JOIN methods m ON o.target_kind = 'method' AND m.id = o.target_id
                 LEFT JOIN classes mc ON mc.id = m.class_id
+                JOIN session_shards ss ON ss.shard_key = o.source_shard_id
                 """.trimIndent(),
             "bean_definitions" to
                 """
                 SELECT b.config_fqn,
                        CASE WHEN b.method_id IS NULL THEN '<none>'
                             ELSE mc.fqn || '#' || m.name || m.descriptor END,
-                       b.bean_type_fqn, b.bean_name, b.source_shard_id
+                       b.bean_type_fqn, b.bean_name, ss.shard_id
                 FROM bean_definitions b
                 LEFT JOIN methods m ON m.id = b.method_id
                 LEFT JOIN classes mc ON mc.id = m.class_id
+                JOIN session_shards ss ON ss.shard_key = b.source_shard_id
                 """.trimIndent(),
             "string_constants" to
                 """
                 SELECT c.fqn,
                        CASE WHEN sc.method_id IS NULL THEN '<none>'
                             ELSE m.name || m.descriptor END,
-                       sc.value, sc.source_shard_id
+                       sc.value, ss.shard_id
                 FROM string_constants sc
                 JOIN classes c ON c.id = sc.class_id
                 LEFT JOIN methods m ON m.id = sc.method_id
+                JOIN session_shards ss ON ss.shard_key = sc.source_shard_id
                 """.trimIndent(),
             "config_properties" to
-                "SELECT prefix, name, type_fqn, default_val, description, source_fqn, " +
-                "source_shard_id FROM config_properties",
+                "SELECT cp.prefix, cp.name, cp.type_fqn, cp.default_val, cp.description, " +
+                "cp.source_fqn, ss.shard_id FROM config_properties cp " +
+                "JOIN session_shards ss ON ss.shard_key = cp.source_shard_id",
             "spi_registrations" to
-                "SELECT mechanism, key, impl_fqn, source_shard_id FROM spi_registrations",
+                "SELECT spi.mechanism, spi.key, spi.impl_fqn, ss.shard_id " +
+                "FROM spi_registrations spi " +
+                "JOIN session_shards ss ON ss.shard_key = spi.source_shard_id",
         )
     }
 }

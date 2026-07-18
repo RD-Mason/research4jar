@@ -52,6 +52,16 @@ WHERE f.value LIKE ?
 ORDER BY s.value, c.fqn, s.source_shard_id, COALESCE(m.name, ''), COALESCE(m.descriptor, '')
 LIMIT ? OFFSET ?"""
 
+/** Density route for find-string's single FTS value arm. */
+internal fun findStringFtsDensityPlan(term: String): FtsDensityPlan =
+    FtsDensityPlan(
+        populationTable = "string_constants",
+        populationIndex = "idx_s_strconst_value",
+        probes = listOf(
+            FtsDensityProbe(STRING_FTS_VALUE_PROBE_SQL, listOf("%$term%")),
+        ),
+    )
+
 /**
  * Whether the trigram FTS path may serve [term]. fts5's LIKE pushdown needs
  * one run of three or more non-wildcard codepoints to probe the index —
@@ -77,7 +87,10 @@ fun findString(
     page: Int,
     pageSize: Int,
 ): StringSearchResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
-    val (total, pending) = if (trigramSearchable(text)) {
+    val (total, pending) = if (
+        trigramSearchable(text) &&
+        !preferLegacyForDenseFts(session, findStringFtsDensityPlan(text))
+    ) {
         try {
             fetchPage(session, FIND_STRING_FTS_COUNT_SQL, FIND_STRING_FTS_SQL, "%$text%", page, pageSize)
         } catch (_: SQLException) {
@@ -88,7 +101,11 @@ fun findString(
         fetchLegacyPage(session, text, page, pageSize)
     }
 
-    val sources = if (pending.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (pending.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, pending.map { it.shardId })
+    } else {
+        null
+    }
     StringSearchResponse(
         query = SymbolRequest(command = "find-string", arg = text),
         results = pending.map { it.constant.copy(sourceJar = sourceJarName(sources, it.shardId)) },
@@ -117,8 +134,9 @@ private fun fetchPage(
     page: Int,
     pageSize: Int,
 ): Pair<Int, List<PendingString>> {
+    val window = pageWindow(page, pageSize)
     val total = session.queryInt(countSql, listOf(pattern))
-    val pending = session.query(pageSql, listOf(pattern, pageSize, (page - 1) * pageSize)) { rows ->
+    val pending = session.query(pageSql, listOf(pattern, window.limit, window.offset)) { rows ->
         rows.mapRows {
             val methodName = it.getString(3)
             val methodDescriptor = it.getString(4)

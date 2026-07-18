@@ -5,6 +5,8 @@ import dev.research4jar.envcheck.Options as EnvCheckOptions
 import dev.research4jar.query.ProjectIndex
 import dev.research4jar.query.ProjectNotFoundException
 import dev.research4jar.query.ProjectPointerData
+import dev.research4jar.query.MAX_PAGE_SIZE
+import dev.research4jar.query.MAX_RESULT_WINDOW
 import dev.research4jar.query.projectStatus
 import java.io.PrintStream
 
@@ -41,6 +43,28 @@ internal val QUERY_COMMANDS = setOf(
     "open-symbol",
     "why-dependency",
 )
+
+internal val PAGINATED_QUERY_COMMANDS = setOf(
+    "find-config-properties", "find-implementations", "find-by-annotation",
+    "get-bean-definitions", "find-string", "list-extension-points", "find-class",
+    "find-method", "list-packages", "search-symbol",
+)
+
+private val BASE_QUERY_OPTIONS = setOf("--project-dir", "--format", "--home")
+private val PAGING_OPTIONS = setOf("--page", "--page-size")
+private val SOURCE_USAGE_OPTIONS = setOf("--source-grep", "--no-source-grep")
+private val PARSED_OPTIONS = BASE_QUERY_OPTIONS + PAGING_OPTIONS + SOURCE_USAGE_OPTIONS + "--direct"
+
+internal fun optionsForQuery(command: String): Set<String> = buildSet {
+    addAll(BASE_QUERY_OPTIONS)
+    if (command in PAGINATED_QUERY_COMMANDS) addAll(PAGING_OPTIONS)
+    if (command == "find-implementations" || command == "find-by-annotation") add("--direct")
+}
+
+internal fun preciseLookupOptions(): Set<String> =
+    BASE_QUERY_OPTIONS + "--page-size" + SOURCE_USAGE_OPTIONS
+
+internal fun methodLookupOptions(): Set<String> = BASE_QUERY_OPTIONS + PAGING_OPTIONS
 
 /** Everything Go's parseOptions produces (main.go options struct). */
 internal data class CommandOptions(
@@ -85,7 +109,7 @@ private fun dispatch(argv: Array<String>, io: CliIO): Int {
             0
         }
 
-        command == "mcp" -> runMcpCommand(io)
+        command == "mcp" -> runMcpCommand(rest, io)
 
         command == "index" -> {
             IndexOrchestrator.runIndexCommand(rest, io)
@@ -135,15 +159,28 @@ private fun dispatch(argv: Array<String>, io: CliIO): Int {
     }
 }
 
-private fun runMcpCommand(io: CliIO): Int = try {
-    McpServer.serve(System.`in`, io.out)
-    0
-} catch (exception: Exception) {
-    io.err.println("research4jar mcp: ${errMessage(exception)}")
-    1
+private fun runMcpCommand(args: Array<String>, io: CliIO): Int {
+    if (helpRequested(args)) {
+        printMcpHelp(io.out)
+        return 0
+    }
+    if (args.isNotEmpty()) {
+        fail("invalid_arguments", "mcp accepts no arguments", 2)
+    }
+    return try {
+        McpServer.serve(System.`in`, io.out)
+        0
+    } catch (exception: Exception) {
+        io.err.println("research4jar mcp: ${errMessage(exception)}")
+        1
+    }
 }
 
 private fun runDoctorCommand(args: Array<String>, io: CliIO): Int {
+    if (helpRequested(args)) {
+        printDoctorHelp(io.out)
+        return 0
+    }
     var projectDir = ""
     var sourceBuild = false
     var format = "text"
@@ -225,7 +262,11 @@ private fun runStatusCommand(args: Array<String>, io: CliIO): Int {
 
 // --- shared option parsing (Go parseOptions / optionValue / positiveInteger) ---
 
-internal fun parseOptions(args: Array<String>, argOptional: Boolean): CommandOptions {
+internal fun parseOptions(
+    args: Array<String>,
+    argOptional: Boolean,
+    allowedOptions: Set<String>,
+): CommandOptions {
     var arg = ""
     var projectDir = ""
     var format = "json"
@@ -236,7 +277,11 @@ internal fun parseOptions(args: Array<String>, argOptional: Boolean): CommandOpt
     var sourceGrep = true
     var index = 0
     while (index < args.size) {
-        when (val argument = args[index]) {
+        val argument = args[index]
+        if (argument in PARSED_OPTIONS && argument !in allowedOptions) {
+            fail("invalid_arguments", "unknown option: $argument", 2)
+        }
+        when (argument) {
             "--project-dir" -> {
                 val (value, next) = optionValue(args, index, argument)
                 projectDir = value
@@ -260,7 +305,7 @@ internal fun parseOptions(args: Array<String>, argOptional: Boolean): CommandOpt
 
             "--page-size" -> {
                 val (value, next) = optionValue(args, index, argument)
-                pageSize = positiveInteger(argument, value)
+                pageSize = positiveInteger(argument, value, MAX_PAGE_SIZE)
                 index = next
             }
 
@@ -288,6 +333,17 @@ internal fun parseOptions(args: Array<String>, argOptional: Boolean): CommandOpt
     if (arg.isEmpty() && !argOptional) {
         fail("invalid_arguments", "query argument is required", 2)
     }
+    val lastRequested = Math.addExact(
+        Math.multiplyExact((page - 1).toLong(), pageSize.toLong()),
+        pageSize.toLong(),
+    )
+    if (lastRequested > MAX_RESULT_WINDOW) {
+        fail(
+            "invalid_arguments",
+            "requested page exceeds the $MAX_RESULT_WINDOW-result window",
+            2,
+        )
+    }
     return CommandOptions(
         arg = arg,
         projectDir = projectDir,
@@ -311,10 +367,13 @@ internal fun optionValue(args: Array<String>, index: Int, option: String): Pair<
     return args[index + 1] to index + 1
 }
 
-private fun positiveInteger(option: String, value: String): Int {
+private fun positiveInteger(option: String, value: String, maximum: Int? = null): Int {
     val number = value.toIntOrNull()
     if (number == null || number < 1) {
         fail("invalid_arguments", "$option must be a positive integer", 2)
+    }
+    if (maximum != null && number > maximum) {
+        fail("invalid_arguments", "$option must be between 1 and $maximum", 2)
     }
     return number
 }

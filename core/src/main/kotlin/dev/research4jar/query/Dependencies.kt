@@ -157,7 +157,7 @@ private fun classDependencyTargets(
         "SELECT source_shard_id FROM classes WHERE fqn = ? ORDER BY source_shard_id",
         listOf(classFqn),
     ) { rows -> rows.mapRows { it.getString(1) } }
-    val byShard = sources.associateBy { it.shardId }
+    val byShard = ManifestCache.mapSessionRows(session, sources, shardIds)
     val targets = mutableListOf<DependencyTarget>()
     for (shardId in shardIds) {
         val source = byShard[shardId] ?: continue

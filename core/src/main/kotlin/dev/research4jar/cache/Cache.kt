@@ -1,5 +1,6 @@
 package dev.research4jar.cache
 
+import dev.research4jar.runtime.SessionFileLease
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
 import dev.research4jar.indexer.DataPaths
@@ -18,9 +19,18 @@ import java.time.Instant
 /**
  * Shard and session lifecycle, ported from querier/internal/cache/cache.go:
  * usage statistics and garbage collection (stale extractor versions, orphan
- * files, LRU eviction over a size budget, and session expiry). JSON field
- * names and shapes match the Go structs exactly.
+ * files, abandoned build temporaries, LRU eviction over a size budget, and
+ * session expiry). JSON field names and shapes match the Go structs exactly.
  */
+
+/**
+ * A healthy session build updates its temporary database continuously and
+ * normally finishes in seconds or minutes (even the 10k-jar stress build is a
+ * few minutes). Keeping a full day of slack prevents cache maintenance from
+ * racing a slow active build while still reclaiming multi-GB files left by a
+ * killed JVM, power loss, or machine restart.
+ */
+internal val SESSION_TEMP_STALE_AFTER: Duration = Duration.ofHours(24)
 
 /** Summarizes the global cache (Go cache.Stats). */
 data class CacheStats(
@@ -30,6 +40,7 @@ data class CacheStats(
     @JsonProperty("shards_local") val shardsLocal: Int,
     @JsonProperty("shards_remote") val shardsRemote: Int,
     @JsonProperty("shards_stale_version") val shardsStaleVersion: Int,
+    // Includes untracked shard databases and stale session-build .tmp files.
     @JsonProperty("orphan_files") val orphanFiles: Int,
     @JsonProperty("orphan_bytes") val orphanBytes: Long,
     @JsonProperty("session_count") val sessionCount: Int,
@@ -94,6 +105,10 @@ fun collectStats(dataPaths: DataPaths, currentExtractorVersion: Int): CacheStats
             orphanBytes += file.size
         }
     }
+    for (file in staleSessionTemporaries(dataPaths, Instant.now())) {
+        orphanFiles++
+        orphanBytes += file.size
+    }
     var sessionCount = 0
     var sessionBytes = 0L
     for (file in listFiles(dataPaths.sessions, ".db")) {
@@ -115,9 +130,10 @@ fun collectStats(dataPaths: DataPaths, currentExtractorVersion: Int): CacheStats
 }
 
 /**
- * Collects garbage in four passes (Go cache.GC): shards from older extractor
- * versions, shard files the manifest does not track, least-recently-used
- * shards beyond the size budget, and sessions older than the age limit.
+ * Collects garbage in four policy passes (Go cache.GC): shards from older
+ * extractor versions; orphan shard files and abandoned session temporaries;
+ * least-recently-used shards beyond the size budget; and sessions older than
+ * the age limit.
  * Sessions are always rebuildable from shards by the next index run.
  */
 fun gc(dataPaths: DataPaths, currentExtractorVersion: Int, options: GCOptions): GCResult {
@@ -170,6 +186,19 @@ fun gc(dataPaths: DataPaths, currentExtractorVersion: Int, options: GCOptions): 
         }
     }
 
+    // A normal exception is covered by the writer's finally block. These are
+    // the leftovers that cannot run finally (SIGKILL, OOM-kill, power loss).
+    // Fresh files are treated as active leases and are never reported or
+    // removed; actual deletion re-checks mtime to close the listing race.
+    val temporaryCutoffNow = Instant.now()
+    for (file in staleSessionTemporaries(dataPaths, temporaryCutoffNow)) {
+        val removedNow = options.dryRun || deleteIfStillStaleSessionTemporary(file.path, temporaryCutoffNow)
+        if (!removedNow) continue
+        removed += file.path.fileName.toString()
+        reclaimedBytes += file.size
+        removedOrphans++
+    }
+
     // LRU eviction over the size budget. Manifest.list orders oldest access first.
     var remaining: List<ManifestRow> = current
     if (options.maxShardBytes > 0) {
@@ -204,13 +233,13 @@ fun gc(dataPaths: DataPaths, currentExtractorVersion: Int, options: GCOptions): 
     var remainingSessionBytes = 0L
     for (file in listFiles(dataPaths.sessions, ".db")) {
         if (cutoff != null && file.modTime.toInstant().isBefore(cutoff)) {
-            removed += file.path.fileName.toString()
-            reclaimedBytes += file.size
-            removedSessions++
-            if (!options.dryRun) {
-                Files.deleteIfExists(file.path)
+            val removedNow = options.dryRun || deleteIfStillStaleSession(file.path, cutoff)
+            if (removedNow) {
+                removed += file.path.fileName.toString()
+                reclaimedBytes += file.size
+                removedSessions++
+                continue
             }
-            continue
         }
         remainingSessions++
         remainingSessionBytes += file.size
@@ -231,33 +260,79 @@ fun gc(dataPaths: DataPaths, currentExtractorVersion: Int, options: GCOptions): 
 }
 
 /**
- * Removes sessions unused for longer than [maxAge]. Sessions are
+ * Removes sessions unused for longer than [maxAge] (unless null) and always
+ * removes abandoned session-build temporaries older than
+ * [SESSION_TEMP_STALE_AFTER]. Sessions are
  * content-addressed caches, always rebuildable by the next index run; mtime
  * approximates last use because both the index reuse path and the query
  * engine touch a session when they open it. This is the safe subset of [gc]
- * that the indexer runs automatically: an in-flight session build can never
- * be older than the cutoff, so there is no race with concurrent runs.
+ * that the indexer runs automatically. A recent .tmp is an active-build lease;
+ * the generous age floor plus an mtime re-check keeps it out of collection.
  */
-fun collectStaleSessions(dataPaths: DataPaths, maxAge: Duration): SessionSweepResult {
-    val cutoff = Instant.now().minus(maxAge)
-    var removed = 0
+fun collectStaleSessions(dataPaths: DataPaths, maxAge: Duration?): SessionSweepResult {
+    val now = Instant.now()
+    // Match explicit `cache gc --max-age 0d`: zero means disabled. Keeping
+    // this invariant at the deletion boundary also protects callers that
+    // parse equivalent spellings such as 0h instead of the literal "0".
+    val cutoff = maxAge?.takeIf { it > Duration.ZERO }?.let(now::minus)
+    var removedSessions = 0
+    var removedTemporaries = 0
     var reclaimedBytes = 0L
-    for (file in listFiles(dataPaths.sessions, ".db")) {
-        if (!file.modTime.toInstant().isBefore(cutoff)) {
-            continue
+    if (cutoff != null) {
+        for (file in listFiles(dataPaths.sessions, ".db")) {
+            if (!file.modTime.toInstant().isBefore(cutoff)) {
+                continue
+            }
+            if (!deleteIfStillStaleSession(file.path, cutoff)) continue
+            removedSessions++
+            reclaimedBytes += file.size
         }
-        try {
-            Files.deleteIfExists(file.path)
-        } catch (_: Exception) {
-            continue
-        }
-        removed++
+    }
+    for (file in staleSessionTemporaries(dataPaths, now)) {
+        if (!deleteIfStillStaleSessionTemporary(file.path, now)) continue
+        removedTemporaries++
         reclaimedBytes += file.size
     }
-    return SessionSweepResult(removed, reclaimedBytes)
+    return SessionSweepResult(
+        removed = removedSessions + removedTemporaries,
+        reclaimedBytes = reclaimedBytes,
+        removedSessions = removedSessions,
+        removedTemporaries = removedTemporaries,
+    )
 }
 
-data class SessionSweepResult(val removed: Int, val reclaimedBytes: Long)
+data class SessionSweepResult(
+    val removed: Int,
+    val reclaimedBytes: Long,
+    val removedSessions: Int = removed,
+    val removedTemporaries: Int = 0,
+)
+
+/** Delete only while no query holds the session and only if it is still stale. */
+internal fun deleteIfStillStaleSession(path: Path, cutoff: Instant): Boolean {
+    return try {
+        SessionFileLease.withExclusiveReclamation(path) {
+            val attributes = try {
+                Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            } catch (_: Exception) {
+                return@withExclusiveReclamation false
+            }
+            if (attributes.isDirectory || !path.fileName.toString().endsWith(".db")) {
+                return@withExclusiveReclamation false
+            }
+            if (!attributes.lastModifiedTime().toInstant().isBefore(cutoff)) {
+                return@withExclusiveReclamation false
+            }
+            try {
+                Files.deleteIfExists(path)
+            } catch (_: Exception) {
+                false
+            }
+        }
+    } catch (_: Exception) {
+        false
+    }
+}
 
 /** Parses human-friendly byte sizes: 500M, 2G, 1024K, 123 (bytes). */
 fun parseSize(value: String): Long {
@@ -315,6 +390,37 @@ private class FileEntry(
 /** Go filepath.Clean over the stored string form: lexical normalization. */
 private fun cleanPath(path: String): String =
     Paths.get(path).normalize().toString()
+
+private fun staleSessionTemporaries(dataPaths: DataPaths, now: Instant): List<FileEntry> {
+    val cutoff = now.minus(SESSION_TEMP_STALE_AFTER)
+    return listFiles(dataPaths.sessions, ".tmp").filter { file ->
+        isSessionTemporaryName(file.path.fileName.toString()) &&
+            file.modTime.toInstant().isBefore(cutoff)
+    }
+}
+
+private fun deleteIfStillStaleSessionTemporary(path: Path, now: Instant): Boolean {
+    val attributes = try {
+        Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+    } catch (_: Exception) {
+        return false
+    }
+    if (attributes.isDirectory || !isSessionTemporaryName(path.fileName.toString())) return false
+    if (!attributes.lastModifiedTime().toInstant().isBefore(now.minus(SESSION_TEMP_STALE_AFTER))) {
+        return false
+    }
+    return try {
+        Files.deleteIfExists(path)
+    } catch (_: Exception) {
+        false
+    }
+}
+
+// AtomicFiles.temporaryIn creates hidden files of the form .<label>.<random>.tmp.
+// The sessions directory is cache-owned, but the hidden-prefix guard still
+// avoids treating an arbitrary user-visible notes.tmp as a build artifact.
+private fun isSessionTemporaryName(name: String): Boolean =
+    name.startsWith(".") && name.endsWith(".tmp")
 
 private fun listFiles(dir: Path, suffix: String): List<FileEntry> {
     val entries = try {

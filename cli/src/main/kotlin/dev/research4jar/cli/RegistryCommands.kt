@@ -30,6 +30,10 @@ import java.util.Comparator
  * difference.
  */
 internal fun runRegistryCommand(args: Array<String>, io: CliIO) {
+    if (helpRequested(args)) {
+        printRegistryHelp(io.out)
+        return
+    }
     if (args.isEmpty() || (args[0] != "export" && args[0] != "keygen" && args[0] != "seed")) {
         fail(
             "invalid_arguments",

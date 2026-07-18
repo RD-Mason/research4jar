@@ -1,10 +1,12 @@
 package dev.research4jar.cli
 
+import dev.research4jar.query.MAX_PAGE_SIZE
+import dev.research4jar.query.MAX_RESULT_WINDOW
 import java.io.PrintStream
 
 /**
- * Help texts, VERBATIM from querier/cmd/research4jar/main.go (Go). Do not
- * reflow or "fix" spacing: tests and downstream tooling compare bytes.
+ * Human-facing command help. Command-specific blocks intentionally advertise
+ * only options that the corresponding parser accepts.
  */
 
 internal fun printHelp(out: PrintStream) {
@@ -68,15 +70,15 @@ Common workflows:
 
 Options:
   --project-dir <PATH>  Project root. Defaults to searching upward from cwd.
-  --format json|text    Output format (default: json).
-  --page <N>            Result page (default: 1).
-  --page-size <M>       Results per page (default: 20).
+  --format json|text    Output format (queries: json; doctor/status: text).
+  --page <N>            Result page (default: 1; result window capped at $MAX_RESULT_WINDOW).
+  --page-size <M>       Results per page (default: 20; maximum $MAX_PAGE_SIZE).
   --home <DIR>          Override Research4Jar home (manifest lookup; index target).
   --direct              Disable transitive/meta-annotation expansion.
   --no-source-grep      (dep precise/artifact/class) Skip bounded source/build-file usage search.
   --check-classpath     (status) Resolve the current runtime classpath and compare
                         its fingerprint with the last index.
-  --indexer <PATH>      (index) Path to research4jar-index; auto-located otherwise.
+  --indexer <PATH>      (index) Accepted for legacy compatibility; indexing is in-process.
   --registry <URL>      (index) Shard registry base URL; missing shards download
                         instead of extracting locally. Env: RESEARCH4JAR_REGISTRY.
   --registry-pubkey <H> (index) Hex ed25519 key; downloaded shards must carry a
@@ -213,5 +215,125 @@ Options:
   --home <DIR>          Override Research4Jar home for manifest lookup.
   --page <N>            Result page (default 1).
   --page-size <M>       Results per page (default 20).""",
+    )
+}
+
+internal fun printIndexHelp(out: PrintStream) {
+    out.println(
+        """Usage:
+  research4jar index [--jars <DIR|GLOB|LIST>] [options]
+
+Resolve a project's runtime classpath (or use explicit jars), extract missing
+shards, and build/reuse its query session.
+
+Options:
+  --jars <VALUE>          Jar directory, glob, or comma-separated paths.
+  --project-dir <PATH>    Project root (default: current directory).
+  --home <DIR>            Override the Research4Jar data home.
+  --registry <URL>        Download covered shards from a registry.
+  --registry-pubkey <HEX> Require valid ed25519 signatures from the registry.
+  --indexer <PATH>        Accepted for legacy CLI compatibility; indexing is in-process.""",
+    )
+}
+
+internal fun printDoctorHelp(out: PrintStream) {
+    out.println(
+        """Usage:
+  research4jar doctor [--source-build] [--format json|text] [--project-dir <PATH>]
+
+Check runtime, build-tool, and optional source-build prerequisites and print
+actionable installation and verification guidance.""",
+    )
+}
+
+internal fun printCacheHelp(out: PrintStream) {
+    out.println(
+        """Usage:
+  research4jar cache stats [--home <DIR>]
+  research4jar cache gc [--max-size <N[K|M|G]>] [--max-age <N[d|h]>]
+                        [--dry-run] [--home <DIR>]
+
+Inspect cache usage or reclaim stale extractor data, orphan files, old
+sessions, and shards beyond the configured size budget. A max age of 0d or 0h
+disables completed-session expiry.""",
+    )
+}
+
+internal fun printRegistryHelp(out: PrintStream) {
+    out.println(
+        """Usage:
+  research4jar registry export <DIR> [--sign-key <PATH>] [--home <DIR>]
+  research4jar registry seed <DIR> --coordinates <FILE> [--repo <URL>]
+                            [--sign-key <PATH>] [--home <DIR>]
+  research4jar registry keygen <PATH>
+
+Create signing keys, export cached shards, or seed a static shard registry
+from Maven coordinates.""",
+    )
+}
+
+internal fun printMcpHelp(out: PrintStream) {
+    out.println(
+        """Usage:
+  research4jar mcp
+
+Run the Model Context Protocol server over stdio. Configure an MCP host with
+command "research4jar" and argument "mcp". Run `research4jar doctor` first
+when indexing tools report missing local prerequisites.""",
+    )
+}
+
+internal fun printQueryHelp(command: String, out: PrintStream) {
+    val argument = when (command) {
+        "list-extension-points" -> "[KEY|MECHANISM]"
+        "list-packages" -> "[PREFIX]"
+        "find-config-properties" -> "<PREFIX>"
+        "find-implementations", "find-by-annotation", "get-class",
+        "get-bean-definitions", "explain-conditional" -> "<FQN>"
+        "find-string", "search-symbol" -> "<TEXT>"
+        "find-class" -> "<NAME|PATTERN>"
+        "find-method" -> "<NAME|CLASS#METHOD>"
+        "open-symbol" -> "<FQN|CLASS#METHOD>"
+        "why-dependency" -> "<COORD|JAR|CLASS>"
+        else -> "<ARG>"
+    }
+    val description = when (command) {
+        "find-config-properties" -> "Find Spring configuration properties under a prefix."
+        "find-implementations" -> "Find implementations and subclasses across indexed jars."
+        "find-by-annotation" -> "Find classes carrying an annotation or one of its meta-annotations."
+        "get-class" -> "Show all indexed facts for one class."
+        "get-bean-definitions" -> "Find @Bean definitions by bean type or configuration class."
+        "explain-conditional" -> "Explain class- and method-level Spring activation conditions."
+        "find-string" -> "Search bytecode string constants by substring."
+        "list-extension-points" -> "List SPI extension points or registrations for one key."
+        "find-class" -> "Find classes by name, package prefix, or substring."
+        "find-method" -> "Find methods by name, substring, or Class#method."
+        "list-packages" -> "List packages grouped by source jar."
+        "search-symbol" -> "Search all indexed symbol kinds before opening a result."
+        "open-symbol" -> "Expand a class or method returned by search-symbol."
+        "why-dependency" -> "Explain which direct dependency introduced a jar or class."
+        else -> "Query the current Research4Jar project index."
+    }
+    val paginated = command in PAGINATED_QUERY_COMMANDS
+    val options = buildList {
+        add("  --project-dir <PATH>  Project root; defaults to searching upward from cwd.")
+        add("  --home <DIR>          Override the Research4Jar data home.")
+        add("  --format json|text    Output format (default: json).")
+        if (paginated) {
+            add("  --page <N>            Result page (default: 1; result window capped at $MAX_RESULT_WINDOW).")
+            add("  --page-size <M>       Results per page (default: 20; maximum $MAX_PAGE_SIZE).")
+        }
+        if (command == "find-implementations" || command == "find-by-annotation") {
+            add("  --direct              Restrict the lookup to directly declared matches.")
+        }
+    }.joinToString("\n")
+    out.println(
+        """Usage:
+  research4jar $command $argument [options]
+
+$description
+
+Options:
+$options""",
     )
 }

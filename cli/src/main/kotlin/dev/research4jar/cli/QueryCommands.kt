@@ -26,9 +26,14 @@ import dev.research4jar.query.whyDependency
  */
 
 internal fun runQueryCommand(command: String, args: Array<String>, io: CliIO) {
+    if (helpRequested(args)) {
+        printQueryHelp(command, io.out)
+        return
+    }
     val opts = parseOptions(
         args,
         command == "list-extension-points" || command == "list-packages",
+        optionsForQuery(command),
     )
     val (pointer, manifestPath) = resolveProjectOrFail(opts)
 
@@ -113,7 +118,11 @@ internal fun runDepCommand(args: Array<String>, io: CliIO) {
             2,
         )
     }
-    val opts = parseOptions(args.copyOfRange(1, args.size), false)
+    val opts = parseOptions(
+        args.copyOfRange(1, args.size),
+        false,
+        if (subcommand == "why") optionsForQuery("why-dependency") else preciseLookupOptions(),
+    )
     when (subcommand) {
         "precise", "origin", "resolve" -> runDependencyPrecise(opts, io)
         "why" -> runWhyDependency(opts, io)
@@ -126,7 +135,7 @@ internal fun runArtifactCommand(args: Array<String>, io: CliIO) {
         printArtifactHelp(io.out)
         return
     }
-    val opts = parseOptions(args, false)
+    val opts = parseOptions(args, false, preciseLookupOptions())
     runArtifactPrecise(opts, io)
 }
 
@@ -135,7 +144,7 @@ internal fun runClassAliasCommand(args: Array<String>, io: CliIO) {
         printClassHelp(io.out)
         return
     }
-    val opts = parseOptions(args, false)
+    val opts = parseOptions(args, false, preciseLookupOptions())
     val (pointer, manifestPath) = resolveProjectOrFail(opts)
     val projectRoot = projectRootOrFail(opts)
     val response = try {
@@ -153,7 +162,7 @@ internal fun runMethodAliasCommand(args: Array<String>, io: CliIO) {
         printMethodHelp(io.out)
         return
     }
-    val opts = parseOptions(args, false)
+    val opts = parseOptions(args, false, methodLookupOptions())
     val (pointer, manifestPath) = resolveProjectOrFail(opts)
     val response = try {
         findMethod(pointer, manifestPath, opts.arg, opts.page, opts.pageSize)

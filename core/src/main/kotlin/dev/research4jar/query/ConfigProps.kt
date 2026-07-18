@@ -27,6 +27,7 @@ fun findConfigProperties(
     page: Int,
     pageSize: Int,
 ): ConfigPropertiesResponse = Db.openReadOnly(pointer.sessionDbPath, immutable = true).use { session ->
+    val window = pageWindow(page, pageSize)
     // Deliberately avoids LIKE: the child range [prefix+'.', prefix+'/') is a
     // straight index range scan on idx_s_cfg_name ('/' is '.'+1 in ASCII).
     val childLowerBound = "$prefix."
@@ -44,7 +45,7 @@ fun findConfigProperties(
         ORDER BY name ASC, source_shard_id ASC
         LIMIT ? OFFSET ?
         """.trimIndent(),
-        bind + listOf(pageSize, (page - 1) * pageSize),
+        bind + listOf(window.limit, window.offset),
     ) { rows ->
         rows.mapRows {
             Pending(
@@ -61,7 +62,11 @@ fun findConfigProperties(
         }
     }
 
-    val sources = if (pending.isNotEmpty()) ManifestCache.loadSourceJars(manifestPath) else null
+    val sources = if (pending.isNotEmpty()) {
+        ManifestCache.loadSourceJars(session, manifestPath, pending.map { it.shardId })
+    } else {
+        null
+    }
     ConfigPropertiesResponse(
         query = Request(command = "find-config-properties", prefix = prefix),
         results = pending.map { it.property.copy(sourceJar = sourceJarName(sources, it.shardId)) },

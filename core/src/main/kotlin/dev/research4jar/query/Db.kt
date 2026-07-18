@@ -1,14 +1,21 @@
 package dev.research4jar.query
 
+import dev.research4jar.runtime.SessionFileLease
+import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Proxy
+import java.nio.file.AccessDeniedException
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.ReadOnlyFileSystemException
 import java.nio.file.attribute.FileTime
 import java.sql.Connection
 import java.sql.PreparedStatement
 import java.sql.ResultSet
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
 import org.sqlite.SQLiteConfig
 
 /**
@@ -17,15 +24,51 @@ import org.sqlite.SQLiteConfig
  * rewritten by a concurrent indexer run, so it opens with a busy timeout.
  */
 object Db {
+    private const val READ_ONLY_FILE_SYSTEM_REASON = "Read-only file system"
+
     /**
      * Session mtime doubles as the last-use marker for the indexer's
-     * automatic stale-session sweep. Refreshing it at most once a day keeps
-     * an actively queried session alive without a metadata write per query.
+     * automatic stale-session sweep. Refreshing it at most once every five
+     * minutes keeps an actively queried session alive even with the minimum
+     * supported 1h expiry, without a metadata write per query.
      */
-    private val TOUCH_AFTER: Duration = Duration.ofHours(24)
+    private val TOUCH_AFTER: Duration = Duration.ofMinutes(5)
 
-    fun openReadOnly(path: String, immutable: Boolean): Connection {
+    fun openReadOnly(path: String, immutable: Boolean): Connection =
+        openReadOnly(path, immutable) { SessionFileLease.acquireShared(it) }
+
+    /** Lease injection keeps read-only-filesystem handling testable without a privileged mount. */
+    internal fun openReadOnly(
+        path: String,
+        immutable: Boolean,
+        acquireLease: (Path) -> AutoCloseable,
+    ): Connection {
         val absolute = Paths.get(path).toAbsolutePath().normalize()
+        val lease = if (immutable) {
+            try {
+                acquireLease(absolute)
+            } catch (exception: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw IllegalStateException("interrupted while acquiring the session read lease", exception)
+            } catch (_: AccessDeniedException) {
+                // Read-only cache homes must remain queryable. A collector in
+                // the same unwritable home cannot acquire its exclusive lease
+                // either, so falling back does not create a deletion path.
+                null
+            } catch (_: ReadOnlyFileSystemException) {
+                null
+            } catch (_: SecurityException) {
+                null
+            } catch (exception: FileSystemException) {
+                // The Unix NIO provider maps EROFS to a plain
+                // FileSystemException and exposes the condition through this
+                // exact reason. Do not turn other sidecar I/O failures into an
+                // unlocked query: corruption and ordinary I/O must surface.
+                if (isReadOnlyFileSystem(exception)) null else throw exception
+            }
+        } else {
+            null
+        }
         // Only sessions open as immutable; the manifest's mtime is not a
         // last-use marker and must stay untouched.
         if (immutable) {
@@ -39,7 +82,49 @@ object Db {
         if (!immutable) {
             config.busyTimeout = 5000
         }
-        return config.createConnection("jdbc:sqlite:$absolute")
+        return try {
+            val connection = config.createConnection("jdbc:sqlite:$absolute")
+            if (lease == null) connection else leasedConnection(connection, lease)
+        } catch (exception: Exception) {
+            lease?.close()
+            throw exception
+        }
+    }
+
+    private fun isReadOnlyFileSystem(exception: FileSystemException): Boolean =
+        exception.reason?.equals(READ_ONLY_FILE_SYSTEM_REASON, ignoreCase = true) == true
+
+    private fun leasedConnection(connection: Connection, lease: AutoCloseable): Connection {
+        val closed = AtomicBoolean(false)
+        return Proxy.newProxyInstance(
+            Connection::class.java.classLoader,
+            arrayOf(Connection::class.java),
+        ) { proxy, method, arguments ->
+            when {
+                method.name == "close" && method.parameterCount == 0 -> {
+                    if (closed.compareAndSet(false, true)) {
+                        try {
+                            connection.close()
+                        } finally {
+                            lease.close()
+                        }
+                    }
+                    null
+                }
+
+                method.name == "isClosed" && method.parameterCount == 0 ->
+                    closed.get() || connection.isClosed
+
+                method.name == "equals" && method.parameterCount == 1 -> proxy === arguments?.get(0)
+                method.name == "hashCode" && method.parameterCount == 0 -> System.identityHashCode(proxy)
+                method.name == "toString" && method.parameterCount == 0 -> "Leased($connection)"
+                else -> try {
+                    method.invoke(connection, *(arguments ?: emptyArray()))
+                } catch (exception: InvocationTargetException) {
+                    throw exception.targetException
+                }
+            }
+        } as Connection
     }
 
     private fun touchIfStale(path: Path) {

@@ -21,4 +21,5 @@ chmod +x "$shim_dir/research4jar-index" "$shim_dir/research4jar"
 
 RESEARCH4JAR_INDEX="$shim_dir/research4jar-index" \
 RESEARCH4JAR_QUERY="$shim_dir/research4jar" \
+RESEARCH4JAR_NO_DAEMON=1 \
 "$(dirname "$0")/e2e.sh"
