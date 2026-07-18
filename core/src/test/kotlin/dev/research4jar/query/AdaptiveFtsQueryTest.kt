@@ -321,7 +321,7 @@ class AdaptiveFtsQueryTest {
             db.createStatement().use { statement -> statement.execute("DROP TABLE classes_fts") }
             assertTrue(preferLegacyForDenseFts(db, classFtsDensityPlan("CommonMid")))
             db.createStatement().use { statement ->
-                statement.execute("DROP TABLE string_constants_fts")
+                statement.execute("DROP TABLE string_values_fts")
             }
             assertTrue(findStringFtsRoute(db, "StringMid 00042").preferLegacy)
         }
