@@ -45,7 +45,7 @@ When an agent is installing the environment, have it run `research4jar doctor --
 mvn dev.research4jar:research4jar-maven-plugin:index
 
 # Gradle — add the plugin and run the task:
-#   plugins { id("dev.research4jar") version "0.1.0" }
+#   plugins { id("dev.research4jar") version "0.2.0" }
 ./gradlew research4jarIndex
 ```
 

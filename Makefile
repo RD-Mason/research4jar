@@ -1,5 +1,5 @@
 GRADLEW := ./gradlew
-CLI_VERSION := 0.1.0
+CLI_VERSION := 0.2.0
 CLI_JAR := cli/build/libs/research4jar-cli-$(CLI_VERSION).jar
 PREFIX ?= $(HOME)/.local
 

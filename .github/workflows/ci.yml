@@ -65,7 +65,7 @@ jobs:
         run: ./gradlew :core:publishToMavenLocal :maven-plugin:publishToMavenLocal
       - name: Run research4jar:index in the fixture project
         working-directory: tests/fixtures/maven-plugin-smoke
-        run: mvn -q -B dev.research4jar:research4jar-maven-plugin:0.1.0:index
+        run: mvn -q -B dev.research4jar:research4jar-maven-plugin:0.2.0:index
       - name: Assert index artifacts
         working-directory: tests/fixtures/maven-plugin-smoke
         run: |

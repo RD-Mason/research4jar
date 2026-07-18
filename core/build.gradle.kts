@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "dev.research4jar"
-version = "0.1.0"
+version = project.property("VERSION_NAME").toString()
 
 kotlin {
     jvmToolchain(17)
