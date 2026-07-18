@@ -183,7 +183,9 @@ class SourceRetrievalTest {
         JarOutputStream(Files.newOutputStream(jar)).use { output ->
             Files.walk(classesDir).use { paths ->
                 paths.filter { Files.isRegularFile(it) }.sorted().forEach { file ->
-                    output.putNextEntry(JarEntry(classesDir.relativize(file).toString()))
+                    // Zip entry names are '/'-separated by spec; Path.relativize
+                    // yields backslashes on Windows and CFR would see no classes.
+                    output.putNextEntry(JarEntry(classesDir.relativize(file).toString().replace('\\', '/')))
                     output.write(Files.readAllBytes(file))
                     output.closeEntry()
                 }

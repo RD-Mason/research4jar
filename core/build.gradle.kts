@@ -88,6 +88,12 @@ tasks.jar {
 
 tasks.test {
     useJUnitPlatform()
+    testLogging {
+        // CI logs must carry the exception message, not just the frame —
+        // a bare "IllegalStateException at Foo.kt:206" cost a blind
+        // Windows-only debugging round.
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }
 
 fun multiReleaseVersion(entryName: String): Int? {
