@@ -5,6 +5,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -12,6 +14,21 @@ import kotlin.test.assertTrue
 
 /** Dense-postings routing must change only the plan, never pages or ordering. */
 class AdaptiveFtsQueryTest {
+    // The fixtures are far below the accelerator size gate but assert the
+    // accelerated routing; force the accelerated shape and restore after.
+    private var savedFtsGate = SessionBuilder.ftsMinMethods
+
+    @BeforeTest
+    fun forceAcceleratedSessions() {
+        savedFtsGate = SessionBuilder.ftsMinMethods
+        SessionBuilder.ftsMinMethods = 0
+    }
+
+    @AfterTest
+    fun restoreSizeGate() {
+        SessionBuilder.ftsMinMethods = savedFtsGate
+    }
+
     private data class ClassRow(
         val fqn: String,
         val simple: String?,

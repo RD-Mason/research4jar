@@ -4,6 +4,8 @@ import dev.research4jar.indexer.store.SessionBuilder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.DriverManager
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -16,6 +18,21 @@ import kotlin.test.assertTrue
  * the ranking tiers keep both paths page-consistent.
  */
 class TwoStagePaginationTest {
+    // The fixture is far below the accelerator size gate but re-runs the
+    // classes_fts rebuild; force the accelerated shape and restore after.
+    private var savedFtsGate = SessionBuilder.ftsMinMethods
+
+    @BeforeTest
+    fun forceAcceleratedSessions() {
+        savedFtsGate = SessionBuilder.ftsMinMethods
+        SessionBuilder.ftsMinMethods = 0
+    }
+
+    @AfterTest
+    fun restoreSizeGate() {
+        SessionBuilder.ftsMinMethods = savedFtsGate
+    }
+
     private fun buildSession(): Path {
         val dir = Files.createTempDirectory("r4j-two-stage")
         val session = dir.resolve("session.db")

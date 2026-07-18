@@ -14,6 +14,8 @@ import java.sql.DriverManager
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -22,6 +24,23 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class StoreTest {
+    // The fixtures are far below the accelerator size gate but the contract
+    // battery corrupts the gated objects, which must therefore exist; force
+    // the accelerated shape and restore after. Individual tests that pin the
+    // below-gate shape raise the gate again inside their bodies.
+    private var savedFtsGate = SessionBuilder.ftsMinMethods
+
+    @BeforeTest
+    fun forceAcceleratedSessions() {
+        savedFtsGate = SessionBuilder.ftsMinMethods
+        SessionBuilder.ftsMinMethods = 0
+    }
+
+    @AfterTest
+    fun restoreSizeGate() {
+        SessionBuilder.ftsMinMethods = savedFtsGate
+    }
+
     @Test
     fun `shards are deterministic and session merges one shard at a time`() {
         val root = Files.createTempDirectory("research4jar-store-test")
@@ -327,6 +346,46 @@ class StoreTest {
             builder.buildIfAbsent(session, emptyList())
             assertTrue(builder.isReusable(session), "$label must be rebuilt, not reused")
         }
+    }
+
+    @Test
+    fun `gated accelerator objects are validated all-or-none`() {
+        val root = Files.createTempDirectory("research4jar-session-gate-contract")
+        val session = root.resolve("session.db")
+        val builder = SessionBuilder()
+        // Built accelerated (class-level gate override): all gated objects.
+        builder.build(session, emptyList())
+        assertTrue(builder.isReusable(session))
+
+        // Strip every gated object except idx_s_methods_descriptor (an index
+        // on the ungated methods table, so it survives the table drops).
+        // Any PARTIAL accelerator subset is corruption: rebuild.
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("DROP TABLE classes_fts")
+                statement.execute("DROP TABLE method_names_fts")
+                statement.execute("DROP TABLE method_descriptors_fts")
+                statement.execute("DROP TABLE method_name_packs")
+                statement.execute("DROP TABLE method_descriptor_packs")
+                // Dropping the domain tables also drops their unique indexes.
+                statement.execute("DROP TABLE method_names")
+                statement.execute("DROP TABLE method_descriptors")
+            }
+        }
+        assertFalse(builder.isReusable(session), "partial accelerator set must be rejected")
+        assertNull(builder.reusableShardSet(session))
+
+        // Removing the last gated object leaves exactly the below-gate shape,
+        // which is a VALID v9 session (presence-consistency, all-or-none).
+        DriverManager.getConnection("jdbc:sqlite:${session.toAbsolutePath()}").use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("DROP INDEX idx_s_methods_descriptor")
+            }
+        }
+        assertTrue(
+            builder.isReusable(session),
+            "a session with none of the gated objects is the valid below-gate shape",
+        )
     }
 
     @Test

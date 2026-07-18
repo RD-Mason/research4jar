@@ -43,8 +43,10 @@ internal const val PACKAGE_NAME_EXPR =
  * dangling references. classes_fts, the one remaining per-row external-content
  * FTS5 shadow, is kept in sync at two sites — one statement before the classes
  * delete in [SessionBuilder.deleteShards], one after the classes INSERT in
- * [SessionBuilder.merge]. The deduplicated search domains (method_names,
- * method_descriptors, string_values and their pack/FTS structures) are
+ * [SessionBuilder.merge] — but only in sessions that carry the size-gated
+ * accelerators at all (see [GATED_SESSION_OBJECTS]). The deduplicated search
+ * domains (method_names, method_descriptors, string_values and their pack/FTS
+ * structures) are
  * append-only: [SessionBuilder.syncSearchDomains] adds newly-seen values and
  * deletions never touch them — a stale domain value simply joins back to zero
  * live rows, and because domains reference VALUES rather than row ids, later
@@ -219,6 +221,44 @@ internal val SEARCH_DOMAINS = listOf(
     SearchDomain("string_constants", "value", "string_values", "string_value_packs", "vals"),
 )
 
+private val METHOD_SEARCH_DOMAINS = SEARCH_DOMAINS.filter { it.sourceTable == "methods" }
+private val STRING_SEARCH_DOMAIN = SEARCH_DOMAINS.single { it.sourceTable == "string_constants" }
+
+/**
+ * The size-gated class/method search accelerators, present ALL-OR-NONE in a
+ * valid v9 session: classes_fts, the two method-text domains (tables, packs,
+ * pack FTS, unique domain indexes) and the descriptor reverse-lookup index.
+ * Sessions whose merged `methods` row count is below [SessionBuilder.ftsMinMethods]
+ * at full-build commit time carry NONE of these — below the gate the legacy
+ * contains scans the accelerators replace cost tens-to-hundreds of ms, while
+ * building the accelerators cost ~0.8s at 222 jars, a pure loss. Every query
+ * consumer falls back per-tier when they are absent (the same fallback that
+ * serves pre-v6 sessions). A delta build inherits its base session's gate
+ * decision. The string-value domain is deliberately NOT in this set: its pack
+ * FTS replaced the old per-row string_constants_fts outright (its build cost
+ * is funded by that removal) and it is find-string's only substring path, so
+ * gating it would regress find-string at small scale.
+ *
+ * Validation treats presence-consistency as the contract — a session with
+ * NONE of these objects is the valid below-gate shape, one with ALL of them
+ * is the valid accelerated shape, and any partial subset is corruption that
+ * forces a rebuild. Presence, not a row-count-derived expectation: the
+ * validator cannot recover the original merged method count cheaply, and
+ * both shapes are valid v9 layouts.
+ */
+internal val GATED_SESSION_OBJECTS: Set<String> = setOf(
+    "classes_fts",
+    "method_names",
+    "method_name_packs",
+    "method_names_fts",
+    "idx_s_method_names_name",
+    "method_descriptors",
+    "method_descriptor_packs",
+    "method_descriptors_fts",
+    "idx_s_method_descriptors_descriptor",
+    "idx_s_methods_descriptor",
+)
+
 private val SEARCH_SYMBOL_COLUMNS =
     listOf("kind", "name", "owner", "detail", "source_shard_id", "simple_name", "package_name", "score_hint")
 private val SEARCH_SYMBOL_VIEW_SQL =
@@ -282,6 +322,19 @@ internal data class ReusableSessionState(
 )
 
 class SessionBuilder {
+    companion object {
+        /**
+         * Sessions with at least this many merged `methods` rows get the
+         * size-gated search accelerators (see [GATED_SESSION_OBJECTS]).
+         * ~1M methods is roughly a 300-jar classpath — below it the legacy
+         * contains scans stay in the tens-to-hundreds of milliseconds, so
+         * building the accelerators costs more than they can ever save.
+         * var, not const: tests lower it to force the accelerated shape on
+         * small fixtures (and raise it to pin the below-gate shape).
+         */
+        internal var ftsMinMethods = 1_000_000
+    }
+
     /**
      * Sessions are content-addressed by the classpath fingerprint in the file
      * name, so an existing structurally-sound session of the current layout
@@ -353,7 +406,14 @@ class SessionBuilder {
             DriverManager.getConnection("jdbc:sqlite:${temporary.toAbsolutePath()}")
                 .use { connection ->
                     configure(connection)
-                    deleteShards(connection, removedShardIds)
+                    // A delta inherits its base session's size-gate decision:
+                    // the accelerators are maintained only when the base was
+                    // built with them; a below-gate base skips accelerator
+                    // maintenance entirely (the string domain is always kept
+                    // in sync). One probe here, threaded through the merge
+                    // and delete paths.
+                    val syncAccelerators = hasAcceleratorStructures(connection)
+                    deleteShards(connection, removedShardIds, syncAccelerators)
                     val sortedAdded = addedShards.sortedBy(SessionShard::shardId)
                     val shardKeys = allocateDeltaShardKeys(
                         connection,
@@ -364,6 +424,7 @@ class SessionBuilder {
                             connection,
                             shard,
                             syncFts = true,
+                            syncAccelerators = syncAccelerators,
                             shardKey = shardKeys.getValue(shard.shardId),
                         )
                     }
@@ -465,18 +526,33 @@ class SessionBuilder {
         }
 
         fun commit(target: Path) {
-            connection.createStatement().use { statement ->
-                // The external-content classes_fts never sees the merge
-                // inserts; one rebuild scans the fully merged classes table.
-                statement.execute(
-                    "INSERT INTO classes_fts(classes_fts) VALUES('rebuild')",
-                )
+            // The size-gate decision. Full-build ids are contiguous from 1
+            // (single writer, no deletions before commit), so MAX(id) IS the
+            // merged method row count — an O(1) probe instead of a COUNT scan.
+            val accelerated = maxId(connection, "methods") >= ftsMinMethods
+            if (accelerated) {
+                createAcceleratorStructures(connection)
+                connection.createStatement().use { statement ->
+                    // The external-content classes_fts never sees the merge
+                    // inserts; one rebuild scans the fully merged classes
+                    // table. It must run BEFORE createIndexes: the index
+                    // build evicts the content pages the rebuild scans, and
+                    // a post-index rebuild measured ~6x slower.
+                    statement.execute(
+                        "INSERT INTO classes_fts(classes_fts) VALUES('rebuild')",
+                    )
+                }
             }
             // Indexes first: the domain fills below run their DISTINCT as an
             // index distinct-scan (O(distinct) seeks) instead of a temp
             // B-tree over every merged row.
-            createIndexes(connection)
-            syncSearchDomains(connection, methodIdOffset = 0, stringIdOffset = 0)
+            createIndexes(connection, accelerated)
+            syncSearchDomains(
+                connection,
+                methodIdOffset = 0,
+                stringIdOffset = 0,
+                includeMethodDomains = accelerated,
+            )
             connection.createStatement().use { statement ->
                 // Sampled ANALYZE: sqlite_stat1 selectivity estimates from a
                 // few hundred rows per index steer the planner just as well
@@ -591,7 +667,22 @@ class SessionBuilder {
                     }
                 }
             }
-            if (SESSION_TABLE_COLUMNS.keys.any { schema[it]?.first != "table" }) return null
+            // Dual-shape contract for the size-gated accelerators (see
+            // [GATED_SESSION_OBJECTS]): all present (accelerated shape,
+            // validated exactly like every other object below), none present
+            // (below-gate shape, the gated checks are skipped), any partial
+            // subset -> corrupt, rebuild. Deterministic either way.
+            val gatedPresentCount = GATED_SESSION_OBJECTS.count(schema::containsKey)
+            val skippedGated: Set<String> = when (gatedPresentCount) {
+                0 -> GATED_SESSION_OBJECTS
+                GATED_SESSION_OBJECTS.size -> emptySet()
+                else -> return null
+            }
+            if (
+                SESSION_TABLE_COLUMNS.keys.any {
+                    it !in skippedGated && schema[it]?.first != "table"
+                }
+            ) return null
             val searchSymbolView = schema["search_symbols"] ?: return null
             if (
                 searchSymbolView.first != "view" ||
@@ -599,12 +690,14 @@ class SessionBuilder {
                 normalizeSchemaSql(SEARCH_SYMBOL_VIEW_SQL)
             ) return null
             for ((name, expectedSql) in SESSION_FTS_CREATE_SQL) {
+                if (name in skippedGated) continue
                 val entry = schema[name] ?: return null
                 if (entry.first != "table") return null
                 val createSql = normalizeSchemaSql(entry.second ?: return null)
                 if (createSql != normalizeSchemaSql(expectedSql)) return null
             }
             for ((name, fragment) in SESSION_INDEX_SQL_FRAGMENTS) {
+                if (name in skippedGated) continue
                 val entry = schema[name] ?: return null
                 if (entry.first != "index") return null
                 val createSql = normalizeSchemaSql(entry.second ?: return null)
@@ -616,6 +709,7 @@ class SessionBuilder {
             }
 
             for ((table, columns) in SESSION_TABLE_COLUMNS) {
+                if (table in skippedGated) continue
                 val declaredColumns = statement.executeQuery("PRAGMA table_info('$table')")
                     .use { rows ->
                         buildList {
@@ -630,6 +724,7 @@ class SessionBuilder {
                 }
             }
             for ((table, requiredIntegerColumns) in SESSION_INTEGER_COLUMNS) {
+                if (table in skippedGated) continue
                 val declared = statement.executeQuery("PRAGMA table_info('$table')").use { rows ->
                     buildMap<String, Pair<String, Boolean>> {
                         while (rows.next()) {
@@ -660,6 +755,7 @@ class SessionBuilder {
                 }
             }
             for ((table, columns) in SESSION_FTS_COLUMNS) {
+                if (table in skippedGated) continue
                 val declaredColumns = statement.executeQuery("PRAGMA table_info('$table')")
                     .use { rows ->
                         buildList {
@@ -913,6 +1009,69 @@ class SessionBuilder {
                 )
                 """.trimIndent(),
             )
+            // Substring search over string values runs over a deduplicated,
+            // packed value domain instead of the old per-row shadow (the
+            // per-row string_constants_fts rebuild was part of ~25s of a 33s
+            // 1000-jar session build; see SEARCH_DOMAINS). The string domain
+            // is created UNCONDITIONALLY — it replaced that shadow outright,
+            // so its cost is funded at every scale and it is find-string's
+            // only substring path. The class/method accelerators are size-
+            // gated instead: Stream.commit creates them (see
+            // createAcceleratorStructures) only when the merged session
+            // reaches ftsMinMethods.
+            createSearchDomain(statement, STRING_SEARCH_DOMAIN)
+            // search_symbols is a view, not a copy: the materialized table
+            // plus its four indexes were 65% of the session bytes while the
+            // broad-search query could not use those indexes anyway
+            // (leading-wildcard LIKE). The single source of truth for the
+            // session layout since M6.
+            statement.execute(SEARCH_SYMBOL_VIEW_SQL)
+        }
+    }
+
+    /** One deduplicated search domain: value table, pack table, pack FTS. */
+    private fun createSearchDomain(statement: java.sql.Statement, domain: SearchDomain) {
+        statement.execute(
+            """
+            CREATE TABLE ${domain.domainTable} (
+              id INTEGER PRIMARY KEY,
+              ${domain.valueColumn} TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
+        statement.execute(
+            """
+            CREATE TABLE ${domain.packTable} (
+              pack_id INTEGER PRIMARY KEY,
+              min_id INTEGER NOT NULL,
+              max_id INTEGER NOT NULL,
+              ${domain.packColumn} TEXT NOT NULL
+            )
+            """.trimIndent(),
+        )
+        statement.execute(SESSION_FTS_CREATE_SQL.getValue("${domain.domainTable}_fts"))
+    }
+
+    /**
+     * Whether this session carries the size-gated accelerators (see
+     * [GATED_SESSION_OBJECTS]; presence is all-or-none, so probing one
+     * representative object suffices). The delta path probes this once per
+     * build and threads the answer through its merge/delete paths.
+     */
+    internal fun hasAcceleratorStructures(connection: Connection): Boolean =
+        connection.createStatement().use { statement ->
+            statement.executeQuery(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'classes_fts'",
+            ).use { rows -> rows.next() && rows.getInt(1) > 0 }
+        }
+
+    /**
+     * The gated DDL, run at full-build commit time only when the merged
+     * method count reaches the gate (see [GATED_SESSION_OBJECTS] for the
+     * why; the gated indexes are created by [createIndexes]).
+     */
+    private fun createAcceleratorStructures(connection: Connection) {
+        connection.createStatement().use { statement ->
             // Trigram pushdown for search-symbol's class contains fallback:
             // fts5 serves each column's own `LIKE '%...%'` from the doclists
             // (EXPLAIN QUERY PLAN shows INDEX 0:L0 for the first column,
@@ -923,40 +1082,15 @@ class SessionBuilder {
             // commit() runs its 'rebuild'. Class FQNs stay per-row because
             // they are mostly unique (~85% distinct) — no domain to gain.
             statement.execute(SESSION_FTS_CREATE_SQL.getValue("classes_fts"))
-            // Method names/descriptors and string values are massively
-            // repetitive, so their substring search runs over deduplicated,
-            // packed value domains instead of per-row shadows (the per-row
-            // methods_fts/string_constants_fts rebuilds were ~25s of a 33s
-            // 1000-jar session build; see SEARCH_DOMAINS). Reverse lookup
-            // back to rows goes value-equality through idx_s_methods_name,
-            // idx_s_methods_descriptor and idx_s_strconst_value.
-            for (domain in SEARCH_DOMAINS) {
-                statement.execute(
-                    """
-                    CREATE TABLE ${domain.domainTable} (
-                      id INTEGER PRIMARY KEY,
-                      ${domain.valueColumn} TEXT NOT NULL
-                    )
-                    """.trimIndent(),
-                )
-                statement.execute(
-                    """
-                    CREATE TABLE ${domain.packTable} (
-                      pack_id INTEGER PRIMARY KEY,
-                      min_id INTEGER NOT NULL,
-                      max_id INTEGER NOT NULL,
-                      ${domain.packColumn} TEXT NOT NULL
-                    )
-                    """.trimIndent(),
-                )
-                statement.execute(SESSION_FTS_CREATE_SQL.getValue("${domain.domainTable}_fts"))
+            // Method names/descriptors are massively repetitive, so their
+            // substring search runs over deduplicated, packed value domains
+            // instead of per-row shadows (the per-row methods_fts rebuild
+            // was ~25s of a 33s 1000-jar session build; see SEARCH_DOMAINS).
+            // Reverse lookup back to rows goes value-equality through
+            // idx_s_methods_name and idx_s_methods_descriptor.
+            for (domain in METHOD_SEARCH_DOMAINS) {
+                createSearchDomain(statement, domain)
             }
-            // search_symbols is a view, not a copy: the materialized table
-            // plus its four indexes were 65% of the session bytes while the
-            // broad-search query could not use those indexes anyway
-            // (leading-wildcard LIKE). The single source of truth for the
-            // session layout since M6.
-            statement.execute(SEARCH_SYMBOL_VIEW_SQL)
         }
     }
 
@@ -964,6 +1098,7 @@ class SessionBuilder {
         connection: Connection,
         shard: SessionShard,
         syncFts: Boolean = false,
+        syncAccelerators: Boolean = false,
         shardKey: Long = allocateStreamingShardKey(connection, shard.shardId),
     ) {
         connection.prepareStatement("ATTACH DATABASE ? AS shard").use { statement ->
@@ -1122,15 +1257,25 @@ class SessionBuilder {
             // range above the offset captured before its merge) and appends
             // this shard's newly-seen values to the search domains. Domains
             // are append-only across deltas: values whose rows all leave the
-            // session simply stop matching anything.
+            // session simply stop matching anything. syncAccelerators is the
+            // base session's inherited size-gate decision: a below-gate base
+            // has neither classes_fts nor the method domains, so only the
+            // ungated string domain is maintained.
             if (syncFts) {
-                connection.createStatement().use { statement ->
-                    statement.executeUpdate(
-                        "INSERT INTO classes_fts(rowid, fqn, kind) " +
-                            "SELECT id, fqn, kind FROM classes WHERE id > $classIdOffset",
-                    )
+                if (syncAccelerators) {
+                    connection.createStatement().use { statement ->
+                        statement.executeUpdate(
+                            "INSERT INTO classes_fts(rowid, fqn, kind) " +
+                                "SELECT id, fqn, kind FROM classes WHERE id > $classIdOffset",
+                        )
+                    }
                 }
-                syncSearchDomains(connection, methodIdOffset, stringIdOffset)
+                syncSearchDomains(
+                    connection,
+                    methodIdOffset,
+                    stringIdOffset,
+                    includeMethodDomains = syncAccelerators,
+                )
             }
             connection.prepareStatement(
                 "INSERT INTO session_shard_ranges(shard_id, table_name, min_id, max_id) " +
@@ -1349,7 +1494,11 @@ class SessionBuilder {
      * are why delta sessions are logically — not byte — equivalent to full
      * builds.
      */
-    private fun deleteShards(connection: Connection, shardIds: Collection<String>) {
+    private fun deleteShards(
+        connection: Connection,
+        shardIds: Collection<String>,
+        syncAccelerators: Boolean,
+    ) {
         if (shardIds.isEmpty()) return
         try {
             connection.autoCommit = false
@@ -1372,16 +1521,20 @@ class SessionBuilder {
                     val ranges = rangesByShard[shardId] ?: continue
                     // classes_fts rows must be removed while the doomed
                     // content rows are still readable — the external-content
-                    // 'delete' command needs the exact indexed values. The
-                    // search domains need no mirror: they reference values,
-                    // not row ids, so deleted rows simply stop being found
-                    // through them and id reuse cannot resurface stale hits.
-                    ranges["classes"]?.let { range ->
-                        statement.executeUpdate(
-                            "INSERT INTO classes_fts(classes_fts, rowid, fqn, kind) " +
-                                "SELECT 'delete', id, fqn, kind FROM classes " +
-                                "WHERE id BETWEEN ${range.first} AND ${range.last}",
-                        )
+                    // 'delete' command needs the exact indexed values. Only
+                    // sessions that carry the gated accelerators have a
+                    // classes_fts to mirror at all. The search domains need
+                    // no mirror either way: they reference values, not row
+                    // ids, so deleted rows simply stop being found through
+                    // them and id reuse cannot resurface stale hits.
+                    if (syncAccelerators) {
+                        ranges["classes"]?.let { range ->
+                            statement.executeUpdate(
+                                "INSERT INTO classes_fts(classes_fts, rowid, fqn, kind) " +
+                                    "SELECT 'delete', id, fqn, kind FROM classes " +
+                                    "WHERE id BETWEEN ${range.first} AND ${range.last}",
+                            )
+                        }
                     }
                     // class_interfaces has no id of its own; its rows follow
                     // the shard's classes range via the class_id index.
@@ -1451,10 +1604,19 @@ class SessionBuilder {
      * the captured offsets, reruns are naturally idempotent per merge
      * transaction. Internal (not private) so query-test fixtures that insert
      * session rows directly can run the same fill the merge paths run.
+     * includeMethodDomains carries the size-gate decision: below the gate a
+     * session has no method domain tables and only the string domain (never
+     * gated — see [GATED_SESSION_OBJECTS]) is filled.
      */
-    internal fun syncSearchDomains(connection: Connection, methodIdOffset: Int, stringIdOffset: Int) {
+    internal fun syncSearchDomains(
+        connection: Connection,
+        methodIdOffset: Int,
+        stringIdOffset: Int,
+        includeMethodDomains: Boolean = true,
+    ) {
         connection.createStatement().use { statement ->
             for (domain in SEARCH_DOMAINS) {
+                if (!includeMethodDomains && domain.sourceTable == "methods") continue
                 val sourceOffset =
                     if (domain.sourceTable == "methods") methodIdOffset else stringIdOffset
                 val domainOffset = maxId(connection, domain.domainTable)
@@ -1498,7 +1660,7 @@ class SessionBuilder {
         }
     }
 
-    private fun createIndexes(connection: Connection) {
+    private fun createIndexes(connection: Connection, accelerated: Boolean) {
         connection.createStatement().use { statement ->
             statement.execute("CREATE INDEX idx_s_cfg_prefix ON config_properties(prefix)")
             statement.execute("CREATE INDEX idx_s_cfg_name ON config_properties(name)")
@@ -1523,8 +1685,13 @@ class SessionBuilder {
             // method rows. Chosen over a per-row descriptor_id mapping by
             // measurement — the sorter builds this index in ~0.4s per 687k
             // methods, while resolving integer ids cost ~1.3s set-based at
-            // commit (probe join + int index) and ~3s per-shard.
-            statement.execute("CREATE INDEX idx_s_methods_descriptor ON methods(descriptor)")
+            // commit (probe join + int index) and ~3s per-shard. Size-gated
+            // with the descriptor domain it serves.
+            if (accelerated) {
+                statement.execute(
+                    "CREATE INDEX idx_s_methods_descriptor ON methods(descriptor)",
+                )
+            }
             // Corrupt shards can carry a method whose class is absent, hence
             // an unresolved (formerly NULL-symbol) owner. The index keeps the tiny compatibility
             // branch for its original name-prefix semantics O(orphan count).
@@ -1552,14 +1719,17 @@ class SessionBuilder {
             // Domain uniqueness guards. Created before the commit-time domain
             // fill: the fill's DISTINCT emits values in index order, so these
             // build by pure appends; the delta path needs them as the
-            // INSERT OR IGNORE conflict target.
-            statement.execute(
-                "CREATE UNIQUE INDEX idx_s_method_names_name ON method_names(name)",
-            )
-            statement.execute(
-                "CREATE UNIQUE INDEX idx_s_method_descriptors_descriptor " +
-                    "ON method_descriptors(descriptor)",
-            )
+            // INSERT OR IGNORE conflict target. The method domain guards are
+            // size-gated with their tables; the string domain is not.
+            if (accelerated) {
+                statement.execute(
+                    "CREATE UNIQUE INDEX idx_s_method_names_name ON method_names(name)",
+                )
+                statement.execute(
+                    "CREATE UNIQUE INDEX idx_s_method_descriptors_descriptor " +
+                        "ON method_descriptors(descriptor)",
+                )
+            }
             statement.execute(
                 "CREATE UNIQUE INDEX idx_s_string_values_value ON string_values(value)",
             )
