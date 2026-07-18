@@ -24,6 +24,7 @@ research4jar search-symbol DataSourceAutoConfiguration     # broad search: class
                                                            # annotations, config keys, SPI, strings
 research4jar dep precise 'import org.springframework.context.ApplicationContext;'
 research4jar explain-conditional org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+research4jar get-source 'com.fasterxml.jackson.databind.ObjectMapper#readTree'   # read the real implementation
 ```
 
 That one `index` run also wires up your agents (next section). Re-runs are incremental: unchanged jars hit the content-addressed cache, an unchanged classpath reuses its session instantly, and small dependency changes update the previous index by copy-on-write delta in seconds — even on thousand-jar classpaths.
@@ -44,7 +45,7 @@ claude mcp add research4jar -- research4jar mcp
 { "mcpServers": { "research4jar": { "command": "research4jar", "args": ["mcp"] } } }
 ```
 
-The recommended agent flow: `project_status` (is there an index? what does it cover?) → `search_symbols` (broad) → `open_symbol` (expand one hit) → `dependency_precise` / `class_origin` for "which jar owns this and where does the project consume it". `check_environment` mirrors `research4jar doctor --format json` for automated setup.
+The recommended agent flow: `project_status` (is there an index? what does it cover?) → `search_symbols` (broad) → `open_symbol` (expand one hit) → `dependency_precise` / `class_origin` for "which jar owns this and where does the project consume it" → `get_source` to read the implementation itself. `check_environment` mirrors `research4jar doctor --format json` for automated setup.
 
 ## What can I ask?
 
@@ -56,6 +57,9 @@ Start from the task, not the command:
 | Which jar/dependency is behind this import, class, or coordinate? | `dep precise '<import\|class\|coordinate\|jar>'` |
 | Why is this dependency on the classpath at all? | `dep why '<coordinate\|jar\|class>'` |
 | I only have a word or name fragment | `search-symbol '<text>'`, then `open-symbol '<fqn\|Class#method>'` |
+| Read a dependency class's actual source | `get-source <fqn>` (local sources jar, else built-in decompiler) |
+| Read just one method's implementation | `get-source 'Class#method'` — exact body slices, all overloads |
+| Grep inside one dependency's sources | `search-source '<text>' --in <coordinate\|jar>` |
 | Who implements this interface / extends this class? | `find-implementations <fqn>` (transitive by default) |
 | What classes carry this annotation? | `find-by-annotation <fqn>` (meta-annotations expanded: `@Component` finds `@Service`) |
 | What Spring config properties exist under a prefix? | `find-config-properties spring.datasource` |
@@ -137,6 +141,7 @@ Downloads verify against a checksum sidecar, the shard's embedded jar identity, 
 
 - Deep Spring facts: configuration metadata, `spring.factories`/auto-configuration imports, `@Bean` definitions, conditions, meta-annotation expansion
 - General Java retrieval: classes, methods, packages, annotations, class hierarchies, SPI registrations, bytecode string constants
+- Dependency source reading: `get-source` serves real sources from local Maven/Gradle caches (opt-in `--fetch` through your own Maven), falls back to bundled CFR decompilation with per-class caching, and slices exact method bodies; `search-source` greps inside one dependency's sources — responses declare `source_kind` so agents know fidelity
 - Dependency provenance: which jar owns a symbol, which Maven dependency introduced it, and where the project's own sources consume it (`dep precise`, `dep why`; Maven captured by the CLI, Gradle natively by the build plugin)
 - Deterministic content-addressed shards, incremental re-indexing, copy-on-write session deltas, automatic cache hygiene
 - CLI + MCP stdio server + Maven/Gradle build plugins (`research4jar:index` goal, `research4jarIndex` task) from one Java 8+ fat jar, on Linux/macOS/Windows
