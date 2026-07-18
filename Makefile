@@ -1,5 +1,7 @@
 GRADLEW := ./gradlew
-CLI_VERSION := 0.2.0
+# Single source of truth: gradle.properties VERSION_NAME (the same value every
+# Gradle module reads); a hardcoded copy here broke the v0.3.0 release run.
+CLI_VERSION := $(shell sed -n 's/^VERSION_NAME=//p' gradle.properties)
 CLI_JAR := cli/build/libs/research4jar-cli-$(CLI_VERSION).jar
 PREFIX ?= $(HOME)/.local
 
