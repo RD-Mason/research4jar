@@ -54,6 +54,8 @@ Start from the task, not the command:
 | Task | Command |
 | --- | --- |
 | Is the project indexed? Did the classpath change since? | `status`, `status --check-classpath` |
+| Index several repos/services in one go | `index-many --projects <dir1,dir2,...> [--concurrency N]` |
+| Indexing is slow because of SNAPSHOT checks | `index --no-snapshot-updates` (Maven), `--build-arg -o` for full offline |
 | Which jar/dependency is behind this import, class, or coordinate? | `dep precise '<import\|class\|coordinate\|jar>'` |
 | Why is this dependency on the classpath at all? | `dep why '<coordinate\|jar\|class>'` |
 | I only have a word or name fragment | `search-symbol '<text>'`, then `open-symbol '<fqn\|Class#method>'` |
@@ -146,6 +148,7 @@ Downloads verify against a checksum sidecar, the shard's embedded jar identity, 
 - Dependency source reading: `get-source` serves real sources from local Maven/Gradle caches (opt-in `--fetch` through your own Maven), falls back to bundled CFR decompilation with per-class caching, and slices exact method bodies (slice results cached by content hash); `search-source` greps inside one dependency's sources — responses declare `source_kind` so agents know fidelity
 - Multi-version conflict alerting: `index` audits the classpath for classes shipped by more than one jar (hidden multi-version and shaded-bundle overlaps) and warns with the offending jar pairs; source reads on a conflicted class list every owning jar and support pinning one with `--in`
 - Dependency provenance: which jar owns a symbol, which Maven dependency introduced it, and where the project's own sources consume it (`dep precise`, `dep why`; Maven captured by the CLI, Gradle natively by the build plugin)
+- Build-tool integration tuned for onboarding: a first Maven index resolves the classpath and the provenance tree in ONE Maven run; multi-module reactors index without a prior `mvn install` (external jars only — sibling modules are your own source); `--no-snapshot-updates` and `--build-arg` control the underlying Maven/Gradle invocation; `index-many --projects a,b,c` indexes several projects in one process under a global concurrency cap with a shared extraction cache; the stats JSON breaks down `classpath_ms` / `extract_ms` / `provenance_ms` / `total_ms`
 - Deterministic content-addressed shards, incremental re-indexing, copy-on-write session deltas, automatic cache hygiene
 - CLI + MCP stdio server + Maven/Gradle build plugins (`research4jar:index` goal, `research4jarIndex` task) from one Java 8+ fat jar, on Linux/macOS/Windows
 

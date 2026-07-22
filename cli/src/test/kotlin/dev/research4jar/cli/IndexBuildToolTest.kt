@@ -141,6 +141,81 @@ class IndexBuildToolTest {
     }
 
     @Test
+    fun `index-many indexes all projects sharing one extraction cache`() {
+        val work = Files.createTempDirectory("r4j-index-many-")
+        val home = Files.createDirectory(work.resolve("home"))
+        val shared = tinyJar(Files.createDirectory(work.resolve("jars")))
+        val projectA = Files.createDirectory(work.resolve("a"))
+        val projectB = Files.createDirectory(work.resolve("b"))
+        mavenProject(projectA, shared)
+        mavenProject(projectB, shared)
+
+        val stdout = ByteArrayOutputStream()
+        val stderr = ByteArrayOutputStream()
+        val code = runCli(
+            arrayOf(
+                "index-many", "--projects", "$projectA,$projectB",
+                "--home", home.toString(), "--concurrency", "2",
+            ),
+            PrintStream(stdout), PrintStream(stderr),
+        )
+
+        assertEquals(0, code, stderr.toString(Charsets.UTF_8))
+        val summary = jacksonObjectMapper().readTree(stdout.toString(Charsets.UTF_8))
+        assertEquals(2, summary["projects_total"].intValue())
+        assertEquals(2, summary["projects_indexed"].intValue())
+        assertEquals(0, summary["projects_failed"].intValue())
+        assertEquals(2, summary["concurrency"].intValue())
+        val projects = summary["projects"]
+        assertEquals(2, projects.size())
+        val byDir = (0 until projects.size()).associateBy(
+            { projects[it]["project_dir"].textValue() }, { projects[it] },
+        )
+        // The shared jar extracts once: the first project indexes it newly,
+        // the second reuses the cached shard.
+        val newlyIndexed = byDir.values.sumOf { it["jars_newly_indexed"].intValue() }
+        val skipped = byDir.values.sumOf { it["jars_skipped"].intValue() }
+        assertEquals(1, newlyIndexed, stdout.toString(Charsets.UTF_8))
+        assertEquals(1, skipped, stdout.toString(Charsets.UTF_8))
+        for (dir in listOf(projectA, projectB)) {
+            assertTrue(Files.exists(dir.resolve(".research4jar").resolve("project.json")), "$dir")
+            assertTrue(Files.exists(dir.resolve(".research4jar").resolve("dependencies.json")), "$dir")
+            assertTrue(byDir.getValue(dir.toString()).has("total_ms"))
+        }
+    }
+
+    @Test
+    fun `index-many reports a failing project and continues with the rest`() {
+        val work = Files.createTempDirectory("r4j-index-many-")
+        val home = Files.createDirectory(work.resolve("home"))
+        val projectA = Files.createDirectory(work.resolve("a"))
+        val broken = Files.createDirectory(work.resolve("broken"))
+        mavenProject(projectA, tinyJar(work))
+        // Broken project: a pom with a wrapper that always fails.
+        Files.writeString(broken.resolve("pom.xml"), "<project/>\n")
+        val wrapper = broken.resolve("mvnw")
+        Files.writeString(wrapper, "#!/bin/sh\nexit 1\n")
+        wrapper.toFile().setExecutable(true)
+
+        val stdout = ByteArrayOutputStream()
+        val code = runCli(
+            arrayOf("index-many", "--projects", "$projectA,$broken", "--home", home.toString()),
+            PrintStream(stdout), PrintStream(ByteArrayOutputStream()),
+        )
+
+        assertEquals(1, code)
+        val summary = jacksonObjectMapper().readTree(stdout.toString(Charsets.UTF_8))
+        assertEquals(2, summary["projects_total"].intValue())
+        assertEquals(1, summary["projects_indexed"].intValue())
+        assertEquals(1, summary["projects_failed"].intValue())
+        val projects = summary["projects"]
+        val errors = (0 until projects.size()).mapNotNull { projects[it]["error"]?.textValue() }
+        assertEquals(1, errors.size)
+        assertTrue(errors[0].contains("maven classpath resolution failed"), errors[0])
+        assertTrue(Files.exists(projectA.resolve(".research4jar").resolve("project.json")))
+    }
+
+    @Test
     fun `tree parse failure degrades to a warning and indexing succeeds`() {
         val work = Files.createTempDirectory("r4j-index-")
         val project = Files.createDirectory(work.resolve("project"))

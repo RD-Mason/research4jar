@@ -11,6 +11,7 @@ class CliHelpTest {
     fun `every command family provides side effect free help`() {
         val commands = listOf(
             arrayOf("index", "--help"),
+            arrayOf("index-many", "--help"),
             arrayOf("doctor", "--help"),
             arrayOf("status", "--help"),
             arrayOf("cache", "--help"),

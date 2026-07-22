@@ -133,6 +133,8 @@ private fun dispatch(argv: Array<String>, io: CliIO): Int {
             0
         }
 
+        command == "index-many" -> IndexOrchestrator.runIndexManyCommand(rest, io)
+
         command == "doctor" -> runDoctorCommand(rest, io)
         command == "status" -> runStatusCommand(rest, io)
 

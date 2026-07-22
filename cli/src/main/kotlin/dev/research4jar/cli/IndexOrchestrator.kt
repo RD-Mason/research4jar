@@ -162,7 +162,8 @@ object IndexOrchestrator {
         val extraction = runInProcessExtraction(jarsSpec, opts, io)
         val provenanceStarted = Instant.now()
         captureDependencyProvenance(
-            opts.projectDir, previousFingerprint, extraction.pendingProvenance, opts, io,
+            opts.projectDir, previousFingerprint, extraction.pendingProvenance,
+            opts.buildArgs, opts.noSnapshotUpdates, io,
         )
         val provenanceMs = Duration.between(provenanceStarted, Instant.now()).toMillis()
         printExtractionStats(extraction, provenanceMs, startedAt, io)
@@ -211,27 +212,13 @@ object IndexOrchestrator {
             var classpathMs = 0L
             var pending: PendingProvenance? = null
             if (jars.isEmpty()) {
-                val discoveryStarted = Instant.now()
-                val discovered: List<String>
-                if (wantsMergedMavenDiscovery(opts.projectDir)) {
-                    val merged = Classpath.discoverMavenWithTree(
-                        opts.projectDir, opts.buildArgs, opts.noSnapshotUpdates,
-                    )
-                    discovered = merged.jars
-                    pending = pendingProvenanceOf(merged, opts.projectDir)
-                } else {
-                    discovered = Classpath.discover(
-                        opts.projectDir, opts.buildArgs, opts.noSnapshotUpdates,
-                    )
-                }
-                if (discovered.isEmpty()) {
-                    throw RuntimeException("build tool resolved an empty runtime classpath")
-                }
-                classpathMs = Duration.between(discoveryStarted, Instant.now()).toMillis()
+                val discovery = discoverForIndex(opts.projectDir, opts.buildArgs, opts.noSnapshotUpdates)
                 io.err.println(
-                    "research4jar: resolved ${discovered.size} dependency jars from the build tool",
+                    "research4jar: resolved ${discovery.jars.size} dependency jars from the build tool",
                 )
-                jars = discovered.joinToString(",")
+                jars = discovery.jars.joinToString(",")
+                classpathMs = discovery.classpathMs
+                pending = discovery.pending
             }
             val statistics = runIndexPipeline(
                 jars, Paths.get(opts.projectDir), opts.home.ifEmpty { null },
@@ -246,6 +233,188 @@ object IndexOrchestrator {
                 1,
             )
         }
+    }
+
+    // --- CLI `index-many` command ---
+
+    /**
+     * Indexes several projects in one process with a global concurrency
+     * cap. Build-tool classpath discovery (external Maven/Gradle processes,
+     * I/O bound) runs in parallel up to `--concurrency`; extraction then
+     * runs project-by-project through the shared in-process pipeline, which
+     * is already core-saturating and memory-gated per JVM — that single
+     * pipeline IS the global extraction cap, and the shared shard cache
+     * extracts each distinct jar once no matter how many projects list it.
+     */
+    fun runIndexManyCommand(args: Array<String>, io: CliIO): Int {
+        if (helpRequested(args)) {
+            printIndexManyHelp(io.out)
+            return 0
+        }
+        var projects = ""
+        var home = ""
+        var concurrency = 0
+        val buildArgs = mutableListOf<String>()
+        var noSnapshotUpdates = false
+        var index = 0
+        while (index < args.size) {
+            when (val argument = args[index]) {
+                "--projects", "--home", "--concurrency", "--build-arg" -> {
+                    val (value, next) = optionValue(args, index, argument)
+                    when (argument) {
+                        "--projects" -> projects = value
+                        "--home" -> home = value
+                        "--concurrency" -> {
+                            concurrency = value.toIntOrNull()?.takeIf { it >= 1 }
+                                ?: fail("invalid_arguments", "--concurrency must be a positive integer", 2)
+                        }
+                        "--build-arg" -> buildArgs += value
+                    }
+                    index = next
+                }
+
+                "--no-snapshot-updates" -> noSnapshotUpdates = true
+
+                else -> fail("invalid_arguments", "unknown option: $argument", 2)
+            }
+            index++
+        }
+        val dirs = projects.split(",").map(String::trim).filter(String::isNotEmpty).distinct()
+        if (dirs.isEmpty()) {
+            fail("invalid_arguments", "--projects is required (comma-separated project directories)", 2)
+        }
+        val cap = if (concurrency > 0) {
+            concurrency
+        } else {
+            minOf(4, Runtime.getRuntime().availableProcessors()).coerceAtLeast(1)
+        }
+        val startedAt = Instant.now()
+
+        // Phase 1: parallel discovery, bounded by the cap.
+        class Prepared(
+            val dir: String,
+            val previousFingerprint: String,
+            val discovery: Discovery?,
+            val error: String,
+        )
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(minOf(cap, dirs.size))
+        val prepared: List<Prepared> = try {
+            dirs.map { dir ->
+                executor.submit(
+                    java.util.concurrent.Callable {
+                        val previousFingerprint = indexedFingerprint(dir)
+                        try {
+                            val discovery = discoverForIndex(dir, buildArgs, noSnapshotUpdates)
+                            io.err.println(
+                                "research4jar: [$dir] resolved ${discovery.jars.size} " +
+                                    "dependency jars from the build tool",
+                            )
+                            Prepared(dir, previousFingerprint, discovery, "")
+                        } catch (exception: Exception) {
+                            Prepared(dir, previousFingerprint, null, errMessage(exception))
+                        }
+                    },
+                )
+            }.map { it.get() }
+        } finally {
+            executor.shutdown()
+        }
+
+        // Phase 2: extraction and provenance, one project at a time.
+        val mapper = jacksonObjectMapper()
+        val results = ArrayList<com.fasterxml.jackson.databind.node.ObjectNode>(prepared.size)
+        var failed = 0
+        for (plan in prepared) {
+            val entry = mapper.createObjectNode()
+            entry.put("project_dir", plan.dir)
+            val discovery = plan.discovery
+            if (discovery == null) {
+                failed++
+                entry.put("error", plan.error)
+                io.err.println("research4jar: [${plan.dir}] index failed: ${plan.error}")
+                results += entry
+                continue
+            }
+            try {
+                val projectStarted = Instant.now()
+                val statistics = runIndexPipeline(
+                    discovery.jars.joinToString(","),
+                    Paths.get(plan.dir),
+                    home.ifEmpty { null },
+                )
+                val provenanceStarted = Instant.now()
+                captureDependencyProvenance(
+                    plan.dir, plan.previousFingerprint, discovery.pending,
+                    buildArgs, noSnapshotUpdates, io,
+                )
+                entry.setAll<com.fasterxml.jackson.databind.node.ObjectNode>(
+                    mapper.valueToTree<com.fasterxml.jackson.databind.node.ObjectNode>(statistics),
+                )
+                entry.put("classpath_ms", discovery.classpathMs)
+                entry.put("extract_ms", statistics.duration_ms)
+                entry.put(
+                    "provenance_ms",
+                    Duration.between(provenanceStarted, Instant.now()).toMillis(),
+                )
+                entry.put(
+                    "total_ms",
+                    discovery.classpathMs +
+                        Duration.between(projectStarted, Instant.now()).toMillis(),
+                )
+            } catch (exception: Exception) {
+                failed++
+                entry.put("error", errMessage(exception))
+                io.err.println("research4jar: [${plan.dir}] index failed: ${errMessage(exception)}")
+            }
+            results += entry
+        }
+
+        val summary = LinkedHashMap<String, Any?>()
+        summary["projects_total"] = prepared.size
+        summary["projects_indexed"] = prepared.size - failed
+        summary["projects_failed"] = failed
+        summary["concurrency"] = cap
+        summary["total_ms"] = Duration.between(startedAt, Instant.now()).toMillis()
+        summary["projects"] = results
+        printJson(io.out, summary)
+        return if (failed == 0) 0 else 1
+    }
+
+    /** Build-tool classpath discovery outcome for one project. */
+    private class Discovery(
+        val jars: List<String>,
+        val classpathMs: Long,
+        val pending: PendingProvenance?,
+    )
+
+    /**
+     * Resolves one project's classpath through its build tool, riding the
+     * provenance tree along in the same Maven run where warranted (see
+     * [wantsMergedMavenDiscovery]). Throws on resolution failure.
+     */
+    private fun discoverForIndex(
+        projectDir: String,
+        buildArgs: List<String>,
+        noSnapshotUpdates: Boolean,
+    ): Discovery {
+        val discoveryStarted = Instant.now()
+        val discovered: List<String>
+        var pending: PendingProvenance? = null
+        if (wantsMergedMavenDiscovery(projectDir)) {
+            val merged = Classpath.discoverMavenWithTree(projectDir, buildArgs, noSnapshotUpdates)
+            discovered = merged.jars
+            pending = pendingProvenanceOf(merged, projectDir)
+        } else {
+            discovered = Classpath.discover(projectDir, buildArgs, noSnapshotUpdates)
+        }
+        if (discovered.isEmpty()) {
+            throw RuntimeException("build tool resolved an empty runtime classpath")
+        }
+        return Discovery(
+            discovered,
+            Duration.between(discoveryStarted, Instant.now()).toMillis(),
+            pending,
+        )
     }
 
     /** Folds a merged discovery's tree half into a [PendingProvenance]. */
@@ -382,7 +551,10 @@ object IndexOrchestrator {
         } catch (exception: Exception) {
             fail("index_error", "write CLAUDE.md guidance: ${errMessage(exception)}", 1)
         }
-        captureDependencyProvenance(projectDir, previousFingerprint, null, opts, io)
+        captureDependencyProvenance(
+            projectDir, previousFingerprint, null,
+            opts.buildArgs, opts.noSnapshotUpdates, io,
+        )
         io.err.println(
             "research4jar: session built from cached/registry shards; no local extraction needed",
         )
@@ -419,7 +591,8 @@ object IndexOrchestrator {
         projectDir: String,
         previousFingerprint: String,
         pending: PendingProvenance?,
-        opts: IndexCommandOptions,
+        buildArgs: List<String>,
+        noSnapshotUpdates: Boolean,
         io: CliIO,
     ) {
         if (previousFingerprint.isNotEmpty() &&
@@ -437,7 +610,7 @@ object IndexOrchestrator {
             pending.graph
         } else {
             try {
-                DepGraphCapture.capture(projectDir, opts.buildArgs, opts.noSnapshotUpdates)
+                DepGraphCapture.capture(projectDir, buildArgs, noSnapshotUpdates)
             } catch (_: DepGraphUnsupportedException) {
                 return
             } catch (exception: Exception) {

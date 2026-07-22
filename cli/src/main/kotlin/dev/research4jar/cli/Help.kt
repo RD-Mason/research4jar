@@ -15,6 +15,9 @@ internal fun printHelp(out: PrintStream) {
   research4jar index [--jars <DIR|GLOB|LIST>] [options]   Index a project's dependency jars.
                                                        Without --jars the classpath is resolved
                                                        via Maven/Gradle (wrapper preferred).
+  research4jar index-many --projects <DIR1,DIR2,...>      Index several projects in one process:
+                     [--concurrency <N>] [options]     parallel classpath resolution under a
+                                                       global cap, shared jar extraction cache.
   research4jar mcp                                        Run as an MCP stdio server (for Cursor,
                                                        Claude Code, and other MCP hosts).
   research4jar doctor [--source-build]                    Check required runtime/build tools and
@@ -257,6 +260,28 @@ reactors are supported without a prior `mvn install`: one run compiles the
 modules so sibling dependencies resolve from their build output, and the
 index covers every module's external jars (module-to-module dependencies are
 first-party code and stay out of the index).""",
+    )
+}
+
+internal fun printIndexManyHelp(out: PrintStream) {
+    out.println(
+        """Usage:
+  research4jar index-many --projects <DIR1,DIR2,...> [options]
+
+Index several projects in one process. Classpath resolution (external
+Maven/Gradle processes) runs in parallel up to --concurrency; jar extraction
+then runs project-by-project through the shared pipeline, which is itself
+parallel, memory-gated, and content-addressed — a jar shared by many projects
+is extracted once. Prints one JSON summary with per-project stats; a failing
+project is reported and does not stop the others (exit 1 if any failed).
+
+Options:
+  --projects <LIST>       Comma-separated project directories (required).
+  --concurrency <N>       Max parallel build-tool resolutions
+                          (default: min(4, CPU cores)).
+  --home <DIR>            Override the Research4Jar data home.
+  --no-snapshot-updates   Skip Maven SNAPSHOT metadata updates (Maven only).
+  --build-arg <ARG>       Extra build-tool argument, repeatable.""",
     )
 }
 
