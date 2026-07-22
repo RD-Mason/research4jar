@@ -12,8 +12,10 @@ import kotlin.test.assertTrue
  * Exercises build-tool invocation shapes against fake wrapper scripts: the
  * wrapper records its argv into calls.log and serves canned payloads from the
  * project directory, so these tests pin the exact command lines without
- * needing Maven or Gradle installed.
+ * needing Maven or Gradle installed. The fakes are POSIX shell scripts, so
+ * Windows CI (which would fall through to a real `mvn`) skips this class.
  */
+@org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
 class ClasspathBuildToolTest {
 
     private fun mavenProject(dir: Path) {
@@ -247,24 +249,6 @@ class ClasspathBuildToolTest {
         assertEquals(listOf(coreTree, appTree), merged.tgfs)
         assertEquals("", merged.treeFailure)
         assertEquals(1, calls(dir).size)
-    }
-
-    @Test
-    fun `tgf sections merge dedupes by shallowest coordinate`() {
-        val coreTree = "1 com.fixture:core:jar:1.0\n2 org.demo:lib:jar:2.0:compile\n#\n1 2\n"
-        val appTree = "9 com.fixture:app:jar:1.0\n8 com.fixture:core:jar:1.0:compile\n" +
-            "7 org.demo:lib:jar:2.0:compile\n#\n9 8\n8 7\n"
-        val graph = DepGraphCapture.graphFromTgfSections(listOf(coreTree, appTree), "/root")
-
-        val byCoordinate = graph.artifacts.associateBy { it.coordinate }
-        assertEquals(3, graph.artifacts.size)
-        // Both module coordinates stay depth-0 roots even though app lists core.
-        assertEquals(0, byCoordinate.getValue("com.fixture:core:1.0").depth)
-        assertEquals(0, byCoordinate.getValue("com.fixture:app:1.0").depth)
-        // The shared external keeps its shortest path (depth 1 via core).
-        assertEquals(1, byCoordinate.getValue("org.demo:lib:2.0").depth)
-        assertEquals("/root", graph.projectRoot)
-        assertEquals("maven", graph.buildTool)
     }
 
     @Test

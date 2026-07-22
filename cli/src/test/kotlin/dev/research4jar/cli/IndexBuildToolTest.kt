@@ -17,8 +17,10 @@ import kotlin.test.assertTrue
  * build-tool contract: ONE Maven run answers both the classpath and the
  * dependency tree on a first index, re-runs skip the tree, explicit
  * --no-snapshot-updates/--build-arg reach the invocation, and the stats JSON
- * carries the phase timings.
+ * carries the phase timings. The fakes are POSIX shell scripts, so Windows
+ * CI (which would fall through to a real `mvn`) skips this class.
  */
+@org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
 class IndexBuildToolTest {
 
     private val tgf = "1 com.example:app:jar:1.0\n2 org.demo:lib:jar:2.0:compile\n#\n1 2\n"
