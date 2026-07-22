@@ -24,7 +24,11 @@ object DepGraphCapture {
      * [DepGraphUnsupportedException] so indexing can continue without
      * provenance (Go depgraph.Capture returning ErrUnsupported).
      */
-    fun capture(projectDir: String): Graph {
+    fun capture(
+        projectDir: String,
+        buildArgs: List<String> = emptyList(),
+        noSnapshotUpdates: Boolean = false,
+    ): Graph {
         val absolute = Paths.get(projectDir).toAbsolutePath().normalize()
         if (!Files.isRegularFile(absolute.resolve("pom.xml"))) {
             throw DepGraphUnsupportedException()
@@ -37,7 +41,7 @@ object DepGraphCapture {
                     listOf(
                         "-q", "-Dscope=runtime", "dependency:tree",
                         "-DoutputType=tgf", "-DoutputFile=$outputPath",
-                    ),
+                    ) + Classpath.mavenSnapshotArgs(noSnapshotUpdates) + buildArgs,
                 )
             } catch (exception: Exception) {
                 // Command could not start (e.g. mvn missing); Go reports the
@@ -59,15 +63,19 @@ object DepGraphCapture {
                     "read maven dependency tree: ${exception.message ?: exception}",
                 )
             }
-            val graph = reader.use { parseTGF(it) }
-            return graph.copy(
-                projectRoot = absolute.toString(),
-                generatedAt = Instant.now().epochSecond,
-            )
+            return reader.use { graphFromTgf(it, absolute.toString()) }
         } finally {
             Files.deleteIfExists(outputPath)
         }
     }
+
+    /** Parses TGF text into a project-stamped graph (shared with the merged
+     *  classpath+tree discovery, which already holds the TGF in memory). */
+    fun graphFromTgf(reader: Reader, projectRoot: String): Graph =
+        parseTGF(reader).copy(
+            projectRoot = projectRoot,
+            generatedAt = Instant.now().epochSecond,
+        )
 
     /**
      * Stores the graph under .research4jar/dependencies.json: Go

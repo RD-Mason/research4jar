@@ -31,23 +31,92 @@ object Classpath {
         }
     """.trimIndent() + "\n"
 
-    fun discover(projectDir: String): List<String> {
+    fun discover(
+        projectDir: String,
+        buildArgs: List<String> = emptyList(),
+        noSnapshotUpdates: Boolean = false,
+    ): List<String> {
         val absolute = Paths.get(projectDir).toAbsolutePath().normalize()
         return when {
-            Files.isRegularFile(absolute.resolve("pom.xml")) -> discoverMaven(absolute)
+            Files.isRegularFile(absolute.resolve("pom.xml")) ->
+                discoverMaven(absolute, buildArgs, noSnapshotUpdates)
             listOf("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")
-                .any { Files.isRegularFile(absolute.resolve(it)) } -> discoverGradle(absolute)
+                .any { Files.isRegularFile(absolute.resolve(it)) } ->
+                discoverGradle(absolute, buildArgs)
 
             else -> throw NoBuildToolException()
         }
     }
 
-    private fun discoverMaven(projectDir: Path): List<String> {
-        requireWrapperOrTool(
-            projectDir, listOf("mvnw", "mvnw.cmd", "mvnw.bat"), "mvn",
-            "maven classpath resolution needs ./mvnw or mvn on PATH; " +
-                "pass --jars explicitly or run research4jar doctor --project-dir $projectDir",
-        )
+    fun isMavenProject(projectDir: String): Boolean =
+        Files.isRegularFile(Paths.get(projectDir).toAbsolutePath().normalize().resolve("pom.xml"))
+
+    /**
+     * One Maven run answering both questions the first index needs: the
+     * runtime classpath and the dependency tree (provenance). Merging them
+     * shares the JVM startup, dependency resolution, and any SNAPSHOT
+     * metadata checks that a separate `dependency:tree` run would repeat.
+     * The tree half is best-effort: [tgf] is empty and [treeFailure]
+     * explains why when only the classpath came back.
+     */
+    class MavenDiscoveryWithTree(
+        val jars: List<String>,
+        val tgf: String,
+        val treeFailure: String,
+    )
+
+    fun discoverMavenWithTree(
+        projectDir: String,
+        buildArgs: List<String> = emptyList(),
+        noSnapshotUpdates: Boolean = false,
+    ): MavenDiscoveryWithTree {
+        val absolute = Paths.get(projectDir).toAbsolutePath().normalize()
+        requireMaven(absolute)
+        val classpathOutput = Files.createTempFile("research4jar-classpath-", ".txt")
+        val treeOutput = Files.createTempFile("research4jar-dependency-tree-", ".tgf")
+        try {
+            val result = runBuildCommand(
+                absolute, "mvnw", "mvn",
+                listOf(
+                    "-q", "-DincludeScope=runtime",
+                    "dependency:build-classpath",
+                    "-Dmdep.outputFile=$classpathOutput",
+                    "-Dscope=runtime", "dependency:tree",
+                    "-DoutputType=tgf", "-DoutputFile=$treeOutput",
+                ) + mavenSnapshotArgs(noSnapshotUpdates) + buildArgs,
+            )
+            val raw = String(Files.readAllBytes(classpathOutput), Charsets.UTF_8).trim()
+            val jars = filterJars(raw.split(File.pathSeparator))
+            if (result.exitCode != 0) {
+                // Goals run in order, so a populated classpath file means only
+                // the tree half failed; provenance degrades, indexing goes on.
+                if (jars.isEmpty()) {
+                    throw RuntimeException(
+                        "maven classpath resolution failed: exit status ${result.exitCode}\n" +
+                            tail(result.output),
+                    )
+                }
+                return MavenDiscoveryWithTree(
+                    jars = jars,
+                    tgf = "",
+                    treeFailure = "maven dependency tree failed: exit status ${result.exitCode}\n" +
+                        tail(result.output),
+                )
+            }
+            val tgf = String(Files.readAllBytes(treeOutput), Charsets.UTF_8)
+            return MavenDiscoveryWithTree(jars = jars, tgf = tgf, treeFailure = "")
+        } finally {
+            Files.deleteIfExists(classpathOutput)
+            Files.deleteIfExists(treeOutput)
+        }
+    }
+
+    private fun discoverMaven(
+        projectDir: Path,
+        buildArgs: List<String>,
+        noSnapshotUpdates: Boolean,
+    ): List<String> {
+        requireMaven(projectDir)
         val output = Files.createTempFile("research4jar-classpath-", ".txt")
         try {
             val result = runBuildCommand(
@@ -56,7 +125,7 @@ object Classpath {
                     "-q", "-DincludeScope=runtime",
                     "dependency:build-classpath",
                     "-Dmdep.outputFile=$output",
-                ),
+                ) + mavenSnapshotArgs(noSnapshotUpdates) + buildArgs,
             )
             if (result.exitCode != 0) {
                 throw RuntimeException(
@@ -71,7 +140,17 @@ object Classpath {
         }
     }
 
-    private fun discoverGradle(projectDir: Path): List<String> {
+    /** `--no-snapshot-updates` is Maven-only; Gradle has no equivalent flag. */
+    fun mavenSnapshotArgs(noSnapshotUpdates: Boolean): List<String> =
+        if (noSnapshotUpdates) listOf("--no-snapshot-updates") else emptyList()
+
+    private fun requireMaven(projectDir: Path) = requireWrapperOrTool(
+        projectDir, listOf("mvnw", "mvnw.cmd", "mvnw.bat"), "mvn",
+        "maven classpath resolution needs ./mvnw or mvn on PATH; " +
+            "pass --jars explicitly or run research4jar doctor --project-dir $projectDir",
+    )
+
+    private fun discoverGradle(projectDir: Path, buildArgs: List<String>): List<String> {
         requireWrapperOrTool(
             projectDir, listOf("gradlew", "gradlew.cmd", "gradlew.bat"), "gradle",
             "gradle classpath resolution needs ./gradlew or gradle on PATH; " +
@@ -82,7 +161,7 @@ object Classpath {
             Files.write(script, gradleInitScript.toByteArray(Charsets.UTF_8))
             val result = runBuildCommand(
                 projectDir, "gradlew", "gradle",
-                listOf("--init-script", script.toString(), "-q", "research4jarClasspath"),
+                listOf("--init-script", script.toString(), "-q", "research4jarClasspath") + buildArgs,
             )
             if (result.exitCode != 0) {
                 throw RuntimeException(

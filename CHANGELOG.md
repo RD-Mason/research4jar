@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project intends to follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- A first index of a Maven project now answers the runtime classpath AND the dependency provenance tree from ONE Maven run (`dependency:build-classpath` and `dependency:tree` as goals of the same invocation) instead of two separate Maven processes — halving JVM startups, dependency resolution, and any SNAPSHOT metadata checks on the slowest step of onboarding a project. Same-batch A/B against the previous build on a wrapper with 0.5 s simulated resolver latency: 2 invocations -> 1, first-index wall time 3.0-3.5 s -> 2.3 s, provenance file content identical. If the tree half of the merged run fails, the classpath half still indexes and provenance degrades to the same warning as before (never a second Maven process); unchanged re-runs keep resolving the classpath only and reusing provenance exactly as before.
+- `research4jar index` and `research4jar status --check-classpath` accept `--no-snapshot-updates` (passes Maven's `--no-snapshot-updates` to the classpath and provenance runs; Maven only — SNAPSHOT metadata checks against remote repositories are the dominant first-index cost on SNAPSHOT-heavy projects) and repeatable `--build-arg <ARG>` (passed verbatim to the Maven/Gradle invocation: `-o`, `-Pprofile`, `-s settings.xml`, …). The MCP `index_project` and `project_status` tools expose the same as `no_snapshot_updates` and `build_args`.
+- The `index` stats JSON now reports phase timings alongside the classic fields: `classpath_ms` (build-tool resolution; 0 with `--jars`), `extract_ms` (the extraction pipeline, same value as the pre-existing `duration_ms`), `provenance_ms`, and `total_ms` (the real end-to-end command time — `duration_ms` never included classpath resolution or provenance capture). The stats line is now printed after provenance capture completes so `total_ms` is truthful. The MCP `index_project` result carries the same numbers in a `timings` object.
+
 ## [0.3.0] - 2026-07-19
 
 ### Added

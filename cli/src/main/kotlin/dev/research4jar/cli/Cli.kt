@@ -243,10 +243,12 @@ private fun runStatusCommand(args: Array<String>, io: CliIO): Int {
     var home = ""
     var format = "text"
     var checkClasspath = false
+    val buildArgs = mutableListOf<String>()
+    var noSnapshotUpdates = false
     var index = 0
     while (index < args.size) {
         when (val argument = args[index]) {
-            "--project-dir", "--home", "--format" -> {
+            "--project-dir", "--home", "--format", "--build-arg" -> {
                 val (value, next) = optionValue(args, index, argument)
                 when (argument) {
                     "--project-dir" -> projectDir = value
@@ -257,17 +259,19 @@ private fun runStatusCommand(args: Array<String>, io: CliIO): Int {
                         }
                         format = value
                     }
+                    "--build-arg" -> buildArgs += value
                 }
                 index = next
             }
 
             "--check-classpath" -> checkClasspath = true
+            "--no-snapshot-updates" -> noSnapshotUpdates = true
             else -> fail("invalid_arguments", "unknown option: $argument", 2)
         }
         index++
     }
     val response = try {
-        projectStatus(projectDir, home, checkClasspath)
+        projectStatus(projectDir, home, checkClasspath, buildArgs, noSnapshotUpdates)
     } catch (failure: CliFailure) {
         throw failure
     } catch (exception: Exception) {

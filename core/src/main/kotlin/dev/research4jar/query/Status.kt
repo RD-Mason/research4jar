@@ -77,6 +77,8 @@ fun projectStatus(
     projectDir: String?,
     home: String?,
     checkClasspath: Boolean = false,
+    buildArgs: List<String> = emptyList(),
+    noSnapshotUpdates: Boolean = false,
 ): ProjectStatusResponse {
     val projectPath = try {
         ProjectIndex.locate(projectDir)
@@ -86,7 +88,11 @@ fun projectStatus(
             projectDir = root,
             coverage = Coverage(0, 0, emptyList(), 0),
             dependencyProvenance = dependencyProvenanceStatus(root),
-            classpathCheck = if (checkClasspath) checkClasspathStatus(root, "") else null,
+            classpathCheck = if (checkClasspath) {
+                checkClasspathStatus(root, "", buildArgs, noSnapshotUpdates)
+            } else {
+                null
+            },
         )
         status = status.copy(nextSteps = nextStepsForStatus(status, home ?: ""))
         return status
@@ -122,7 +128,7 @@ fun projectStatus(
         manifestExists = regularFile(manifestPath),
         dependencyProvenance = dependencyProvenanceStatus(root),
         classpathCheck = if (checkClasspath) {
-            checkClasspathStatus(root, pointer.classpathFingerprint)
+            checkClasspathStatus(root, pointer.classpathFingerprint, buildArgs, noSnapshotUpdates)
         } else {
             null
         },
@@ -202,14 +208,19 @@ private fun statusCommand(command: String, projectDir: String, home: String): St
     return result
 }
 
-private fun checkClasspathStatus(projectDir: String, indexedFingerprint: String): ClasspathCheckStatus {
+private fun checkClasspathStatus(
+    projectDir: String,
+    indexedFingerprint: String,
+    buildArgs: List<String> = emptyList(),
+    noSnapshotUpdates: Boolean = false,
+): ClasspathCheckStatus {
     val base = ClasspathCheckStatus(
         checked = true,
         indexedFingerprint = indexedFingerprint,
         extractorVersion = Research4JarVersions.EXTRACTOR,
     )
     val jars = try {
-        Classpath.discover(projectDir)
+        Classpath.discover(projectDir, buildArgs, noSnapshotUpdates)
     } catch (exception: RuntimeException) {
         return base.copy(error = exception.message ?: "classpath discovery failed")
     }

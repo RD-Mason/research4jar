@@ -114,7 +114,11 @@ Options:
   --project-dir <PATH>   Project root. Defaults to searching upward from cwd.
   --home <DIR>           Override Research4Jar home for manifest lookup.
   --check-classpath      Check whether the current runtime classpath fingerprint
-                         still matches the indexed fingerprint.""",
+                         still matches the indexed fingerprint.
+  --no-snapshot-updates  Skip Maven SNAPSHOT metadata updates during the
+                         --check-classpath resolution (Maven only).
+  --build-arg <ARG>      Extra argument passed verbatim to the build tool during
+                         the --check-classpath resolution. Repeatable.""",
     )
 }
 
@@ -236,9 +240,19 @@ Options:
   --jars <VALUE>          Jar directory, glob, or comma-separated paths.
   --project-dir <PATH>    Project root (default: current directory).
   --home <DIR>            Override the Research4Jar data home.
+  --no-snapshot-updates   Skip Maven SNAPSHOT metadata updates (Maven's
+                          --no-snapshot-updates) during classpath and provenance
+                          resolution. Maven only; Gradle projects ignore it.
+  --build-arg <ARG>       Extra argument passed verbatim to the Maven/Gradle
+                          classpath and provenance runs. Repeatable
+                          (e.g. --build-arg -o --build-arg -Pprofile).
   --registry <URL>        Download covered shards from a registry.
   --registry-pubkey <HEX> Require valid ed25519 signatures from the registry.
-  --indexer <PATH>        Accepted for legacy CLI compatibility; indexing is in-process.""",
+  --indexer <PATH>        Accepted for legacy CLI compatibility; indexing is in-process.
+
+On a Maven project the first index resolves the classpath and the dependency
+tree in ONE Maven run; stats JSON reports classpath_ms, extract_ms,
+provenance_ms, and total_ms alongside the classic fields.""",
     )
 }
 

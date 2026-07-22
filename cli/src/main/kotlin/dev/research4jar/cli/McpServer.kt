@@ -123,11 +123,21 @@ object McpServer {
         val sourceBuild: Boolean = false,
         val fetch: Boolean = false,
         val inTarget: String = "",
+        val buildArgs: List<String> = emptyList(),
+        val noSnapshotUpdates: Boolean = false,
     )
 
     private fun parseArguments(node: JsonNode?): ToolArguments {
         fun text(name: String) = node?.get(name)?.asText() ?: ""
         fun flag(name: String) = node?.get(name)?.asBoolean() ?: false
+        fun stringList(name: String): List<String> {
+            val field = node?.get(name) ?: return emptyList()
+            require(field.isArray) { "$name must be an array of strings" }
+            return field.map { entry ->
+                require(entry.isTextual) { "$name must be an array of strings" }
+                entry.textValue()
+            }
+        }
         fun positiveInt(name: String, fallback: Int, maximum: Int = Int.MAX_VALUE): Int {
             val field = node?.get(name) ?: return fallback
             require(field.isIntegralNumber && field.canConvertToInt()) {
@@ -156,6 +166,8 @@ object McpServer {
             sourceBuild = flag("source_build"),
             fetch = flag("fetch"),
             inTarget = text("in"),
+            buildArgs = stringList("build_args"),
+            noSnapshotUpdates = flag("no_snapshot_updates"),
         )
     }
 
@@ -225,6 +237,7 @@ object McpServer {
                 "string" -> value.isTextual
                 "boolean" -> value.isBoolean
                 "integer" -> value.isIntegralNumber && value.canConvertToInt()
+                "array" -> value.isArray && value.all { it.isTextual }
                 else -> false
             }
             if (!valid) return "$field must be ${articleFor(expectedType)}$expectedType"
@@ -232,7 +245,8 @@ object McpServer {
         return null
     }
 
-    private fun articleFor(type: Any?): String = if (type == "integer") "an " else "a "
+    private fun articleFor(type: Any?): String =
+        if (type == "integer" || type == "array") "an " else "a "
 
     private fun dispatchTool(name: String, arguments: ToolArguments): Any {
         if (name == "check_environment") {
@@ -248,7 +262,10 @@ object McpServer {
             return IndexOrchestrator.runIndexTool(arguments)
         }
         if (name == "project_status") {
-            return projectStatus(arguments.projectDir, arguments.home, arguments.checkClasspath)
+            return projectStatus(
+                arguments.projectDir, arguments.home, arguments.checkClasspath,
+                arguments.buildArgs, arguments.noSnapshotUpdates,
+            )
         }
         val (pointer, manifestPath) = ProjectIndex.resolve(
             arguments.projectDir.ifEmpty { null },
@@ -458,6 +475,15 @@ object McpServer {
                             "type" to "string",
                             "description" to "Optional hex ed25519 public key; downloaded registry shards must have valid signatures.",
                         ),
+                        "build_args" to mapOf(
+                            "type" to "array",
+                            "items" to mapOf("type" to "string"),
+                            "description" to "Optional extra arguments passed verbatim to the Maven/Gradle classpath and provenance runs (e.g. \"-o\", \"-Pprofile\", \"-s\", \"settings.xml\").",
+                        ),
+                        "no_snapshot_updates" to mapOf(
+                            "type" to "boolean",
+                            "description" to "Skip Maven SNAPSHOT metadata updates (--no-snapshot-updates) during classpath and provenance resolution. Maven only; big speedup when SNAPSHOT dependencies are present.",
+                        ),
                     ),
                 ),
             ),
@@ -473,6 +499,15 @@ object McpServer {
                         "check_classpath" to mapOf(
                             "type" to "boolean",
                             "description" to "Resolve the current build classpath and report whether it still matches the index.",
+                        ),
+                        "build_args" to mapOf(
+                            "type" to "array",
+                            "items" to mapOf("type" to "string"),
+                            "description" to "Optional extra arguments passed verbatim to the build tool during check_classpath resolution.",
+                        ),
+                        "no_snapshot_updates" to mapOf(
+                            "type" to "boolean",
+                            "description" to "Skip Maven SNAPSHOT metadata updates during check_classpath resolution (Maven only).",
                         ),
                     ),
                 ),

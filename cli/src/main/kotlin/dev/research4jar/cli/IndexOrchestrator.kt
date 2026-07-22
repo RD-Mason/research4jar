@@ -14,9 +14,11 @@ import dev.research4jar.indexer.store.Manifest
 import dev.research4jar.indexer.store.SessionBuilder
 import dev.research4jar.indexer.store.SessionShard
 import dev.research4jar.query.Classpath
+import dev.research4jar.indexer.IndexStatistics
 import dev.research4jar.query.DepGraphCapture
 import dev.research4jar.query.DepGraphFile
 import dev.research4jar.query.DepGraphUnsupportedException
+import dev.research4jar.query.Graph
 import dev.research4jar.query.ProjectIndex
 import dev.research4jar.query.sessionFingerprint
 import dev.research4jar.registry.PrefetchStats
@@ -50,6 +52,23 @@ object IndexOrchestrator {
         val indexer: String = "",
         val registry: String = "",
         val registryPubkey: String = "",
+        val buildArgs: List<String> = emptyList(),
+        val noSnapshotUpdates: Boolean = false,
+    )
+
+    /**
+     * Provenance carried out of a merged classpath+tree Maven run: either a
+     * parsed graph or the reason the tree half failed. Its existence means
+     * the tree goal already ran, so provenance capture must not launch a
+     * second Maven process for this index run.
+     */
+    private class PendingProvenance(val graph: Graph?, val failure: String)
+
+    /** What in-process extraction hands back for the final stats print. */
+    private class ExtractionResult(
+        val statistics: IndexStatistics,
+        val classpathMs: Long,
+        val pendingProvenance: PendingProvenance?,
     )
 
     /** Prefetch outcome bundle (Go returns jars, stats, dataPaths [, warnings]). */
@@ -83,11 +102,13 @@ object IndexOrchestrator {
         var indexer = ""
         var registryUrl = System.getenv("RESEARCH4JAR_REGISTRY") ?: ""
         var registryPubkey = System.getenv("RESEARCH4JAR_REGISTRY_PUBKEY") ?: ""
+        val buildArgs = mutableListOf<String>()
+        var noSnapshotUpdates = false
         var index = 0
         while (index < args.size) {
             when (val argument = args[index]) {
                 "--jars", "--project-dir", "--home", "--indexer",
-                "--registry", "--registry-pubkey",
+                "--registry", "--registry-pubkey", "--build-arg",
                 -> {
                     val (value, next) = optionValue(args, index, argument)
                     when (argument) {
@@ -97,9 +118,12 @@ object IndexOrchestrator {
                         "--indexer" -> indexer = value // accepted, ignored (in-process pipeline)
                         "--registry" -> registryUrl = value
                         "--registry-pubkey" -> registryPubkey = value
+                        "--build-arg" -> buildArgs += value
                     }
                     index = next
                 }
+
+                "--no-snapshot-updates" -> noSnapshotUpdates = true
 
                 else -> fail("invalid_arguments", "unknown option: $argument", 2)
             }
@@ -112,6 +136,8 @@ object IndexOrchestrator {
             indexer = indexer,
             registry = registryUrl,
             registryPubkey = registryPubkey,
+            buildArgs = buildArgs,
+            noSnapshotUpdates = noSnapshotUpdates,
         )
 
         val startedAt = Instant.now()
@@ -122,7 +148,7 @@ object IndexOrchestrator {
             jarsSpec = outcome.jars
             if (outcome.stats.complete) {
                 finishIndexFromRegistry(
-                    outcome.stats, outcome.dataPaths, opts.projectDir,
+                    outcome.stats, outcome.dataPaths, opts,
                     previousFingerprint, startedAt, io,
                 )
                 return
@@ -133,39 +159,113 @@ object IndexOrchestrator {
         // Fallback: Go locates (indexer_not_found on failure) and spawns the
         // launcher here; this CLI extracts in-process instead — see the
         // deliberate-difference note on this object.
-        runInProcessExtraction(jarsSpec, opts.projectDir, opts.home, io)
-        captureDependencyProvenance(opts.projectDir, previousFingerprint, io)
+        val extraction = runInProcessExtraction(jarsSpec, opts, io)
+        val provenanceStarted = Instant.now()
+        captureDependencyProvenance(
+            opts.projectDir, previousFingerprint, extraction.pendingProvenance, opts, io,
+        )
+        val provenanceMs = Duration.between(provenanceStarted, Instant.now()).toMillis()
+        printExtractionStats(extraction, provenanceMs, startedAt, io)
+    }
+
+    /**
+     * The launcher-compatible stats JSON plus the phase timings agents asked
+     * for: duration_ms keeps its historical meaning (extraction pipeline,
+     * also mirrored as extract_ms), while total_ms is the whole command
+     * including build-tool classpath resolution and provenance capture.
+     */
+    private fun printExtractionStats(
+        extraction: ExtractionResult,
+        provenanceMs: Long,
+        startedAt: Instant,
+        io: CliIO,
+    ) {
+        val mapper = jacksonObjectMapper()
+        val node = mapper.valueToTree<com.fasterxml.jackson.databind.node.ObjectNode>(
+            extraction.statistics,
+        )
+        node.put("classpath_ms", extraction.classpathMs)
+        node.put("extract_ms", extraction.statistics.duration_ms)
+        node.put("provenance_ms", provenanceMs)
+        node.put("total_ms", Duration.between(startedAt, Instant.now()).toMillis())
+        io.out.println(mapper.writeValueAsString(node))
     }
 
     /**
      * The in-process stand-in for Go's indexer.Run: resolves the classpath
-     * via the build tool when no --jars was given (same stderr line), runs
-     * the extraction pipeline, and prints the stats JSON the launcher would
-     * have written to stdout (compact, one line).
+     * via the build tool when no --jars was given (same stderr line) and
+     * runs the extraction pipeline. On a Maven project with no provenance
+     * file yet, classpath resolution and the dependency tree share ONE
+     * Maven run (see [Classpath.discoverMavenWithTree]); the parsed graph
+     * rides back in [ExtractionResult.pendingProvenance] so capture can
+     * skip its own Maven process. The stats JSON is printed by the caller
+     * once provenance timing is known.
      */
-    private fun runInProcessExtraction(jarsSpec: String, projectDir: String, home: String, io: CliIO) {
+    private fun runInProcessExtraction(
+        jarsSpec: String,
+        opts: IndexCommandOptions,
+        io: CliIO,
+    ): ExtractionResult {
         try {
             var jars = jarsSpec
+            var classpathMs = 0L
+            var pending: PendingProvenance? = null
             if (jars.isEmpty()) {
-                val discovered = Classpath.discover(projectDir)
+                val discoveryStarted = Instant.now()
+                val discovered: List<String>
+                if (Classpath.isMavenProject(opts.projectDir) && !DepGraphFile.exists(opts.projectDir)) {
+                    val merged = Classpath.discoverMavenWithTree(
+                        opts.projectDir, opts.buildArgs, opts.noSnapshotUpdates,
+                    )
+                    discovered = merged.jars
+                    pending = pendingProvenanceOf(merged, opts.projectDir)
+                } else {
+                    discovered = Classpath.discover(
+                        opts.projectDir, opts.buildArgs, opts.noSnapshotUpdates,
+                    )
+                }
                 if (discovered.isEmpty()) {
                     throw RuntimeException("build tool resolved an empty runtime classpath")
                 }
+                classpathMs = Duration.between(discoveryStarted, Instant.now()).toMillis()
                 io.err.println(
                     "research4jar: resolved ${discovered.size} dependency jars from the build tool",
                 )
                 jars = discovered.joinToString(",")
             }
-            val statistics = runIndexPipeline(jars, Paths.get(projectDir), home.ifEmpty { null })
-            io.out.println(jacksonObjectMapper().writeValueAsString(statistics))
+            val statistics = runIndexPipeline(
+                jars, Paths.get(opts.projectDir), opts.home.ifEmpty { null },
+            )
+            return ExtractionResult(statistics, classpathMs, pending)
         } catch (failure: CliFailure) {
             throw failure
         } catch (exception: Exception) {
             fail(
                 "index_error",
-                errMessage(exception) + "\n\n" + doctorHint(projectDir, false),
+                errMessage(exception) + "\n\n" + doctorHint(opts.projectDir, false),
                 1,
             )
+        }
+    }
+
+    /** Folds a merged discovery's tree half into a [PendingProvenance]. */
+    private fun pendingProvenanceOf(
+        merged: Classpath.MavenDiscoveryWithTree,
+        projectDir: String,
+    ): PendingProvenance {
+        if (merged.treeFailure.isNotEmpty()) {
+            return PendingProvenance(graph = null, failure = merged.treeFailure)
+        }
+        return try {
+            PendingProvenance(
+                graph = DepGraphCapture.graphFromTgf(
+                    java.io.StringReader(merged.tgf),
+                    Paths.get(projectDir).toAbsolutePath().normalize().toString(),
+                ),
+                failure = "",
+            )
+        } catch (exception: Exception) {
+            PendingProvenance(graph = null, failure = errMessage(exception))
         }
     }
 
@@ -184,7 +284,7 @@ object IndexOrchestrator {
         val jarList: List<String>
         if (jars.isEmpty()) {
             val discovered = try {
-                Classpath.discover(opts.projectDir)
+                Classpath.discover(opts.projectDir, opts.buildArgs, opts.noSnapshotUpdates)
             } catch (exception: Exception) {
                 fail("index_error", errMessage(exception), 1)
             }
@@ -233,11 +333,12 @@ object IndexOrchestrator {
     private fun finishIndexFromRegistry(
         stats: PrefetchStats,
         dataPaths: DataPaths,
-        projectDir: String,
+        opts: IndexCommandOptions,
         previousFingerprint: String,
         startedAt: Instant,
         io: CliIO,
     ) {
+        val projectDir = opts.projectDir
         val shards = stats.shards.map { SessionShard(it.shardId, it.path) }
         val shardIds = stats.shards.map { it.shardId }
         val fingerprint = sessionFingerprint(shardIds)
@@ -270,7 +371,7 @@ object IndexOrchestrator {
         } catch (exception: Exception) {
             fail("index_error", "write CLAUDE.md guidance: ${errMessage(exception)}", 1)
         }
-        captureDependencyProvenance(projectDir, previousFingerprint, io)
+        captureDependencyProvenance(projectDir, previousFingerprint, null, opts, io)
         io.err.println(
             "research4jar: session built from cached/registry shards; no local extraction needed",
         )
@@ -296,12 +397,20 @@ object IndexOrchestrator {
     }
 
     /**
-     * Refreshes .research4jar/dependencies.json via a full
-     * `mvn dependency:tree` run; skipped when the classpath fingerprint did
-     * not change and the provenance file already exists (Go
-     * captureDependencyProvenance in main.go).
+     * Refreshes .research4jar/dependencies.json. Skipped when the classpath
+     * fingerprint did not change and the provenance file already exists (Go
+     * captureDependencyProvenance in main.go). When a merged classpath+tree
+     * run already produced the graph (or already failed to), that outcome is
+     * used as-is — never a second Maven process. Otherwise a full
+     * `mvn dependency:tree` run captures it.
      */
-    private fun captureDependencyProvenance(projectDir: String, previousFingerprint: String, io: CliIO) {
+    private fun captureDependencyProvenance(
+        projectDir: String,
+        previousFingerprint: String,
+        pending: PendingProvenance?,
+        opts: IndexCommandOptions,
+        io: CliIO,
+    ) {
         if (previousFingerprint.isNotEmpty() &&
             previousFingerprint == indexedFingerprint(projectDir) &&
             DepGraphFile.exists(projectDir)
@@ -309,13 +418,21 @@ object IndexOrchestrator {
             io.err.println("research4jar: classpath unchanged; reusing dependency provenance")
             return
         }
-        val graph = try {
-            DepGraphCapture.capture(projectDir)
-        } catch (_: DepGraphUnsupportedException) {
-            return
-        } catch (exception: Exception) {
-            io.err.println("warning: dependency provenance unavailable: ${errMessage(exception)}")
-            return
+        val graph = if (pending != null) {
+            if (pending.graph == null) {
+                io.err.println("warning: dependency provenance unavailable: ${pending.failure}")
+                return
+            }
+            pending.graph
+        } else {
+            try {
+                DepGraphCapture.capture(projectDir, opts.buildArgs, opts.noSnapshotUpdates)
+            } catch (_: DepGraphUnsupportedException) {
+                return
+            } catch (exception: Exception) {
+                io.err.println("warning: dependency provenance unavailable: ${errMessage(exception)}")
+                return
+            }
         }
         try {
             DepGraphCapture.write(projectDir, graph)
@@ -347,6 +464,7 @@ object IndexOrchestrator {
      * them into isError tool results.
      */
     fun runIndexTool(arguments: McpServer.ToolArguments): Any {
+        val startedAt = Instant.now()
         var projectDir = arguments.projectDir
         if (projectDir.isEmpty()) {
             projectDir = System.getProperty("user.dir")
@@ -364,14 +482,14 @@ object IndexOrchestrator {
             System.getenv("RESEARCH4JAR_REGISTRY_PUBKEY") ?: "",
         )
         if (registryUrl.isNotEmpty()) {
-            val outcome = prefetchForTool(registryUrl, registryPubkey, jars, projectDir, arguments.home)
+            val outcome = prefetchForTool(registryUrl, registryPubkey, jars, projectDir, arguments)
             jars = outcome.jars
             result["registry_prefetch"] = registryPrefetchSummary(outcome.stats, outcome.warnings)
             if (outcome.stats.complete) {
                 finishIndexFromRegistryTool(outcome.stats, outcome.dataPaths, projectDir)
                 result["index_mode"] = "registry"
                 result["dependency_provenance"] =
-                    captureDependencyProvenanceStatus(projectDir, previousFingerprint)
+                    captureDependencyProvenanceStatus(projectDir, previousFingerprint, null, arguments)
                 result["note"] = "Session built from cached/registry shards; query tools are " +
                     "ready without launching the JVM indexer."
                 return result
@@ -387,13 +505,28 @@ object IndexOrchestrator {
         // In-process extraction; Go wraps every indexer.Run failure (classpath
         // discovery included) in this message. The launcher-locate failure
         // mode does not exist here — --indexer is accepted but ignored.
-        try {
+        var classpathMs = 0L
+        var pending: PendingProvenance? = null
+        val statistics = try {
             var resolved = jars
             if (resolved.isEmpty()) {
-                val discovered = Classpath.discover(projectDir)
+                val discoveryStarted = Instant.now()
+                val discovered: List<String>
+                if (Classpath.isMavenProject(projectDir) && !DepGraphFile.exists(projectDir)) {
+                    val merged = Classpath.discoverMavenWithTree(
+                        projectDir, arguments.buildArgs, arguments.noSnapshotUpdates,
+                    )
+                    discovered = merged.jars
+                    pending = pendingProvenanceOf(merged, projectDir)
+                } else {
+                    discovered = Classpath.discover(
+                        projectDir, arguments.buildArgs, arguments.noSnapshotUpdates,
+                    )
+                }
                 if (discovered.isEmpty()) {
                     throw RuntimeException("build tool resolved an empty runtime classpath")
                 }
+                classpathMs = Duration.between(discoveryStarted, Instant.now()).toMillis()
                 System.err.println(
                     "research4jar: resolved ${discovered.size} dependency jars from the build tool",
                 )
@@ -409,8 +542,15 @@ object IndexOrchestrator {
                     "Call check_environment for installation guidance",
             )
         }
+        val provenanceStarted = Instant.now()
         result["dependency_provenance"] =
-            captureDependencyProvenanceStatus(projectDir, previousFingerprint)
+            captureDependencyProvenanceStatus(projectDir, previousFingerprint, pending, arguments)
+        result["timings"] = linkedMapOf(
+            "classpath_ms" to classpathMs,
+            "extract_ms" to statistics.duration_ms,
+            "provenance_ms" to Duration.between(provenanceStarted, Instant.now()).toMillis(),
+            "total_ms" to Duration.between(startedAt, Instant.now()).toMillis(),
+        )
         result["note"] = "Project pointer written to .research4jar/project.json; query tools are ready."
         return result
     }
@@ -421,13 +561,13 @@ object IndexOrchestrator {
         registryPubkey: String,
         jarsSpec: String,
         projectDir: String,
-        home: String,
+        arguments: McpServer.ToolArguments,
     ): PrefetchOutcome {
         val client = RegistryClient(registryUrl, registryPubkey)
         var jars = jarsSpec
         val jarList: List<String>
         if (jars.isEmpty()) {
-            jarList = Classpath.discover(projectDir)
+            jarList = Classpath.discover(projectDir, arguments.buildArgs, arguments.noSnapshotUpdates)
             if (jarList.isEmpty()) {
                 throw RuntimeException("build tool resolved an empty runtime classpath")
             }
@@ -435,7 +575,7 @@ object IndexOrchestrator {
         } else {
             jarList = JarSource.resolve(jars).map { it.toString() }
         }
-        val dataPaths = Research4JarPaths.resolve(home.ifEmpty { null })
+        val dataPaths = Research4JarPaths.resolve(arguments.home.ifEmpty { null })
         val manifest = Manifest(dataPaths.manifest)
         val warnings = StringBuilder()
         val stats = prefetch(
@@ -502,21 +642,31 @@ object IndexOrchestrator {
 
     /**
      * The MCP result's dependency_provenance strings (Go
-     * captureDependencyProvenance in internal/mcp/server.go).
+     * captureDependencyProvenance in internal/mcp/server.go). A merged
+     * classpath+tree outcome, when present, replaces the Maven run.
      */
-    private fun captureDependencyProvenanceStatus(projectDir: String, previousFingerprint: String): String {
+    private fun captureDependencyProvenanceStatus(
+        projectDir: String,
+        previousFingerprint: String,
+        pending: PendingProvenance?,
+        arguments: McpServer.ToolArguments,
+    ): String {
         if (previousFingerprint.isNotEmpty() &&
             previousFingerprint == indexedFingerprint(projectDir) &&
             DepGraphFile.exists(projectDir)
         ) {
             return "reused (classpath unchanged)"
         }
-        val graph = try {
-            DepGraphCapture.capture(projectDir)
-        } catch (_: DepGraphUnsupportedException) {
-            return "unsupported build tool"
-        } catch (exception: Exception) {
-            return "capture failed: ${errMessage(exception)}"
+        val graph = if (pending != null) {
+            pending.graph ?: return "capture failed: ${pending.failure}"
+        } else {
+            try {
+                DepGraphCapture.capture(projectDir, arguments.buildArgs, arguments.noSnapshotUpdates)
+            } catch (_: DepGraphUnsupportedException) {
+                return "unsupported build tool"
+            } catch (exception: Exception) {
+                return "capture failed: ${errMessage(exception)}"
+            }
         }
         return try {
             DepGraphCapture.write(projectDir, graph)
