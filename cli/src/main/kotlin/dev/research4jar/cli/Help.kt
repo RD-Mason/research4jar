@@ -252,7 +252,11 @@ Options:
 
 On a Maven project the first index resolves the classpath and the dependency
 tree in ONE Maven run; stats JSON reports classpath_ms, extract_ms,
-provenance_ms, and total_ms alongside the classic fields.""",
+provenance_ms, and total_ms alongside the classic fields. Multi-module
+reactors are supported without a prior `mvn install`: one run compiles the
+modules so sibling dependencies resolve from their build output, and the
+index covers every module's external jars (module-to-module dependencies are
+first-party code and stay out of the index).""",
     )
 }
 

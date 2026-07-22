@@ -52,16 +52,58 @@ object Classpath {
         Files.isRegularFile(Paths.get(projectDir).toAbsolutePath().normalize().resolve("pom.xml"))
 
     /**
+     * Whether the Maven project at [projectDir] aggregates modules — the
+     * shape whose classpath resolution needs the reactor flow below.
+     */
+    fun isMavenReactor(projectDir: String): Boolean {
+        val absolute = Paths.get(projectDir).toAbsolutePath().normalize()
+        return Files.isRegularFile(absolute.resolve("pom.xml")) &&
+            mavenModuleDirs(absolute).isNotEmpty()
+    }
+
+    /**
+     * All module directories declared by the pom at [root], recursively
+     * (nested aggregators included), in reactor declaration order. Modules
+     * activated only by profiles are included when their `<module>` entries
+     * are present anywhere in the pom (a superset is harmless: absent
+     * output files are simply skipped). A malformed pom yields no modules.
+     */
+    fun mavenModuleDirs(root: Path): List<Path> {
+        val seen = LinkedHashSet<Path>()
+        fun visit(dir: Path) {
+            val pom = dir.resolve("pom.xml")
+            if (!Files.isRegularFile(pom)) return
+            val modules = try {
+                val factory = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+                factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
+                val document = factory.newDocumentBuilder().parse(pom.toFile())
+                val nodes = document.getElementsByTagName("module")
+                (0 until nodes.length).map { nodes.item(it).textContent.trim() }
+            } catch (_: Exception) {
+                emptyList()
+            }
+            for (module in modules) {
+                if (module.isEmpty()) continue
+                val moduleDir = dir.resolve(module).normalize()
+                if (seen.add(moduleDir)) visit(moduleDir)
+            }
+        }
+        visit(root)
+        return seen.toList()
+    }
+
+    /**
      * One Maven run answering both questions the first index needs: the
      * runtime classpath and the dependency tree (provenance). Merging them
      * shares the JVM startup, dependency resolution, and any SNAPSHOT
      * metadata checks that a separate `dependency:tree` run would repeat.
-     * The tree half is best-effort: [tgf] is empty and [treeFailure]
-     * explains why when only the classpath came back.
+     * The tree half is best-effort: [tgfs] is empty and [treeFailure]
+     * explains why when only the classpath came back. Multi-module
+     * projects return one TGF section per reactor module.
      */
     class MavenDiscoveryWithTree(
         val jars: List<String>,
-        val tgf: String,
+        val tgfs: List<String>,
         val treeFailure: String,
     )
 
@@ -71,6 +113,10 @@ object Classpath {
         noSnapshotUpdates: Boolean = false,
     ): MavenDiscoveryWithTree {
         val absolute = Paths.get(projectDir).toAbsolutePath().normalize()
+        val modules = mavenModuleDirs(absolute)
+        if (modules.isNotEmpty()) {
+            return discoverMavenReactor(absolute, modules, buildArgs, noSnapshotUpdates, withTree = true)
+        }
         requireMaven(absolute)
         val classpathOutput = Files.createTempFile("research4jar-classpath-", ".txt")
         val treeOutput = Files.createTempFile("research4jar-dependency-tree-", ".tgf")
@@ -98,16 +144,103 @@ object Classpath {
                 }
                 return MavenDiscoveryWithTree(
                     jars = jars,
-                    tgf = "",
+                    tgfs = emptyList(),
                     treeFailure = "maven dependency tree failed: exit status ${result.exitCode}\n" +
                         tail(result.output),
                 )
             }
             val tgf = String(Files.readAllBytes(treeOutput), Charsets.UTF_8)
-            return MavenDiscoveryWithTree(jars = jars, tgf = tgf, treeFailure = "")
+            return MavenDiscoveryWithTree(jars = jars, tgfs = listOf(tgf), treeFailure = "")
         } finally {
             Files.deleteIfExists(classpathOutput)
             Files.deleteIfExists(treeOutput)
+        }
+    }
+
+    // Per-module output files for the reactor flow: relative paths resolve
+    // against each module's basedir, so one invocation captures every
+    // module without cross-module overwrites (the plugin's outputFile is
+    // last-write-wins for absolute paths, and appendOutput does not append
+    // across modules in maven-dependency-plugin 3.7.0 — verified).
+    private const val REACTOR_CLASSPATH_FILE = "target/research4jar-classpath.txt"
+    private const val REACTOR_TREE_FILE = "target/research4jar-tree.tgf"
+
+    /**
+     * Classpath (and optionally tree) discovery for a multi-module reactor,
+     * WITHOUT requiring a prior `mvn install`: running the `compile` phase
+     * first lets Maven's reactor reader satisfy sibling-module dependencies
+     * from their `target/classes` directories, which the `.jar` filter then
+     * naturally excludes — the index covers external dependencies only,
+     * exactly as for single-module projects. External jars come back as
+     * Maven's own resolved absolute paths (SNAPSHOT/classifier safe).
+     */
+    private fun discoverMavenReactor(
+        projectDir: Path,
+        modules: List<Path>,
+        buildArgs: List<String>,
+        noSnapshotUpdates: Boolean,
+        withTree: Boolean,
+    ): MavenDiscoveryWithTree {
+        requireMaven(projectDir)
+        val moduleDirs = listOf(projectDir) + modules
+        fun cleanup() {
+            for (dir in moduleDirs) {
+                try {
+                    Files.deleteIfExists(dir.resolve(REACTOR_CLASSPATH_FILE))
+                    Files.deleteIfExists(dir.resolve(REACTOR_TREE_FILE))
+                } catch (_: Exception) {
+                    // Best-effort: a leftover file inside target/ is inert.
+                }
+            }
+        }
+        cleanup() // stale files from an aborted earlier run must not leak in
+        try {
+            val args = mutableListOf(
+                "-q", "-DincludeScope=runtime", "compile",
+                "dependency:build-classpath",
+                "-Dmdep.outputFile=$REACTOR_CLASSPATH_FILE",
+            )
+            if (withTree) {
+                args += listOf(
+                    "-Dscope=runtime", "dependency:tree",
+                    "-DoutputType=tgf", "-DoutputFile=$REACTOR_TREE_FILE",
+                )
+            }
+            args += mavenSnapshotArgs(noSnapshotUpdates) + buildArgs
+            val result = runBuildCommand(projectDir, "mvnw", "mvn", args)
+            if (result.exitCode != 0) {
+                throw RuntimeException(
+                    "maven classpath resolution failed: exit status ${result.exitCode}\n" +
+                        tail(result.output),
+                )
+            }
+            val jars = LinkedHashSet<String>()
+            for (dir in moduleDirs) {
+                val file = dir.resolve(REACTOR_CLASSPATH_FILE)
+                if (!Files.isRegularFile(file)) continue
+                val raw = String(Files.readAllBytes(file), Charsets.UTF_8).trim()
+                filterJars(raw.split(File.pathSeparator)).forEach { jars += it }
+            }
+            val tgfs = if (withTree) {
+                moduleDirs.mapNotNull { dir ->
+                    val file = dir.resolve(REACTOR_TREE_FILE)
+                    if (Files.isRegularFile(file)) {
+                        String(Files.readAllBytes(file), Charsets.UTF_8).takeIf { it.isNotBlank() }
+                    } else {
+                        null
+                    }
+                }
+            } else {
+                emptyList()
+            }
+            val treeFailure = if (withTree && tgfs.isEmpty()) {
+                "maven dependency tree produced no output"
+            } else {
+                ""
+            }
+            return MavenDiscoveryWithTree(jars.toList(), tgfs, treeFailure)
+        } finally {
+            cleanup()
         }
     }
 
@@ -116,6 +249,10 @@ object Classpath {
         buildArgs: List<String>,
         noSnapshotUpdates: Boolean,
     ): List<String> {
+        val modules = mavenModuleDirs(projectDir)
+        if (modules.isNotEmpty()) {
+            return discoverMavenReactor(projectDir, modules, buildArgs, noSnapshotUpdates, withTree = false).jars
+        }
         requireMaven(projectDir)
         val output = Files.createTempFile("research4jar-classpath-", ".txt")
         try {

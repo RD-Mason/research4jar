@@ -78,6 +78,43 @@ object DepGraphCapture {
         )
 
     /**
+     * One graph from one-TGF-per-reactor-module sections: artifacts are
+     * deduplicated by coordinate keeping the shallowest occurrence, so each
+     * module coordinate stays a depth-0 root even where sibling modules
+     * also list it as a dependency, and shared external artifacts keep
+     * their shortest path. Section order is reactor order; ties keep the
+     * first section's entry. Sorting matches [parseTGF].
+     */
+    fun graphFromTgfSections(sections: List<String>, projectRoot: String): Graph {
+        require(sections.isNotEmpty()) { "maven dependency tree was empty" }
+        val graphs = sections.map { parseTGF(java.io.StringReader(it)) }
+        if (graphs.size == 1) {
+            return graphs[0].copy(
+                projectRoot = projectRoot,
+                generatedAt = Instant.now().epochSecond,
+            )
+        }
+        val byCoordinate = LinkedHashMap<String, Artifact>()
+        for (graph in graphs) {
+            for (artifact in graph.artifacts) {
+                val existing = byCoordinate[artifact.coordinate]
+                if (existing == null || artifact.depth < existing.depth) {
+                    byCoordinate[artifact.coordinate] = artifact
+                }
+            }
+        }
+        val artifacts = byCoordinate.values
+            .sortedWith(compareBy({ it.depth }, { it.coordinate }))
+        return Graph(
+            schemaVersion = DepGraphFile.SCHEMA_VERSION,
+            buildTool = "maven",
+            generatedAt = Instant.now().epochSecond,
+            projectRoot = projectRoot,
+            artifacts = artifacts,
+        )
+    }
+
+    /**
      * Stores the graph under .research4jar/dependencies.json: Go
      * json.MarshalIndent (two-space, HTML-escaped) plus a trailing newline,
      * written to a same-directory temp file and atomically renamed.

@@ -213,7 +213,7 @@ object IndexOrchestrator {
             if (jars.isEmpty()) {
                 val discoveryStarted = Instant.now()
                 val discovered: List<String>
-                if (Classpath.isMavenProject(opts.projectDir) && !DepGraphFile.exists(opts.projectDir)) {
+                if (wantsMergedMavenDiscovery(opts.projectDir)) {
                     val merged = Classpath.discoverMavenWithTree(
                         opts.projectDir, opts.buildArgs, opts.noSnapshotUpdates,
                     )
@@ -258,8 +258,8 @@ object IndexOrchestrator {
         }
         return try {
             PendingProvenance(
-                graph = DepGraphCapture.graphFromTgf(
-                    java.io.StringReader(merged.tgf),
+                graph = DepGraphCapture.graphFromTgfSections(
+                    merged.tgfs,
                     Paths.get(projectDir).toAbsolutePath().normalize().toString(),
                 ),
                 failure = "",
@@ -268,6 +268,17 @@ object IndexOrchestrator {
             PendingProvenance(graph = null, failure = errMessage(exception))
         }
     }
+
+    /**
+     * When classpath discovery should also carry the provenance tree in the
+     * same Maven run: any first index (no provenance file yet), and ALWAYS
+     * on a multi-module reactor — there the per-module tree files ride the
+     * one reactor invocation for free, and a standalone `dependency:tree`
+     * at the root would capture only the last module's graph.
+     */
+    private fun wantsMergedMavenDiscovery(projectDir: String): Boolean =
+        Classpath.isMavenProject(projectDir) &&
+            (!DepGraphFile.exists(projectDir) || Classpath.isMavenReactor(projectDir))
 
     /**
      * Downloads missing shards before extraction so it hits the local cache
@@ -512,7 +523,7 @@ object IndexOrchestrator {
             if (resolved.isEmpty()) {
                 val discoveryStarted = Instant.now()
                 val discovered: List<String>
-                if (Classpath.isMavenProject(projectDir) && !DepGraphFile.exists(projectDir)) {
+                if (wantsMergedMavenDiscovery(projectDir)) {
                     val merged = Classpath.discoverMavenWithTree(
                         projectDir, arguments.buildArgs, arguments.noSnapshotUpdates,
                     )
