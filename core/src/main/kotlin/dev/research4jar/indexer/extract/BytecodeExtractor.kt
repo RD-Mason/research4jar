@@ -38,6 +38,7 @@ class BytecodeExtractor(
             .filter { !it.name.startsWith("META-INF/versions/") }
             .sortedBy { it.name }
             .forEach { entry ->
+                dev.research4jar.runtime.OperationContext.checkCancelled()
                 try {
                     val bytes = zip.getInputStream(entry).use { it.readBytes() }
                     ClassReader(bytes).accept(

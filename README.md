@@ -47,6 +47,8 @@ claude mcp add research4jar -- research4jar mcp
 
 The recommended agent flow: `project_status` (is there an index? what does it cover?) → `search_symbols` (broad) → `open_symbol` (expand one hit) → `dependency_precise` / `class_origin` for "which jar owns this and where does the project consume it" → `get_source` to read the implementation itself. `check_environment` mirrors `research4jar doctor --format json` for automated setup.
 
+MCP keeps accepting queries and `ping` while indexing or reading sources. Tool calls run in bounded queues, with separate workers for ordinary queries, source/detail reads, and builds. Hosts can cancel queued or running requests with `notifications/cancelled`; supplying `_meta.progressToken` on a tool call enables progress notifications. Cancellation interrupts active SQLite queries and build processes, and cancelled calls do not publish a result. On Java 9+, build cancellation also terminates discovered child processes; Java 8 falls back to terminating the wrapper process.
+
 ## What can I ask?
 
 Start from the task, not the command:
@@ -74,6 +76,8 @@ Start from the task, not the command:
 | Plain class/method/package search | `find-class`, `find-method`, `list-packages` |
 
 All query commands take `--format json|text` and `--project-dir`; search/list commands page with `--page`/`--page-size` (max 1000 rows per page) and report `has_more`. Every JSON response carries a `coverage` block (`jars_total` / `jars_indexed` / `jars_missing`) so an empty result is distinguishable from an unindexed jar — trust it when interpreting "not found".
+
+`dep precise`, `class`, and `artifact` automatically reuse unchanged project-source content and results in daemon/MCP sessions. Every call checks the file inventory (size, modification time, and file identity), so ordinary edits, additions, deletions, and renames invalidate the cache without a watcher delay. Source scanning has a shared 20,000-file / 1.5-second budget across both match tiers. Check `source_usages_truncated_reason` separately from JAR `coverage`; `--no-source-grep` skips source scanning when only dependency facts are needed. Caches are process-local, bounded, and require no setup.
 
 ## How it works
 
@@ -165,6 +169,8 @@ Downloads verify against a checksum sidecar, the shard's embedded jar identity, 
 make test    # all module tests
 make e2e     # golden end-to-end suite (fixtures, determinism, registry, daemon, MCP)
 ```
+
+`tests/benchmark.py` measures MCP query P50/P95 in an isolated temporary project and checks that new source files are visible after cache warmup. CI records this benchmark after e2e; see [the performance notes](docs/performance.md) for the command and measurement conditions.
 
 ## Project history
 

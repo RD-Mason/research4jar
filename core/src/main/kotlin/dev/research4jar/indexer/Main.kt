@@ -318,6 +318,7 @@ private fun executeIndex(options: Options): IndexStatistics {
         } else if (futuresByShardId.isNotEmpty() && sessionMissing) {
             sessionBuilder.openStream(dataPaths.sessions).use { stream ->
                 for (shardId in expectedShardIds) {
+                    dev.research4jar.runtime.OperationContext.progress("merging dependency shards")
                     val shard = cachedShardsById[shardId]
                         ?: collectOutcome(futuresByShardId.getValue(shardId).get())
                         ?: continue
@@ -340,8 +341,9 @@ private fun executeIndex(options: Options): IndexStatistics {
             futuresByShardId.values.forEach { future -> collectOutcome(future.get()) }
         }
     } finally {
-        executor.shutdown()
+        executor.shutdownNow()
     }
+    dev.research4jar.runtime.OperationContext.checkCancelled()
     manifest.touch(cacheHits)
 
     val fingerprint = sessionFingerprint(selectedShards.map(SessionShard::shardId))
@@ -357,6 +359,7 @@ private fun executeIndex(options: Options): IndexStatistics {
         jars_indexed = jarsIndexed,
         jars_missing = missing.sorted(),
     )
+    dev.research4jar.runtime.OperationContext.checkCancelled()
     ProjectPointer.write(
         options.projectDir,
         ProjectIndex(
@@ -608,6 +611,7 @@ private fun sweepStaleSessions(dataPaths: DataPaths) {
 }
 
 private fun progress(message: String) {
+    dev.research4jar.runtime.OperationContext.progress(message)
     System.err.println("research4jar-index: $message")
 }
 

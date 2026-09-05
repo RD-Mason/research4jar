@@ -2,7 +2,6 @@ package dev.research4jar.cli
 
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.core.JsonGenerator
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import dev.research4jar.envcheck.EnvCheck
 import dev.research4jar.query.ProjectIndex
@@ -29,7 +28,6 @@ import dev.research4jar.query.projectStatus
 import dev.research4jar.query.searchSource
 import dev.research4jar.query.searchSymbol
 import dev.research4jar.query.whyDependency
-import java.io.BufferedReader
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -44,34 +42,14 @@ object McpServer {
     private const val SERVER_NAME = "research4jar"
 
     private val mapper: ObjectMapper = jacksonObjectMapper()
+    private val catalog by lazy { buildToolCatalog() }
+    private val toolsByName by lazy { catalog.associateBy { it["name"] } }
 
     fun serve(stdin: InputStream, stdout: OutputStream) {
-        val reader: BufferedReader = stdin.bufferedReader()
-        mapper.factory.createGenerator(stdout).use { writer ->
-            writer.disable(JsonGenerator.Feature.AUTO_CLOSE_TARGET)
-            while (true) {
-                val line = reader.readLine() ?: return
-                if (line.isBlank()) continue
-                val reply = handleLine(line.trim()) ?: continue
-                mapper.writeValue(writer, reply)
-                writer.writeRaw('\n')
-                writer.flush()
-            }
-        }
+        McpTransport(mapper, ::handleMessage).serve(stdin, stdout)
     }
 
-    private fun handleLine(line: String): Map<String, Any?>? {
-        val incoming: JsonNode = try {
-            mapper.readTree(line)
-        } catch (exception: Exception) {
-            return mapOf(
-                "jsonrpc" to "2.0",
-                "error" to mapOf(
-                    "code" to -32700,
-                    "message" to "parse error: ${exception.message}",
-                ),
-            )
-        }
+    private fun handleMessage(incoming: JsonNode): Map<String, Any?>? {
         val id = incoming.get("id") ?: return null // notification: no response
         val method = incoming.get("method")?.asText() ?: ""
         val params = incoming.get("params")
@@ -87,7 +65,7 @@ object McpServer {
             )
 
             "ping" -> reply["result"] = emptyMap<String, Any>()
-            "tools/list" -> reply["result"] = mapOf("tools" to toolCatalog())
+            "tools/list" -> reply["result"] = mapOf("tools" to catalog)
             "tools/call" -> reply["result"] = callTool(params)
             else -> reply["error"] = mapOf(
                 "code" to -32601,
@@ -210,7 +188,7 @@ object McpServer {
 
     @Suppress("UNCHECKED_CAST")
     private fun validateArguments(name: String, node: JsonNode?): String? {
-        val definition = toolCatalog().firstOrNull { it["name"] == name }
+        val definition = toolsByName[name]
             ?: return "unknown tool: $name"
         if (node != null && !node.isObject) return "arguments must be an object"
 
@@ -396,7 +374,7 @@ object McpServer {
     private fun firstNonEmpty(vararg values: String): String =
         values.firstOrNull { it.isNotEmpty() } ?: ""
 
-    private fun toolCatalog(): List<Map<String, Any?>> {
+    private fun buildToolCatalog(): List<Map<String, Any?>> {
         val projectDir = mapOf(
             "type" to "string",
             "description" to "Spring project root (directory containing .research4jar). " +

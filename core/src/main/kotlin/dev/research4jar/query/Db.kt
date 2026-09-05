@@ -15,6 +15,7 @@ import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 import org.sqlite.SQLiteConfig
+import dev.research4jar.runtime.OperationContext
 
 /**
  * Read-only SQLite access for the query engine (xerial sqlite-jdbc). Session
@@ -135,8 +136,12 @@ object Db {
 /** Binds args by position and runs the query through [consume]. */
 fun <T> Connection.query(sql: String, args: List<Any?>, consume: (ResultSet) -> T): T =
     prepareStatement(sql).use { statement ->
+        OperationContext.checkCancelled()
         statement.bindAll(args)
-        statement.executeQuery().use(consume)
+        OperationContext.onCancel { statement.cancel() }.use {
+            OperationContext.checkCancelled()
+            statement.executeQuery().use(consume)
+        }
     }
 
 /** Runs a COUNT-style query returning the first column of the first row. */
@@ -163,6 +168,7 @@ fun PreparedStatement.bindAll(args: List<Any?>) {
 fun <T> ResultSet.mapRows(scan: (ResultSet) -> T): List<T> {
     val results = mutableListOf<T>()
     while (next()) {
+        OperationContext.checkCancelled()
         results += scan(this)
     }
     return results

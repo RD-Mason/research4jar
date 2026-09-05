@@ -101,6 +101,10 @@ object Daemon {
         "class", "method", "status", "get-source", "search-source",
     )
 
+    // Source cache writers and unpaged class expansions share a lane to bound heap use.
+    // Ordinary read-only queries can use the other already-bounded response slot concurrently.
+    private val HEAVY_COMMANDS = setOf("get-source", "search-source", "get-class", "open-symbol")
+
     /** Injectable daemon runtime used by the loopback integration tests. */
     internal data class RuntimeConfig(
         val directory: Path,
@@ -1126,9 +1130,9 @@ object Daemon {
             val responseBudget = SharedResponseBudget(config.maxResponseBytes)
             val stdout = BoundedCaptureOutputStream(responseBudget)
             val stderr = BoundedCaptureOutputStream(responseBudget)
-            // Query execution stays serialized, while path resolution uses an
-            // explicit request context instead of the ineffective user.dir hack.
-            val code = synchronized(requestLock) {
+            // Each request owns its connections and working-directory context. Retain serialization
+            // for expensive/source-writing commands; a source read must not block a point lookup.
+            val execute = {
                 try {
                     WorkingDirectoryContext.withDirectory(cwd) {
                         runCommand(
@@ -1143,6 +1147,7 @@ object Daemon {
                     1
                 }
             }
+            val code = if (argv[0] in HEAVY_COMMANDS) synchronized(requestLock) { execute() } else execute()
 
             // PrintStream deliberately swallows IOExceptions, so overflow is an
             // explicit shared flag rather than an exception. No toByteArray copy is

@@ -5,6 +5,8 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.TimeUnit
+import dev.research4jar.runtime.BuildProcess
+import dev.research4jar.runtime.OperationContext
 
 /**
  * Discovers a project's runtime dependency jars by asking its own build tool
@@ -326,6 +328,14 @@ object Classpath {
         wrapper: String,
         fallback: String,
         args: List<String>,
+    ): CommandResult = runBuildCommand(projectDir, wrapper, fallback, args, TimeUnit.MINUTES.toMillis(30))
+
+    internal fun runBuildCommand(
+        projectDir: Path,
+        wrapper: String,
+        fallback: String,
+        args: List<String>,
+        timeoutMs: Long,
     ): CommandResult {
         val windows = System.getProperty("os.name").lowercase().startsWith("windows")
         val command = if (windows) {
@@ -344,18 +354,9 @@ object Classpath {
                 listOf(fallback) + args
             }
         }
-        val process = ProcessBuilder(command)
-            .directory(projectDir.toFile())
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().readText()
-        // The build tool owns its own timeouts; this guard only prevents a
-        // wedged wrapper from hanging the CLI forever.
-        if (!process.waitFor(30, TimeUnit.MINUTES)) {
-            process.destroyForcibly()
-            return CommandResult(exitCode = -1, output = output)
-        }
-        return CommandResult(process.exitValue(), output)
+        OperationContext.progress("Resolving dependencies with $fallback")
+        val result = BuildProcess.run(command, projectDir, timeoutMs)
+        return CommandResult(result.exitCode, result.output)
     }
 
     private fun requireWrapperOrTool(

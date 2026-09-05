@@ -195,7 +195,7 @@ class DaemonTest {
         val failure = AtomicReference<Throwable?>()
         val firstThread = thread(start = true, name = "r4j-slow-client") {
             try {
-                first.set(request(config, root, "status", "slow"))
+                first.set(request(config, root, "get-source", "slow"))
             } catch (throwable: Throwable) {
                 failure.compareAndSet(null, throwable)
             }
@@ -203,7 +203,7 @@ class DaemonTest {
         assertTrue(slowStarted.await(1, TimeUnit.SECONDS))
         val secondThread = thread(start = true, name = "r4j-queued-client") {
             try {
-                second.set(request(config, root, "status", "second"))
+                second.set(request(config, root, "get-source", "second"))
             } catch (throwable: Throwable) {
                 failure.compareAndSet(null, throwable)
             }
@@ -219,9 +219,38 @@ class DaemonTest {
         failure.get()?.let { throw AssertionError("concurrent daemon request failed", it) }
         assertEquals("slow", first.get()?.stdout)
         assertEquals("second", second.get()?.stdout)
-        assertEquals(1, maxActiveCommands.get(), "runCli must remain serialized")
+        assertEquals(1, maxActiveCommands.get(), "expensive source commands must remain serialized")
 
         assertEquals("after", request(config, root, "status", "after").stdout)
+        server.awaitCleanExit()
+    }
+
+    @Test
+    fun `point lookup finishes while a source request is still running`() {
+        val root = Files.createTempDirectory("r4j-daemon-query-lanes")
+        val config = config(root.resolve("daemon"), "lanes-build")
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val server = startServer(config) { argv, out, _ ->
+            if (argv[0] == "get-source") {
+                started.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+            }
+            out.print(argv[0])
+            0
+        }
+        awaitEndpoint(config)
+        val response = AtomicReference<Response?>()
+        val source = thread(isDaemon = true) { response.set(request(config, root, "get-source", "Example")) }
+        try {
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            assertEquals("find-class", request(config, root, "find-class", "Example").stdout)
+            assertTrue(source.isAlive, "the lookup should complete before the source command is released")
+        } finally {
+            release.countDown()
+            source.join(2000)
+        }
+        assertEquals("get-source", response.get()?.stdout)
         server.awaitCleanExit()
     }
 

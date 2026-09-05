@@ -2,18 +2,11 @@ package dev.research4jar.query
 
 import com.fasterxml.jackson.annotation.JsonInclude
 import com.fasterxml.jackson.annotation.JsonProperty
-import java.io.File
-import java.nio.file.FileVisitResult
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
-import java.nio.file.SimpleFileVisitor
-import java.nio.file.attribute.BasicFileAttributes
 
 /**
  * dep precise / artifact / class origin queries, ported from
- * querier/internal/query/dependency_precise.go. JSON key sets, SQL, and the
- * bounded source-grep budgets must stay identical to the Go querier.
+ * querier/internal/query/dependency_precise.go. JSON key sets and SQL retain
+ * compatibility; source usages use a bounded incremental in-process index.
  */
 data class DependencyOrigin(
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
@@ -176,7 +169,7 @@ private fun dependencyPrecise(
     val usageQuery = sourceUsageQueryFor(lookup, origins)
     if (includeSourceUsages && usageQuery.all.isNotEmpty()) {
         try {
-            val scan = findSourceUsages(projectDir, usageQuery, pageSize)
+            val scan = SourceUsageIndexes.find(projectDir, usageQuery.highSignal, usageQuery.broad, pageSize)
             sourceUsageTerms = usageQuery.all
             sourceUsages = scan.usages
             sourceUsagesHasMore = scan.hasMore
@@ -526,221 +519,6 @@ private fun broadSourceUsageTerms(
         }
     }
     return dedupeNonEmptyStrings(terms)
-}
-
-private const val MAX_SOURCE_USAGE_FILE_BYTES = 2L * 1024 * 1024
-private const val SOURCE_USAGE_FILE_BUDGET = 2000
-private const val SOURCE_USAGE_TIME_BUDGET_NANOS = 1500L * 1_000_000
-
-private class SourceUsageScan(
-    val usages: List<SourceUsage>,
-    val hasMore: Boolean,
-    val truncatedReason: String,
-)
-
-private fun findSourceUsages(
-    projectDir: String,
-    query: SourceUsageQuery,
-    limit: Int,
-): SourceUsageScan {
-    if (projectDir.isEmpty()) {
-        return SourceUsageScan(emptyList(), false, "")
-    }
-    val state = SourceUsageScanState(
-        projectDir = projectDir,
-        limit = limitOrDefault(limit),
-        deadlineNanos = System.nanoTime() + SOURCE_USAGE_TIME_BUDGET_NANOS,
-    )
-    for (phase in listOf(
-        SourceUsagePhase(name = "high_signal", terms = query.highSignal),
-        SourceUsagePhase(name = "broad", terms = query.broad),
-    )) {
-        if (state.usages.size > state.limit || state.truncatedReason.isNotEmpty()) {
-            break
-        }
-        if (phase.terms.isEmpty()) {
-            continue
-        }
-        scanSourceUsagePhase(state, phase)
-    }
-    val hasMore = state.usages.size > state.limit
-    val usages: List<SourceUsage> = if (hasMore) state.usages.take(state.limit) else state.usages
-    return SourceUsageScan(usages, hasMore, state.truncatedReason)
-}
-
-private class SourceUsagePhase(
-    val name: String,
-    val terms: List<String>,
-)
-
-private class SourceUsageScanState(
-    val projectDir: String,
-    val limit: Int,
-    val deadlineNanos: Long,
-) {
-    var filesVisited = 0
-    val seen = mutableSetOf<String>()
-    val usages = mutableListOf<SourceUsage>()
-    var truncatedReason = ""
-}
-
-// Go walks with filepath.WalkDir and a single callback; here the leading
-// budget checks run in both preVisitDirectory and visitFile, fs.SkipAll maps
-// to TERMINATE, and filepath.SkipDir maps to SKIP_SUBTREE.
-private fun scanSourceUsagePhase(state: SourceUsageScanState, phase: SourceUsagePhase) {
-    val terms = dedupeNonEmptyStrings(phase.terms)
-    if (terms.isEmpty()) {
-        return
-    }
-    Files.walkFileTree(
-        Paths.get(state.projectDir),
-        object : SimpleFileVisitor<Path>() {
-            override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
-                sourceUsageBudgetStop(state)?.let { return it }
-                if (shouldSkipSourceUsageDir(dir.fileName?.toString() ?: "")) {
-                    return FileVisitResult.SKIP_SUBTREE
-                }
-                return FileVisitResult.CONTINUE
-            }
-
-            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                sourceUsageBudgetStop(state)?.let { return it }
-                if (!sourceUsageFile(file)) {
-                    return FileVisitResult.CONTINUE
-                }
-                state.filesVisited++
-                if (state.filesVisited > SOURCE_USAGE_FILE_BUDGET) {
-                    state.truncatedReason = "file_budget"
-                    return FileVisitResult.TERMINATE
-                }
-                if (attrs.size() > MAX_SOURCE_USAGE_FILE_BYTES) {
-                    return FileVisitResult.CONTINUE
-                }
-                state.usages += scanSourceUsageFile(
-                    state.projectDir,
-                    file,
-                    terms,
-                    state.limit + 1 - state.usages.size,
-                    state.seen,
-                )
-                if (state.usages.size > state.limit) {
-                    return FileVisitResult.TERMINATE
-                }
-                return FileVisitResult.CONTINUE
-            }
-        },
-    )
-}
-
-private fun sourceUsageBudgetStop(state: SourceUsageScanState): FileVisitResult? {
-    if (state.truncatedReason.isNotEmpty() || state.usages.size > state.limit) {
-        return FileVisitResult.TERMINATE
-    }
-    if (System.nanoTime() - state.deadlineNanos > 0) {
-        state.truncatedReason = "time_budget"
-        return FileVisitResult.TERMINATE
-    }
-    return null
-}
-
-// Go prefilters on raw bytes; decoding once as UTF-8 keeps the prefilter and
-// the per-line matches consistent, and byte-level vs code-unit-level contains
-// agree on valid UTF-8 because the encoding is self-synchronizing.
-private fun scanSourceUsageFile(
-    projectDir: String,
-    path: Path,
-    terms: List<String>,
-    limit: Int,
-    seen: MutableSet<String>,
-): List<SourceUsage> {
-    if (limit <= 0) {
-        return emptyList()
-    }
-    val content = Files.readAllBytes(path)
-    if (content.contains(0.toByte())) {
-        return emptyList()
-    }
-    val text = String(content, Charsets.UTF_8)
-    if (!contentContainsAny(text, terms)) {
-        return emptyList()
-    }
-    val lines = text.split("\n")
-    val relative = try {
-        Paths.get(projectDir).relativize(path).toString()
-    } catch (_: IllegalArgumentException) {
-        path.toString()
-    }.replace(File.separatorChar, '/')
-    val usages = mutableListOf<SourceUsage>()
-    for ((index, line) in lines.withIndex()) {
-        val match = firstLineMatch(line, terms)
-        if (match.isEmpty()) {
-            continue
-        }
-        val key = relative + "\u0000" + (index + 1)
-        if (!seen.add(key)) {
-            continue
-        }
-        usages += SourceUsage(
-            path = relative,
-            line = index + 1,
-            match = match,
-            text = trimUsageLine(line),
-        )
-        if (usages.size >= limit) {
-            break
-        }
-    }
-    return usages
-}
-
-private fun contentContainsAny(content: String, terms: List<String>): Boolean {
-    for (term in terms) {
-        if (term.isNotEmpty() && content.contains(term)) {
-            return true
-        }
-    }
-    return false
-}
-
-private fun firstLineMatch(line: String, terms: List<String>): String {
-    for (term in terms) {
-        if (term.isNotEmpty() && line.contains(term)) {
-            return term
-        }
-    }
-    return ""
-}
-
-// Go slices the first 240 bytes; slicing the UTF-8 bytes and re-decoding
-// reproduces the U+FFFD replacement Go's JSON encoder applies to a cut that
-// lands inside a multi-byte code point.
-private fun trimUsageLine(line: String): String {
-    val text = line.trim()
-    val maxLine = 240
-    val bytes = text.toByteArray(Charsets.UTF_8)
-    if (bytes.size <= maxLine) {
-        return text
-    }
-    return String(bytes, 0, maxLine, Charsets.UTF_8)
-}
-
-private val sourceUsageSkipDirs = setOf(
-    ".git", ".gradle", ".idea", ".mvn", ".research4jar", ".settings", ".vscode",
-    "build", "coverage", "dist", "generated", "generated-sources",
-    "generated-test-sources", "node_modules", "out", "target",
-)
-
-private fun shouldSkipSourceUsageDir(name: String): Boolean = name in sourceUsageSkipDirs
-
-private val sourceUsageExtensions = setOf(
-    ".java", ".kt", ".kts", ".groovy", ".scala", ".xml", ".gradle", ".properties", ".yml", ".yaml",
-)
-
-/** Go filepath.Ext: the suffix from the final dot in the last path element. */
-private fun sourceUsageFile(path: Path): Boolean {
-    val name = path.fileName?.toString() ?: return false
-    val index = name.lastIndexOf('.')
-    return index >= 0 && name.substring(index) in sourceUsageExtensions
 }
 
 private fun dedupeOrigins(origins: List<DependencyOrigin>): List<DependencyOrigin> {

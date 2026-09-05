@@ -5,6 +5,7 @@ import org.benf.cfr.reader.api.OutputSinkFactory
 import org.benf.cfr.reader.api.SinkReturns
 import java.nio.file.Path
 import java.util.regex.Pattern
+import dev.research4jar.runtime.OperationContext
 
 /**
  * CFR-backed decompilation for the source-retrieval fallback. All output is
@@ -51,6 +52,7 @@ internal object SourceDecompiler {
     }
 
     private fun drive(jar: Path, jarFilter: String?, emit: (String, String) -> Unit) {
+        OperationContext.progress("Decompiling ${jar.fileName}")
         val sinkFactory = object : OutputSinkFactory {
             override fun getSupportedSinks(
                 sinkType: OutputSinkFactory.SinkType,
@@ -75,6 +77,7 @@ internal object SourceDecompiler {
                     sinkClass == OutputSinkFactory.SinkClass.DECOMPILED
                 ) {
                     val sink = OutputSinkFactory.Sink<SinkReturns.Decompiled> { decompiled ->
+                        OperationContext.checkCancelled()
                         val fqn = if (decompiled.packageName.isEmpty()) {
                             decompiled.className
                         } else {
@@ -84,7 +87,7 @@ internal object SourceDecompiler {
                     }
                     return sink as OutputSinkFactory.Sink<T>
                 }
-                return OutputSinkFactory.Sink { }
+                return OutputSinkFactory.Sink { OperationContext.checkCancelled() }
             }
         }
         val options = HashMap<String, String>()

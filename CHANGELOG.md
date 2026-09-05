@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project intends to follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- MCP tool calls run in bounded query/source/build queues while the stdio reader continues serving ping and cancellation. Cancelled requests do not publish responses; active SQLite queries and build processes register cancellation actions. Optional progress-token notifications are rate-limited. The tool catalog is cached instead of rebuilt for every call.
+- Daemon point lookups can execute alongside source retrieval while existing response/memory limits remain in place; source writers and unpaged class expansions retain a serialized lane.
+- Dependency source usages reuse unchanged file content and query results in bounded process-local caches, with the file inventory refreshed on every call. Both matching tiers share a single content pass and a 20,000-file budget, fixing broad matches lost to the former shared 2,000-file traversal budget. The local 2,105-file probe improved warm default-query P50 from 53.3 to 8.9 ms while covering the entire fixture.
+- Added an isolated MCP benchmark script and CI latency/freshness recording; conditions and resource bounds are documented in `docs/performance.md`.
+
+### Fixed
+
+- Build-command deadlines now run while stdout is drained, instead of waiting for EOF before starting the timeout. Diagnostic output is bounded while preserving Gradle classpath markers. Cancellation terminates the wrapper and, on Java 9+, discovered descendants.
+- Interrupted extraction shuts down pending workers and checks cancellation before publishing the project pointer.
+
 ## [0.4.0] - 2026-07-23
 
 ### Added
